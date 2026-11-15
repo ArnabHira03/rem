@@ -73,3 +73,29 @@ def test_parallel_clients_reads_and_writes(daemon_env):
     with ThreadPoolExecutor(8) as ex:
         results = list(ex.map(work, range(40)))
     assert all(results) and len(RemClient(daemon_env.sock).list()) == 40
+
+
+def test_non_json_server_error_is_a_daemon_error(daemon_env):
+    import httpx
+    import pytest
+
+    from rem.errors import RemError
+
+    c = RemClient(daemon_env.sock)
+    c._http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500, text="Internal Server Error")),
+                           base_url="http://rem")
+    with pytest.raises(RemError, match="daemon.log") as e:
+        c.list()
+    assert not isinstance(e.value, ValueError)
+
+
+def test_slow_first_start_says_still_starting(daemon_env, monkeypatch):
+    import pytest
+
+    from rem.client import DaemonUnavailable, ensure_daemon
+    from rem.config import load_config
+
+    cfg = load_config()
+    cfg = cfg.model_copy(update={"daemon": cfg.daemon.model_copy(update={"start_timeout_seconds": 0.0})})
+    with pytest.raises(DaemonUnavailable, match="still starting"):
+        ensure_daemon(cfg)

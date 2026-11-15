@@ -11,6 +11,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("rem.worker")
 
+ERROR_BACKOFF_SECONDS = 5.0
+
 
 class JobHandler(Protocol):
     async def handle(self, job: Job, turns: list[Turn], context: list[Turn], service: "RemService") -> None:
@@ -31,16 +33,22 @@ class Worker:
     async def run(self, stop: asyncio.Event) -> None:
         q, store = self.service.ingest_store, self.service.store
         while not stop.is_set():
-            job = await store.run(q.claim)
-            if job is None:
-                try:
-                    await asyncio.wait_for(stop.wait(), self.poll_seconds)
-                except TimeoutError:
-                    pass
-                continue
-            turns = await store.run(q.messages_for, job.id)
-            context = await store.run(q.context_for, job.id)
-            await self._process(job, turns, context, stop)
+            try:
+                job = await store.run(q.claim)
+                if job is not None:
+                    turns = await store.run(q.messages_for, job.id)
+                    context = await store.run(q.context_for, job.id)
+                    await self._process(job, turns, context, stop)
+                    continue
+                delay = self.poll_seconds
+            except Exception:
+                # Never let the worker die silently while the daemon keeps serving.
+                log.exception("worker error; retrying in %ss", ERROR_BACKOFF_SECONDS)
+                delay = ERROR_BACKOFF_SECONDS
+            try:
+                await asyncio.wait_for(stop.wait(), delay)
+            except TimeoutError:
+                pass
 
     async def _process(self, job: Job, turns: list[Turn], context: list[Turn], stop: asyncio.Event) -> None:
         q, store = self.service.ingest_store, self.service.store

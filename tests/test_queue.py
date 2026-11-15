@@ -121,3 +121,43 @@ def test_recover_at_startup_resets_unexpired_processing_jobs(q, clock):
     clock.t += 5
     q.claim()
     assert q.recover() == 1 and q.claim() is not None
+
+
+def test_released_job_keeps_its_messages_and_new_turns_get_their_own_job(q, clock):
+    q.ingest("cli", "s", None, [T("user", "a", "1")])
+    clock.t += 5
+    a = q.claim()
+    q.ingest("cli", "s", None, [T("user", "b", "2")])
+    q.release(a.id)
+    clock.t += 5
+    first = q.claim()
+    assert first.id == a.id and [t.content for t in q.messages_for(a.id)] == ["a"]
+    assert q.claim() is None  # the newer job waits for the older one in its session
+    q.complete(a.id)
+    b = q.claim()
+    assert b.id != a.id and [t.content for t in q.messages_for(b.id)] == ["b"]
+
+
+def test_retrying_job_blocks_newer_job_in_same_session(q, clock):
+    q.ingest("cli", "s", None, [T("user", "a", "1")])
+    clock.t += 5
+    a = q.claim()
+    q.fail(a.id, "boom")  # retry not before +5s
+    q.ingest("cli", "s", None, [T("user", "b", "2")])  # its own job, debounce +5s
+    clock.t += 4.9
+    assert q.claim() is None
+    clock.t += 0.2
+    again = q.claim()
+    assert again.id == a.id and [t.content for t in q.messages_for(a.id)] == ["a"]
+    q.complete(a.id)
+    assert [t.content for t in q.messages_for(q.claim().id)] == ["b"]
+
+
+def test_other_sessions_are_not_blocked(q, clock):
+    q.ingest("cli", "s1", None, [T("user", "a", "1")])
+    clock.t += 5
+    a = q.claim()
+    q.fail(a.id, "boom")
+    q.ingest("cli", "s2", None, [T("user", "x", "1")])
+    clock.t += 5
+    assert q.claim().session_id in {"s1", "s2"}

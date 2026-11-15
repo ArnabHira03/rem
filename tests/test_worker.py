@@ -104,3 +104,23 @@ async def test_stop_lets_a_quick_job_finish(svc):
     stop.set()
     await task
     assert (await svc.status())["jobs"]["done"] == 1
+
+
+async def test_worker_survives_an_internal_error(svc, monkeypatch):
+    real = svc.ingest_store.claim
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("disk hiccup")
+        return real()
+
+    monkeypatch.setattr(svc.ingest_store, "claim", flaky)
+    monkeypatch.setattr("rem.daemon.worker.ERROR_BACKOFF_SECONDS", 0.01)
+    await svc.ingest("cli", "s", None, [Turn("user", "a", "1")])
+    stop = asyncio.Event()
+    task = asyncio.create_task(Worker(svc, NoopHandler(), 0.01).run(stop))
+    await wait_until_async(svc.status, lambda s: s["jobs"]["done"] == 1)
+    stop.set()
+    await task

@@ -26,3 +26,15 @@ def test_private_key_block():
 def test_ordinary_text_untouched():
     s = "I prefer uv over pip; my laptop has 15 GB RAM and the token count is 400."
     assert redact(s) == s
+
+
+def test_bearer_token():
+    assert redact("Authorization: Bearer abcdef0123456789xyz") == "Authorization: Bearer [REDACTED:bearer_token]"
+
+
+def test_json_style_key_value():
+    assert redact('{"api_key": "abcd1234efgh"}') == '{"api_key": "[REDACTED:secret_value]"}'
+
+
+def test_inline_password_assignment():
+    assert redact("connect with user=bob password=hunter22 now") == "connect with user=bob password=[REDACTED:secret_value] now"

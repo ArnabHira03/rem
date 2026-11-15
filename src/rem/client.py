@@ -29,7 +29,10 @@ class RemClient:
             raise DaemonUnavailable(f"rem daemon is not reachable at {self.socket_path}") from e
         if r.status_code == 204:
             return None
-        body = r.json()
+        try:
+            body = r.json()
+        except ValueError:
+            raise RemError(f"rem daemon error (HTTP {r.status_code}); see daemon.log") from None
         if r.status_code >= 400:
             code, message = body.get("error"), body.get("message", r.text)
             if code == "not_found":
@@ -110,6 +113,11 @@ def ensure_daemon(cfg: RemConfig) -> RemClient:
             pass
         code = proc.poll()
         if code not in (None, 2):  # 2 = another starter won the race; keep waiting for it
-            break
+            raise DaemonUnavailable("rem daemon failed to start:\n" + _log_tail(cfg.log_path))
         time.sleep(0.1)
+    if proc.poll() is None:
+        raise DaemonUnavailable(
+            "rem daemon is still starting (the first run downloads the embedding model); "
+            f"try again shortly, or watch {cfg.log_path}"
+        )
     raise DaemonUnavailable("rem daemon failed to start:\n" + _log_tail(cfg.log_path))

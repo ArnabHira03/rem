@@ -93,8 +93,12 @@ class IngestStore:
             job_id = None
             if accepted:
                 not_before = now + self.settings.debounce_seconds
+                # Only a job that has never been claimed may take new turns: a claimed job's
+                # inputs are fixed so that a retry or replay sees exactly the same messages.
                 row = self.conn.execute(
-                    "SELECT id FROM jobs WHERE session_pk = ? AND status = 'pending'", (session_pk,)
+                    "SELECT j.id FROM jobs j WHERE j.session_pk = ? AND j.status = 'pending' "
+                    "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.job_id = j.id)",
+                    (session_pk,),
                 ).fetchone()
                 if row:
                     job_id = row[0]
@@ -126,10 +130,15 @@ class IngestStore:
             row = self.conn.execute(
                 """
                 SELECT j.id, j.status FROM jobs j
-                WHERE (j.status = 'pending' AND j.not_before <= :now AND NOT EXISTS (
-                           SELECT 1 FROM jobs p WHERE p.session_pk = j.session_pk
-                           AND p.status = 'processing' AND p.lease_until >= :now))
-                   OR (j.status = 'processing' AND j.lease_until < :now)
+                WHERE ((j.status = 'pending' AND j.not_before <= :now)
+                       OR (j.status = 'processing' AND j.lease_until < :now))
+                  -- a session's jobs run strictly in order, one at a time
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs o WHERE o.session_pk = j.session_pk AND o.id < j.id
+                      AND o.status IN ('pending', 'processing'))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs p WHERE p.session_pk = j.session_pk AND p.id != j.id
+                      AND p.status = 'processing' AND p.lease_until >= :now)
                 ORDER BY j.not_before, j.id LIMIT 1
                 """,
                 {"now": now},
@@ -137,12 +146,15 @@ class IngestStore:
             if row is None:
                 self.conn.execute("COMMIT")
                 return None
-            job_id, status = row
+            job_id = row[0]
             self.conn.execute(
                 "UPDATE jobs SET status = 'processing', lease_until = ?, updated_at = ? WHERE id = ?",
                 (now + self.settings.lease_seconds, utcnow(), job_id),
             )
-            if status == "pending":  # a reclaimed job keeps the messages it was first given
+            first_claim = not self.conn.execute(
+                "SELECT 1 FROM messages WHERE job_id = ? LIMIT 1", (job_id,)
+            ).fetchone()
+            if first_claim:  # later claims (retry, release, crash) keep the messages it was first given
                 self.conn.execute(
                     "UPDATE messages SET job_id = ? WHERE job_id IS NULL AND session_pk = "
                     "(SELECT session_pk FROM jobs WHERE id = ?)",
