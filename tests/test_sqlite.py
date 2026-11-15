@@ -4,7 +4,7 @@ from rem.storage.sqlite import RemDB
 
 def test_schema_and_meta(tmp_path):
     db = RemDB(tmp_path / "rem.db")
-    assert db.get_meta("schema_version") == "1"
+    assert db.get_meta("schema_version") == "2"
     db.set_meta("active_embedder", "hash-64")
     assert db.get_meta("active_embedder") == "hash-64"
 
