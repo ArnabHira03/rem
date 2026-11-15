@@ -1,0 +1,49 @@
+import uuid
+
+import pytest
+
+from rem.models import (
+    MemoryRecord,
+    Provenance,
+    Scope,
+    Status,
+    memory_id,
+    normalize_text,
+    text_hash,
+    utcnow,
+)
+
+
+def test_normalize_and_hash_ignore_case_and_spacing():
+    assert normalize_text("  Prefers   UV\n") == "prefers uv"
+    assert text_hash("Prefers uv") == text_hash(" prefers  UV ")
+
+
+def test_empty_text_rejected():
+    with pytest.raises(ValueError, match="text must not be empty"):
+        normalize_text("   ")
+
+
+def test_memory_id_deterministic_and_scoped():
+    a = memory_id("Prefers uv", Scope.GLOBAL, None)
+    assert a == memory_id("prefers  UV", Scope.GLOBAL, None)
+    assert a != memory_id("Prefers uv", Scope.PROJECT, 1)
+    assert a != memory_id("Prefers uv", Scope.GLOBAL, None, job_id="job-1")
+    uuid.UUID(a)
+
+
+def test_payload_roundtrip_keeps_all_fields():
+    rec = MemoryRecord(
+        id="x", text="t", hash="h", scope=Scope.GLOBAL, project_id=None, project_name=None,
+        provenance=Provenance.USER_CONFIRMED, status=Status.VERIFIED, evidence_source=None,
+        observed_at=None, source="cli", session_id=None, job_id=None,
+        created_at=utcnow(), updated_at=utcnow(),
+    )
+    p = rec.to_payload()
+    assert set(p) == {
+        "id", "text", "hash", "scope", "project_id", "project_name", "provenance", "status",
+        "evidence_source", "observed_at", "source", "session_id", "job_id", "entity_ids",
+        "created_at", "updated_at",
+    }
+    assert p["entity_ids"] == [] and p["scope"] == "global"
+    assert MemoryRecord.from_payload(p) == rec
