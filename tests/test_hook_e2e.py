@@ -3,6 +3,7 @@
 No [llm] is configured, so the worker never runs and jobs stay pending; that is what we inspect.
 """
 
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -66,7 +67,8 @@ def test_hook_flow_across_processes(daemon_env, tmp_path):
         assert len(jobs) == 1 and jobs[0][1] == "pending"
         # messages are bound to a job only when the worker claims it; until then the pending job owns the unclaimed ones
         msgs = query(env, "SELECT message_id, role, content FROM messages WHERE job_id IS NULL ORDER BY id")
-        assert msgs == [("cc:p1:user", "user", PROMPT), ("cc:p1:assistant", "assistant", REPLY)]
+        reply_id = "cc:p1:assistant:" + hashlib.sha256(REPLY.encode()).hexdigest()[:12]
+        assert msgs == [("cc:p1:user", "user", PROMPT), (reply_id, "assistant", REPLY)]
         assert query(env, "SELECT COUNT(*) FROM messages") == [(2,)]
 
         # SessionEnd with nothing held is harmless

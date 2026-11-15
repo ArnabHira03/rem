@@ -205,3 +205,20 @@ def test_empty_enqueue_flushes_held_turns(q, clock):
 
 def test_empty_enqueue_without_held_turns_is_noop(q):
     assert q.ingest("claude-code", "s", None, [], enqueue=True).job_id is None
+
+
+def test_quick_follow_up_prompt_lands_in_the_previous_job(q, clock):
+    """Documents the debounce split: a prompt sent within the debounce window of the previous reply
+    joins that reply's job (J1 = [p1, r1, p2]); its own reply becomes the next job (J2 = [r2])."""
+    q.ingest("claude-code", "s", None, [Turn("user", "p1", "cc:1:user")], enqueue=False)
+    q.ingest("claude-code", "s", None, [Turn("assistant", "r1", "cc:1:assistant")])
+    clock.t += 2  # within the 5 s debounce
+    q.ingest("claude-code", "s", None, [Turn("user", "p2", "cc:2:user")], enqueue=False)
+    clock.t += 5
+    j1 = q.claim()
+    assert [t.content for t in q.messages_for(j1.id)] == ["p1", "r1", "p2"]
+    q.ingest("claude-code", "s", None, [Turn("assistant", "r2", "cc:2:assistant")])
+    q.complete(j1.id)
+    clock.t += 5
+    j2 = q.claim()
+    assert [t.content for t in q.messages_for(j2.id)] == ["r2"]

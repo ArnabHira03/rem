@@ -3,7 +3,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 DEFAULT_DATA_DIR = Path("~/.local/share/rem").expanduser()
 DEFAULT_CONFIG_PATH = Path("~/.config/rem/config.toml").expanduser()
@@ -69,8 +69,8 @@ class ExtractionConfig(BaseModel):
 
 class ClaudeCodeConfig(BaseModel):
     exclude: list[Path] = []
-    context_max_chars: int = 1600
-    hook_budget_seconds: float = 2.0
+    context_max_chars: int = Field(1600, ge=1, le=10000)  # Claude Code moves context over 10,000 chars to a file
+    hook_budget_seconds: float = Field(2.0, gt=0, le=9)  # below the installed 10 s hook timeout
 
     @field_validator("exclude")
     @classmethod

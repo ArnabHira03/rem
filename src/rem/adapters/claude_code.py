@@ -6,6 +6,7 @@ Turns come from the hook payloads (`prompt`, `last_assistant_message`), never th
 Keep imports light: no rem.memory, embedder, vector store, qdrant or fastembed here.
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -36,9 +37,13 @@ def _timed_out(e: DaemonUnavailable) -> bool:
 
 
 def _turn(role: str, text: str, prompt_id) -> dict:
-    turn = {"role": role, "content": redact(text)}
+    content = redact(text)
+    turn = {"role": role, "content": content}
     if prompt_id:
-        turn["message_id"] = f"cc:{prompt_id}:{role}"
+        # One prompt can have several Stops (e.g. a Stop hook makes Claude continue): the same reply
+        # re-sent keeps its id (idempotent), a different continuation becomes a new turn.
+        suffix = f":{hashlib.sha256(content.encode()).hexdigest()[:12]}" if role == "assistant" else ""
+        turn["message_id"] = f"cc:{prompt_id}:{role}{suffix}"
     return turn
 
 
@@ -81,12 +86,15 @@ def handle_hook(payload: dict, cfg: RemConfig, client_factory=RemClient) -> str:
     client = client_factory(cfg.socket_path, timeout=cc.hook_budget_seconds)
     try:
         client.ingest(**body)
-    except DaemonUnavailable as e:
-        # A timeout is ambiguous (the daemon may have stored it); ingest is idempotent per message_id.
+    except ValueError:
+        raise  # the daemon rejected the body: spooling it would only quarantine it later
+    except Exception as e:
+        # Keep the turn for a later drain. A timeout is ambiguous (the daemon may have stored it);
+        # ingest is idempotent per message_id.
         try:
             write_spool(cfg.data_dir, body)
         finally:  # a failed spool must not also keep the daemon down
-            if not _timed_out(e):
+            if isinstance(e, DaemonUnavailable) and not _timed_out(e):
                 start_daemon_background(cfg)
     return ""
 
@@ -121,7 +129,7 @@ def bad_args() -> int:
     """`rem hook` with arguments this version doesn't know: log a fixed line and exit 0, silently."""
     try:
         _log_line(load_config(), None, "unknown hook args")
-    except Exception:
+    except BaseException:
         pass
     return 0
 
@@ -132,7 +140,7 @@ def main(stdin=None, stdout=None) -> int:
     stdout = stdout if stdout is not None else sys.stdout
     try:
         cfg = load_config()
-    except Exception:
+    except BaseException:
         return 0  # no reliable data dir to log into
     event = None
     try:
@@ -148,6 +156,6 @@ def main(stdin=None, stdout=None) -> int:
             except Exception:
                 _silence_stdout()
                 raise
-    except Exception as e:
+    except BaseException as e:  # KeyboardInterrupt and SystemExit too: the hook always exits 0
         _log_error(cfg, event, e)
     return 0

@@ -46,3 +46,20 @@ def test_claude_code_config_defaults_and_expanduser(tmp_path, monkeypatch):
     path.write_text('[claude_code]\nexclude = ["~/work/client"]\n')
     cfg = load_config(path)
     assert cfg.claude_code.exclude == [Path.home() / "work/client"]
+
+
+@pytest.mark.parametrize("line,ok", [
+    ("context_max_chars = 1", True), ("context_max_chars = 10000", True),
+    ("context_max_chars = 0", False), ("context_max_chars = 10001", False),
+    ("hook_budget_seconds = 9", True), ("hook_budget_seconds = 0.5", True),
+    ("hook_budget_seconds = 0", False), ("hook_budget_seconds = -1", False), ("hook_budget_seconds = 9.5", False),
+])
+def test_claude_code_limits_are_validated(tmp_path, monkeypatch, line, ok):
+    monkeypatch.setenv("REM_HOME", str(tmp_path))
+    p = tmp_path / "config.toml"
+    p.write_text(f"[claude_code]\n{line}\n")
+    if ok:
+        load_config(p)
+    else:
+        with pytest.raises(ValueError, match="claude_code"):
+            load_config(p)

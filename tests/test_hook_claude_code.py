@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import subprocess
@@ -11,6 +12,10 @@ from rem.client import DaemonUnavailable
 from rem.config import ClaudeCodeConfig, RemConfig
 
 KEY = "sk-ant-" + "a" * 30
+
+
+def aid(prompt_id, text):
+    return f"cc:{prompt_id}:assistant:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
 
 
 @pytest.fixture
@@ -108,7 +113,7 @@ def test_stop_ingests_assistant_turn_and_enqueues(hcfg, starts):
     p = payload("Stop", last_assistant_message="done", prompt_id="p1", stop_hook_active=True)
     assert handle_hook(p, hcfg, client_factory=f) == ""
     assert f.calls == [("ingest", dict(source="claude-code", session_id="s1", cwd="/tmp", enqueue=True,
-                                       turns=[{"role": "assistant", "content": "done", "message_id": "cc:p1:assistant"}]))]
+                                       turns=[{"role": "assistant", "content": "done", "message_id": aid("p1", "done")}]))]
 
 
 def test_stop_without_reply_still_flushes(hcfg, starts):
@@ -264,14 +269,14 @@ def test_main_invalid_json_returns_0_and_prints_nothing(hook_env):
 def test_main_logs_unexpected_error_without_prompt_text(hook_env, monkeypatch):
     from rem.adapters import claude_code
 
-    monkeypatch.setattr(claude_code, "RemClient", Fake(RuntimeError("boom: the secret prompt")))
+    monkeypatch.setattr(claude_code, "RemClient", Fake(ValueError("boom: the secret prompt")))
     out = io.StringIO()
     p = payload("UserPromptSubmit", prompt="the secret prompt", prompt_id="p1")
     assert claude_code.main(stdin=io.StringIO(json.dumps(p)), stdout=out) == 0
     assert out.getvalue() == ""
     lines = (hook_env / "hook.log").read_text().splitlines()
     assert len(lines) == 1
-    assert "UserPromptSubmit" in lines[0] and "RuntimeError" in lines[0]
+    assert "UserPromptSubmit" in lines[0] and "ValueError" in lines[0]
     assert "secret prompt" not in lines[0]
 
 
@@ -458,3 +463,85 @@ def test_full_spool_is_logged_by_class_only(hook_env, monkeypatch, starts):
     assert line.endswith(" UserPromptSubmit SpoolFull: hook failed")
     assert not list((hook_env / "spool").glob("*.json"))
     assert len(starts) == 1  # the daemon is still started (subject to its backoff)
+
+
+def test_second_stop_for_same_prompt_is_a_new_turn_unless_identical(hcfg, starts):
+    from rem.adapters.claude_code import handle_hook
+
+    f = Fake()
+    for reply in ["first part", "first part", "continued after a Stop hook"]:
+        handle_hook(payload("Stop", last_assistant_message=reply, prompt_id="p1"), hcfg, client_factory=f)
+    ids = [c[1]["turns"][0]["message_id"] for c in f.calls]
+    assert ids == [aid("p1", "first part"), aid("p1", "first part"), aid("p1", "continued after a Stop hook")]
+    assert ids[0] != ids[2]
+
+
+def test_assistant_id_hashes_the_redacted_text(hcfg, starts):
+    from rem.adapters.claude_code import handle_hook
+
+    f = Fake()
+    handle_hook(payload("Stop", last_assistant_message=f"key {KEY}", prompt_id="p1"), hcfg, client_factory=f)
+    assert f.calls[0][1]["turns"][0]["message_id"] == aid("p1", "key [REDACTED:anthropic_key]")
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit])
+def test_main_swallows_base_exceptions(hook_env, exc):
+    from rem.adapters.claude_code import main
+
+    class Interrupted(io.StringIO):
+        def read(self, *a):
+            raise exc()
+
+    out = io.StringIO()
+    assert main(stdin=Interrupted(), stdout=out) == 0
+    assert out.getvalue() == ""
+    (line,) = (hook_env / "hook.log").read_text().splitlines()
+    assert line.endswith(f" unknown {exc.__name__}: hook failed")
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit])
+def test_main_swallows_base_exceptions_while_loading_config(hook_env, monkeypatch, exc):
+    from rem.adapters import claude_code
+
+    def boom():
+        raise exc()
+
+    monkeypatch.setattr(claude_code, "load_config", boom)
+    assert claude_code.main(stdin=io.StringIO("{}"), stdout=io.StringIO()) == 0
+
+
+def test_subprocess_sigint_style_exit_is_silent(tmp_path):
+    import os
+
+    code = (
+        "import sys\n"
+        "from rem.adapters import claude_code\n"
+        "class F:\n"
+        "    def __init__(self, *a, **k): pass\n"
+        "    def ingest(self, **kw): raise KeyboardInterrupt\n"
+        "claude_code.RemClient = F\n"
+        "sys.exit(claude_code.main())\n"
+    )
+    env = {**os.environ, "REM_HOME": str(tmp_path / "data"), "REM_CONFIG": str(tmp_path / "none.toml"),
+           "REM_SOCKET": "/tmp/rem-hook-test-nonexistent.sock"}
+    r = subprocess.run([sys.executable, "-c", code], input=json.dumps(payload("SessionEnd")).encode(),
+                       capture_output=True, env=env, timeout=30)
+    assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
+
+
+def test_capture_spools_on_other_daemon_errors_without_starting(hcfg, starts):
+    from rem.adapters.claude_code import handle_hook
+    from rem.errors import RemError
+
+    p = payload("UserPromptSubmit", prompt="hi", prompt_id="p1")
+    assert handle_hook(p, hcfg, client_factory=Fake(RemError("rem daemon error (HTTP 500)"))) == ""
+    assert [b["turns"] for b in spooled(hcfg)] == [[{"role": "user", "content": "hi", "message_id": "cc:p1:user"}]]
+    assert starts == []  # the daemon answered: it is up
+
+
+def test_capture_rejected_as_invalid_is_not_spooled(hcfg, starts):
+    from rem.adapters.claude_code import handle_hook
+
+    with pytest.raises(ValueError):
+        handle_hook(payload("SessionEnd"), hcfg, client_factory=Fake(ValueError("invalid")))
+    assert spooled(hcfg) == [] and starts == []
