@@ -32,3 +32,17 @@ def test_invalid_provider_rejected(tmp_path, monkeypatch):
     p.write_text('[vector_store]\nprovider = "faiss"\n')
     with pytest.raises(ValueError):
         load_config(p)
+
+
+def test_claude_code_config_defaults_and_expanduser(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setenv("REM_HOME", str(tmp_path))
+    cfg = load_config(tmp_path / "missing.toml")
+    assert cfg.claude_code.exclude == []
+    assert cfg.claude_code.context_max_chars == 1600
+    assert cfg.claude_code.hook_budget_seconds == 2.0
+    path = tmp_path / "config.toml"
+    path.write_text('[claude_code]\nexclude = ["~/work/client"]\n')
+    cfg = load_config(path)
+    assert cfg.claude_code.exclude == [Path.home() / "work/client"]

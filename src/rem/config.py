@@ -3,7 +3,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, ValidationError, field_validator, model_validator
 
 DEFAULT_DATA_DIR = Path("~/.local/share/rem").expanduser()
 DEFAULT_CONFIG_PATH = Path("~/.config/rem/config.toml").expanduser()
@@ -56,6 +56,17 @@ class ExtractionConfig(BaseModel):
     max_candidates: int = 20
 
 
+class ClaudeCodeConfig(BaseModel):
+    exclude: list[Path] = []
+    context_max_chars: int = 1600
+    hook_budget_seconds: float = 2.0
+
+    @field_validator("exclude")
+    @classmethod
+    def _expand(cls, v: list[Path]) -> list[Path]:
+        return [p.expanduser() for p in v]
+
+
 class RemConfig(BaseModel):
     data_dir: Path
     vector_store: VectorStoreConfig = VectorStoreConfig()
@@ -63,6 +74,7 @@ class RemConfig(BaseModel):
     daemon: DaemonConfig = DaemonConfig()
     llm: LLMConfig = LLMConfig()
     extraction: ExtractionConfig = ExtractionConfig()
+    claude_code: ClaudeCodeConfig = ClaudeCodeConfig()
 
     @property
     def db_path(self) -> Path:

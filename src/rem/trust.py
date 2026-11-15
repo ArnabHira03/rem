@@ -1,8 +1,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
-from rem.extract import Candidate
-from rem.models import MemoryRecord, Provenance, Status
+from rem.models import Candidate, MemoryRecord, Provenance, Status
 
 
 @dataclass(frozen=True)

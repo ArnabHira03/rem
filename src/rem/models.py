@@ -2,8 +2,9 @@ import hashlib
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 REM_NAMESPACE = uuid.UUID("6f1c8e5a-3b7d-4c2e-9a10-5d4e3f2a1b00")
 
@@ -107,3 +108,24 @@ class HistoryRow(BaseModel):
     actor: str
     job_id: str | None
     created_at: str
+
+
+Origin = Literal["user", "assistant", "tool"]
+
+
+class Candidate(BaseModel):
+    text: str
+    scope: Scope
+    origin: Origin
+    evidence_source: str | None = None
+    # Id of an existing memory the LLM says this fact restates (resolved from its integer index at
+    # extraction time, so a cached extraction replays against the same memory).
+    restates: str | None = None
+
+    @field_validator("text")
+    @classmethod
+    def _text_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("text must not be empty")
+        return v

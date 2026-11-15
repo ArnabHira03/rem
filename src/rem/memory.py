@@ -14,8 +14,8 @@ from rem.config import RemConfig
 from rem.embed.base import Embedder, collection_slug
 from rem.embed.factory import create_embedder
 from rem.errors import EmbedderMismatchError, MemoryNotFound
-from rem.extract import Candidate
 from rem.models import (
+    Candidate,
     HistoryEvent,
     REM_NAMESPACE,
     HistoryRow,

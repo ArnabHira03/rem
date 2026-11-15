@@ -1,37 +1,15 @@
 import hashlib
 import logging
-from typing import Literal
 
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ValidationError
 
 from rem.errors import LLMError
 from rem.llm.base import LLM
-from rem.models import MemoryRecord, Scope
+from rem.models import Candidate, MemoryRecord, Origin, Scope  # noqa: F401  (re-exported)
 from rem.redact import redact
 from rem.storage.queue import Turn
 
 log = logging.getLogger(__name__)
-
-Origin = Literal["user", "assistant", "tool"]
-
-
-class Candidate(BaseModel):
-    text: str
-    scope: Scope
-    origin: Origin
-    evidence_source: str | None = None
-    # Id of an existing memory the LLM says this fact restates (resolved from its integer index at
-    # extraction time, so a cached extraction replays against the same memory).
-    restates: str | None = None
-
-    @field_validator("text")
-    @classmethod
-    def _text_not_empty(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("text must not be empty")
-        return v
-
 
 class Extraction(BaseModel):
     candidates: list[Candidate]
