@@ -94,7 +94,20 @@ def test_openai_compat_request_and_parse():
     assert seen["body"]["messages"][0] == {"role": "system", "content": "S"}
     assert seen["body"]["messages"][1] == {"role": "user", "content": "U"}
     assert seen["auth"] is None
+    assert "reasoning_effort" not in seen["body"]  # think unset: provider default
     assert llm.name == "ollama:qwen3:4b"
+
+
+def test_openai_compat_think_false_disables_reasoning():
+    seen = {}
+
+    def handler(req):
+        seen.update(body=json.loads(req.content))
+        return _ok('{"facts": []}')
+
+    cfg = LLMConfig(provider="ollama", model="qwen3.5:4b", think=False)
+    OpenAICompatLLM(cfg, transport=httpx.MockTransport(handler)).complete_json("S", "U", SCHEMA)
+    assert seen["body"]["reasoning_effort"] == "none"
 
 
 def test_openai_compat_sends_bearer_when_key_set(monkeypatch):
@@ -209,3 +222,18 @@ def test_anthropic_live():
         },
     )
     assert isinstance(out, dict) and isinstance(out["facts"], list)
+
+
+@pytest.mark.llm
+@pytest.mark.skipif(not os.environ.get("REM_TEST_OLLAMA_MODEL"), reason="REM_TEST_OLLAMA_MODEL unset")
+def test_ollama_live():
+    """Plumbing check against a local Ollama model, e.g. REM_TEST_OLLAMA_MODEL=qwen3.5:4b.
+
+    Extraction quality (scope/origin accuracy) is measured by `rem eval extraction`, not here.
+    """
+    from rem.extract import extract
+    from rem.storage.queue import Turn
+
+    cfg = LLMConfig(provider="ollama", model=os.environ["REM_TEST_OLLAMA_MODEL"], timeout_seconds=300, think=False)
+    ex = extract(create_llm(cfg), [Turn("user", "I always use uv instead of pip.")], [], [], max_candidates=20)
+    assert any(c.origin == "user" for c in ex.candidates), ex.candidates

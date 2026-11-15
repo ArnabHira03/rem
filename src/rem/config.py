@@ -40,6 +40,7 @@ class LLMConfig(BaseModel):
     api_key_env: str | None = None
     timeout_seconds: float = 60
     effort: Literal["low", "medium", "high"] = "low"
+    think: bool | None = None  # openai/ollama: false sends reasoning_effort "none"; unset = model default
     allow_remote: bool = False
 
     @model_validator(mode="after")

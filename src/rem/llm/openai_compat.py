@@ -37,6 +37,8 @@ class OpenAICompatLLM(LLM):
                 "json_schema": {"name": "extraction", "schema": schema, "strict": True},
             },
         }
+        if self.cfg.think is False:
+            body["reasoning_effort"] = "none"  # Ollama's OpenAI endpoint ignores `think`; this turns thinking off
         try:
             resp = self.client.post("chat/completions", json=body)
         except Exception as e:  # httpx errors and anything else on the request path
