@@ -360,3 +360,68 @@ def test_hook_imports_are_light():
             "('rem.memory','rem.embed','rem.storage.vector','qdrant_client','fastembed'))))")
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert r.stdout.strip() == "[]"
+
+
+# --- fix round 1 ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("sid", [None, "", 123])
+@pytest.mark.parametrize("p", [payload("UserPromptSubmit", prompt="hi", prompt_id="p1"),
+                               payload("Stop", last_assistant_message="yo"), payload("SessionEnd")])
+def test_capture_without_session_id_does_nothing(hcfg, starts, sid, p):
+    from rem.adapters.claude_code import handle_hook
+
+    p = {**p, "session_id": sid}
+    f = Fake(down())
+    assert handle_hook(p, hcfg, client_factory=f) == ""
+    assert f.calls == [] and starts == [] and spooled(hcfg) == []
+    assert not (hcfg.data_dir / "hook.log").exists()
+
+
+@pytest.mark.parametrize("err,started", [(down, True), (slow, False)])
+def test_failed_spool_still_starts_daemon_on_connection_failure(hcfg, starts, monkeypatch, err, started):
+    from rem.adapters import claude_code
+
+    def broken(*a):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(claude_code, "write_spool", broken)
+    with pytest.raises(OSError):
+        claude_code.handle_hook(payload("SessionEnd"), hcfg, client_factory=Fake(err()))
+    assert starts == ([hcfg] if started else [])
+
+
+@pytest.mark.parametrize("argv", [["claude-code", "--x"], ["claude-cod"], ["claude-code", "extra"], []])
+def test_subprocess_unknown_hook_args_are_silent(daemon_env, argv):
+    r = subprocess.run([sys.executable, "-m", "rem", "hook", *argv], input=b"{}", env=daemon_env.env,
+                       capture_output=True, timeout=30)
+    assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
+    lines = (daemon_env.root / "hook.log").read_text().splitlines()
+    assert len(lines) == 1 and lines[0].endswith(" unknown unknown hook args")
+    assert not any(a in lines[0] for a in ["--x", "claude-cod", "extra"])
+
+
+def test_subprocess_broken_stdout_pipe_is_silent(tmp_path):
+    import os
+
+    code = (
+        "import sys\n"
+        "from rem.adapters import claude_code\n"
+        "class F:\n"
+        "    def __init__(self, *a, **k): pass\n"
+        # small enough to sit in the stdout buffer: without the fix the shutdown flush prints
+        # "Exception ignored ... BrokenPipeError" and the process exits 120
+        "    def context(self, cwd, max_chars): return 'x' * 100\n"
+        "claude_code.RemClient = F\n"
+        "sys.exit(claude_code.main())\n"
+    )
+    env = {**os.environ, "REM_HOME": str(tmp_path / "data"), "REM_CONFIG": str(tmp_path / "none.toml"),
+           "REM_SOCKET": "/tmp/rem-hook-test-nonexistent.sock"}
+    r_fd, w_fd = os.pipe()
+    os.close(r_fd)  # nobody reads: the hook's write hits EPIPE
+    try:
+        r = subprocess.run([sys.executable, "-c", code], input=json.dumps(payload("SessionStart")).encode(),
+                           stdout=w_fd, stderr=subprocess.PIPE, env=env, timeout=30)
+    finally:
+        os.close(w_fd)
+    assert (r.returncode, r.stderr) == (0, b"")
+    assert "BrokenPipeError" in (tmp_path / "data" / "hook.log").read_text()

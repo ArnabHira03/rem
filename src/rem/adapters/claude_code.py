@@ -61,6 +61,9 @@ def handle_hook(payload: dict, cfg: RemConfig, client_factory=RemClient) -> str:
                 start_daemon_background(cfg)
             return ""
 
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return ""  # nothing to file the turn under; the daemon would only reject it
     prompt_id = payload.get("prompt_id")
     match event:
         case "UserPromptSubmit":
@@ -74,29 +77,53 @@ def handle_hook(payload: dict, cfg: RemConfig, client_factory=RemClient) -> str:
         case _:  # SessionEnd: flush any held prompt
             turns, enqueue = [], True
 
-    body = {"source": SOURCE, "session_id": payload.get("session_id"), "cwd": cwd, "turns": turns, "enqueue": enqueue}
+    body = {"source": SOURCE, "session_id": session_id, "cwd": cwd, "turns": turns, "enqueue": enqueue}
     client = client_factory(cfg.socket_path, timeout=cc.hook_budget_seconds)
     try:
         client.ingest(**body)
     except DaemonUnavailable as e:
         # A timeout is ambiguous (the daemon may have stored it); ingest is idempotent per message_id.
-        write_spool(cfg.data_dir, body)
-        if not _timed_out(e):
-            start_daemon_background(cfg)
+        try:
+            write_spool(cfg.data_dir, body)
+        finally:  # a failed spool must not also keep the daemon down
+            if not _timed_out(e):
+                start_daemon_background(cfg)
     return ""
 
 
-def _log_error(cfg: RemConfig, event, exc: BaseException) -> None:
-    """One line per error: never the prompt or reply text, only the event and exception class."""
+def _log_line(cfg: RemConfig, event, what: str) -> None:
+    """Append one line to hook.log: never prompt, reply or argv text, only fixed strings and class names."""
     try:
         name = event if isinstance(event, str) and event in _EVENTS else "unknown"
         cfg.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        line = f"{datetime.now(timezone.utc).isoformat()} {name} {type(exc).__name__}: hook failed\n"
+        line = f"{datetime.now(timezone.utc).isoformat()} {name} {what}\n"
         fd = os.open(cfg.data_dir / "hook.log", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(fd, "a") as f:
             f.write(line)
     except Exception:
         pass
+
+
+def _log_error(cfg: RemConfig, event, exc: BaseException) -> None:
+    _log_line(cfg, event, f"{type(exc).__name__}: hook failed")
+
+
+def _silence_stdout() -> None:
+    """After a failed write (e.g. Claude Code closed the pipe), point fd 1 at /dev/null so the
+    interpreter's shutdown flush can't print "Exception ignored ... BrokenPipeError" to stderr."""
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
+    except Exception:
+        pass
+
+
+def bad_args() -> int:
+    """`rem hook` with arguments this version doesn't know: log a fixed line and exit 0, silently."""
+    try:
+        _log_line(load_config(), None, "unknown hook args")
+    except Exception:
+        pass
+    return 0
 
 
 def main(stdin=None, stdout=None) -> int:
@@ -115,8 +142,12 @@ def main(stdin=None, stdout=None) -> int:
         event = payload.get("hook_event_name")
         text = handle_hook(payload, cfg, client_factory=RemClient)
         if text:
-            stdout.write(text)
-            stdout.flush()
+            try:
+                stdout.write(text)
+                stdout.flush()
+            except Exception:
+                _silence_stdout()
+                raise
     except Exception as e:
         _log_error(cfg, event, e)
     return 0

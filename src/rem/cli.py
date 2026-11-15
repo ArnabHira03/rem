@@ -57,6 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     i = cmd("install-service", "install the systemd user service")
     i.add_argument("--enable", action="store_true", help="also enable and start it now")
 
+    # listed for --help only: main() dispatches `rem hook ...` before argparse
     h = cmd("hook", "handle an agent hook event read from stdin (installed by `rem install`)")
     h.add_argument("agent", choices=["claude-code"])
 
@@ -187,15 +188,16 @@ def _stop(cfg) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args_in = sys.argv[1:] if argv is None else argv
+    if args_in[:1] == ["hook"]:  # before argparse/config/daemon: a hook must never fail, print or block
+        from rem.adapters import claude_code
+
+        return claude_code.main() if args_in[1:] == ["claude-code"] else claude_code.bad_args()
     parser = _parser()
     try:
         args = parser.parse_args(argv)
     except SystemExit as e:
         return int(e.code or 0)
-    if args.cmd == "hook":  # before any config/daemon code: the hook must never fail or block
-        from rem.adapters.claude_code import main as hook_main
-
-        return hook_main()
     try:
         cfg = load_config()
     except ValueError as e:
