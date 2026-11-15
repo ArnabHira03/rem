@@ -105,6 +105,25 @@ def test_fail_backs_off_then_gives_up(q, clock):
     assert q.counts()["failed"] == 1 and q.claim() is None
 
 
+def test_retry_failed_requeues_with_fresh_attempts(q, clock):
+    q.ingest("cli", "s", None, [T("user", "a", "1")])
+    clock.t += 5
+    j = q.claim()
+    q.db.save_extraction(j.id, "fake", "[]")
+    for _ in range(3):
+        q.fail(j.id, "no API key")
+        clock.t += 60
+        if q.counts()["failed"] == 0:
+            assert q.claim().id == j.id
+    assert q.counts()["failed"] == 1 and q.retry_failed() == 1
+    row = q.conn.execute("SELECT status, attempts, last_error, not_before FROM jobs WHERE id = ?", (j.id,)).fetchone()
+    assert tuple(row) == ("pending", 0, "no API key", clock.t)
+    again = q.claim()  # due immediately, with the same messages and cached extraction
+    assert again.id == j.id and again.attempts == 0
+    assert [t.content for t in q.messages_for(j.id)] == ["a"] and q.db.get_extraction(j.id) == ("fake", "[]")
+    assert q.retry_failed() == 0  # nothing failed any more
+
+
 def test_release_and_recover(q, clock):
     q.ingest("cli", "s", None, [T("user", "a", "1")])
     clock.t += 5

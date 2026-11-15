@@ -81,6 +81,9 @@ class RemClient:
             "source": source, "session_id": session_id, "cwd": str(cwd) if cwd else None, "turns": turns,
         })
 
+    def retry_failed(self) -> int:
+        return self._call("POST", "/jobs/retry")["requeued"]
+
 
 def _log_tail(path: Path, lines: int = 20) -> str:
     try:

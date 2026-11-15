@@ -4,14 +4,17 @@ Like Mem0's Memory class, but with a fixed write order so a crash never leaves
 duplicates: the vector store (canonical record) is written first, history second.
 """
 
-from datetime import UTC, datetime
+import logging
 import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rem.config import RemConfig
 from rem.embed.base import Embedder, collection_slug
 from rem.embed.factory import create_embedder
 from rem.errors import EmbedderMismatchError, MemoryNotFound
+from rem.extract import Candidate
 from rem.models import (
     HistoryEvent,
     REM_NAMESPACE,
@@ -32,8 +35,19 @@ from rem.retrieve import overfetch, rank
 from rem.storage.sqlite import RemDB
 from rem.storage.vector.base import VectorPoint, VectorStore
 from rem.storage.vector.factory import create_vector_store
+from rem.trust import Action, assign_trust, decide
+
+log = logging.getLogger(__name__)
 
 ACTIVE_EMBEDDER_KEY = "active_embedder"
+
+
+@dataclass
+class ApplyResult:
+    added: list[str] = field(default_factory=list)
+    corroborated: list[str] = field(default_factory=list)
+    skipped: int = 0
+    dropped: int = 0
 
 
 class Memory:
@@ -101,6 +115,20 @@ class Memory:
         candidates = [(MemoryRecord.from_payload(h.payload), h.score) for h in hits]
         return rank(candidates, current, limit, datetime.now(UTC))
 
+    def related(self, text: str, project_id: int | None, limit: int) -> list[MemoryRecord]:
+        """Memories across all scopes related to text, ranked with project_id as the current project."""
+        hits = self.vectors.search(self.col, self.embedder.embed_query(text), overfetch(limit))
+        candidates = [(MemoryRecord.from_payload(h.payload), h.score) for h in hits]
+        return [r.record for r in rank(candidates, project_id, limit, datetime.now(UTC))]
+
+    def similarity(self, text: str, id: str, scope: Scope, project_id: int | None) -> tuple[MemoryRecord, float] | None:
+        """Memory `id` with its cosine similarity to text, if it is live in the given scope and project."""
+        hits = self.vectors.search(
+            self.col, self.embedder.embed_query(text), 1,
+            {"id": id, "scope": str(scope), "project_id": project_id},
+        )
+        return (MemoryRecord.from_payload(hits[0].payload), hits[0].score) if hits else None
+
     def history(self, id: str) -> list[HistoryRow]:
         rows = self.db.get_history(id)
         if not rows and self.get(id) is None:
@@ -121,16 +149,25 @@ class Memory:
         actor: str,
         job_id: str | None = None,
         session_id: str | None = None,
+        project_id: int | None = None,
+        evidence_source: str | None = None,
     ) -> MemoryRecord:
         normalize_text(text)  # rejects empty text
         text = text.strip()
-        project_id = project_name = None
-        if scope == Scope.PROJECT:
-            if cwd is None:
-                raise ValueError("project scope needs a working directory")
+        project_name = None
+        if scope != Scope.PROJECT:
+            project_id = None
+        elif project_id is not None:
+            project = self.db.get_project(project_id)
+            if project is None:
+                raise ValueError(f"unknown project id {project_id}")
+            project_name = project[1]
+        elif cwd is not None:
             info = resolve_project(cwd)
             project_id = self.db.upsert_project(info.root_path, info.name, info.git_remote)
             project_name = info.name
+        else:
+            raise ValueError("project scope needs a working directory or a project id")
 
         duplicate = self._find_by_text(text, scope, project_id)
         if duplicate is not None:
@@ -147,7 +184,7 @@ class Memory:
         now = utcnow()
         record = MemoryRecord(
             id=mid, text=text, hash=text_hash(text), scope=scope, project_id=project_id,
-            project_name=project_name, provenance=provenance, status=status, evidence_source=None,
+            project_name=project_name, provenance=provenance, status=status, evidence_source=evidence_source,
             observed_at=None, source=source, session_id=session_id, job_id=job_id,
             created_at=now, updated_at=now,
         )
@@ -179,6 +216,98 @@ class Memory:
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.CONFIRM, str(old.status), str(Status.VERIFIED), actor)
         return confirmed
 
+    def corroborate(self, id: str, *, provenance: Provenance, job_id: str, actor: str) -> MemoryRecord:
+        """Mark an unverified memory verified because a trusted origin restated it.
+
+        Payload first (one update), then an INSERT OR IGNORE history row, so a replay of the
+        same job only fills in a missing history row. A user_confirmed memory keeps its provenance.
+        """
+        record = self._require(id)
+        if record.corroborated_by != job_id:
+            if record.provenance == Provenance.USER_CONFIRMED:
+                provenance = Provenance.USER_CONFIRMED
+            record = record.model_copy(
+                update={"provenance": provenance, "status": Status.VERIFIED, "corroborated_by": job_id,
+                        "updated_at": utcnow()}
+            )
+            payload = record.to_payload()
+            self.vectors.update_payload(
+                self.col, id, {k: payload[k] for k in ("provenance", "status", "corroborated_by", "updated_at")}
+            )
+        self.db.add_history(
+            TargetKind.MEMORY, id, HistoryEvent.CORROBORATE, str(Status.UNVERIFIED), str(Status.VERIFIED), actor, job_id
+        )
+        return record
+
+    def apply_candidates(
+        self,
+        candidates: list[Candidate],
+        *,
+        job_key: str,
+        project_id: int | None,
+        session_id: str | None,
+        source: str,
+        restate_min_similarity: float,
+        has_user_turn: bool,
+    ) -> ApplyResult:
+        """Write a job's extracted candidates, in order, so later ones see earlier writes.
+
+        A candidate is compared with one existing memory only, never by cosine alone: the memory
+        with the same normalized text, else the memory the LLM said it restates (same scope and
+        project, and at least restate_min_similarity as a guard against a wrong link). A changed
+        value or a contradiction has no such memory, so it is added rather than corroborating.
+
+        Without a user turn in the job, nothing can be user-asserted: "user" origins are
+        downgraded to "assistant" (unverified).
+
+        Replaying the same job_key is idempotent: memory ids are deterministic, its own ADDs are
+        re-taken (repairing a missing ADD row) and its own corroborations only complete history.
+        """
+        result = ApplyResult()
+        if not has_user_turn:
+            candidates = [c.model_copy(update={"origin": "assistant"}) if c.origin == "user" else c
+                          for c in candidates]
+        kept, collapsed = _collapse_duplicates(candidates)
+        result.skipped += collapsed
+        for c in kept:
+            if c.scope == Scope.PROJECT and project_id is None:
+                log.info("dropping project-scope candidate without a project (job %s)", job_key)
+                result.dropped += 1
+                continue
+            pid = project_id if c.scope == Scope.PROJECT else None
+            trust = assign_trust(c)
+            record: MemoryRecord | None = None
+            own = self._find_by_text(c.text, c.scope, pid)
+            if own is not None and own.job_id == job_key:
+                action = Action.ADD  # replay of this job's own add: add() returns it and repairs history
+            else:
+                record, similarity = self._comparison_target(c, pid, own, restate_min_similarity)
+                action = decide(trust, record, similarity, restate_min_similarity, job_key)
+            if action == Action.ADD:
+                added = self.add(
+                    c.text, scope=c.scope, project_id=pid, provenance=trust.provenance, status=trust.status,
+                    evidence_source=trust.evidence_source, source=source, actor="extractor",
+                    job_id=job_key, session_id=session_id,
+                )
+                result.added.append(added.id)
+            elif action == Action.CORROBORATE and record is not None and record.id not in result.corroborated:
+                self.corroborate(record.id, provenance=trust.provenance, job_id=job_key, actor="extractor")
+                result.corroborated.append(record.id)
+            else:
+                result.skipped += 1
+        return result
+
+    def _comparison_target(
+        self, c: Candidate, pid: int | None, same_text: MemoryRecord | None, min_similarity: float
+    ) -> tuple[MemoryRecord | None, float]:
+        if same_text is not None:
+            return same_text, 1.0
+        if c.restates:
+            found = self.similarity(c.text, c.restates, c.scope, pid)
+            if found is not None and found[1] >= min_similarity:
+                return found
+        return None, 0.0
+
     def delete(self, id: str, *, actor: str) -> None:
         old = self._require(id)
         self.vectors.delete(self.col, [id])
@@ -200,3 +329,16 @@ class Memory:
     def close(self) -> None:
         self.vectors.close()
         self.db.close()
+
+
+def _collapse_duplicates(candidates: list[Candidate]) -> tuple[list[Candidate], int]:
+    """Keep one candidate per (normalized text, scope): the most trusted, at the group's first position."""
+    kept: dict[tuple[str, Scope], Candidate] = {}
+    for c in candidates:
+        key = (normalize_text(c.text), c.scope)
+        best = kept.get(key)
+        if best is None or (
+            assign_trust(c).status == Status.VERIFIED and assign_trust(best).status != Status.VERIFIED
+        ):
+            kept[key] = c  # replacing a value keeps the key's original insertion position
+    return list(kept.values()), len(candidates) - len(kept)

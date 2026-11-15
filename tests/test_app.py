@@ -60,6 +60,20 @@ async def test_status_reports_counts(api):
     assert s["embedder"] == "hash-64_64" and s["pid"] == os.getpid()
 
 
+async def test_retry_failed_endpoint(cfg):
+    svc = RemService(cfg)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(svc)), base_url="http://rem") as api:
+            assert (await api.post("/jobs/retry")).json() == {"requeued": 0}
+            await api.post("/ingest", json={"source": "cli", "session_id": "s", "turns": [{"role": "user", "content": "hi"}]})
+            svc.memory.db.conn.execute("UPDATE jobs SET status = 'failed', attempts = 5")
+            r = await api.post("/jobs/retry")
+            assert r.status_code == 200 and r.json() == {"requeued": 1}
+            assert (await api.get("/status")).json()["jobs"]["pending"] == 1
+    finally:
+        svc.close()
+
+
 def test_store_calls_run_on_one_thread(cfg):
     svc = RemService(cfg)
     names = set()

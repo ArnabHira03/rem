@@ -43,7 +43,20 @@ def test_payload_roundtrip_keeps_all_fields():
     assert set(p) == {
         "id", "text", "hash", "scope", "project_id", "project_name", "provenance", "status",
         "evidence_source", "observed_at", "source", "session_id", "job_id", "entity_ids",
+        "corroborated_by",
         "created_at", "updated_at",
     }
     assert p["entity_ids"] == [] and p["scope"] == "global"
     assert MemoryRecord.from_payload(p) == rec
+
+
+def test_payload_without_corroborated_by_loads():
+    rec = MemoryRecord(
+        id="x", text="t", hash="h", scope=Scope.GLOBAL, project_id=None, project_name=None,
+        provenance=Provenance.USER_CONFIRMED, status=Status.VERIFIED, evidence_source=None,
+        observed_at=None, source="cli", session_id=None, job_id=None,
+        created_at=utcnow(), updated_at=utcnow(),
+    )
+    p = rec.to_payload()
+    del p["corroborated_by"]
+    assert MemoryRecord.from_payload(p).corroborated_by is None

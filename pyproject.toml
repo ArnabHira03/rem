@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "anthropic>=2.8.0",
     "fastembed>=0.9.1",
     "httpx>=0.28.1",
     "pydantic>=2.14.3",
@@ -25,8 +26,11 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: downloads the real embedding model"]
-addopts = "-m 'not slow'"
+markers = [
+    "slow: downloads the real embedding model",
+    "llm: calls a real LLM provider (costs money; opt-in)",
+]
+addopts = "-m 'not slow and not llm'"
 
 [dependency-groups]
 dev = [

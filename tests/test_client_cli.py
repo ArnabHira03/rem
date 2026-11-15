@@ -60,6 +60,14 @@ def test_client_ingest(daemon_env):
     assert r["accepted"] == 1
 
 
+def test_cli_retry_failed(daemon_env, capsys):
+    assert main(["retry-failed"]) == 0  # auto-starts the daemon
+    assert capsys.readouterr().out.strip().endswith("requeued 0 job(s)")
+    assert main(["retry-failed", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"requeued": 0}
+    assert RemClient(daemon_env.sock).retry_failed() == 0
+
+
 def test_parallel_clients_reads_and_writes(daemon_env):
     from concurrent.futures import ThreadPoolExecutor
 

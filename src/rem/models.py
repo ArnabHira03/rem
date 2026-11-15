@@ -79,6 +79,7 @@ class MemoryRecord(BaseModel):
     session_id: str | None
     job_id: str | None
     entity_ids: list[str] = []
+    corroborated_by: str | None = None
     created_at: str
     updated_at: str
 

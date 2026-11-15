@@ -12,3 +12,7 @@ wheels/
 # Secrets
 .env
 /plans/
+
+# Local agent workspaces
+.claude/worktrees/
+.superpowers/

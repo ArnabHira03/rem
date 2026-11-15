@@ -17,8 +17,10 @@ from rem.config import RemConfig
 from rem.daemon.app import build_app
 from rem.daemon.lock import AlreadyRunning, InstanceLock
 from rem.daemon.service import RemService
-from rem.daemon.worker import JobHandler, NoopHandler, Worker
+from rem.daemon.extraction import ExtractionHandler
+from rem.daemon.worker import JobHandler, Worker
 from rem.errors import RemError
+from rem.llm.factory import create_llm
 
 EXIT_OK, EXIT_ALREADY_RUNNING, EXIT_CONFIG = 0, 2, 3
 
@@ -54,12 +56,16 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         sock.unlink(missing_ok=True)
         sock.parent.mkdir(parents=True, exist_ok=True)
         try:
+            if handler is None:
+                llm = create_llm(cfg.llm)  # raises before any network call if remote is not allowed
+                if llm is not None:
+                    handler = ExtractionHandler(llm, cfg.extraction)
             service = RemService(cfg)
         except RemError as e:
             log.error("%s", e)
             return EXIT_CONFIG
         try:
-            asyncio.run(_serve(service, cfg, handler or NoopHandler()))
+            asyncio.run(_serve(service, cfg, handler))
         finally:
             service.close()
             sock.unlink(missing_ok=True)
@@ -69,7 +75,7 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         lock.release()
 
 
-async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler) -> None:
+async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler | None) -> None:
     sock = cfg.socket_path
     recovered = await service.recover_jobs()
     if recovered:
@@ -84,11 +90,16 @@ async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler) -> No
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: setattr(server, "should_exit", True))
     stop = asyncio.Event()
-    worker = asyncio.create_task(Worker(service, handler).run(stop))
+    worker = None
+    if handler is None:
+        log.info("extraction disabled: no [llm] configured; jobs stay pending")
+    else:
+        worker = asyncio.create_task(Worker(service, handler).run(stop))
     log.info("listening on %s (pid %d)", sock, os.getpid())
     try:
         await server.serve(sockets=[listener])  # returns once a signal sets should_exit
     finally:
         stop.set()
-        await worker
+        if worker is not None:
+            await worker
         listener.close()

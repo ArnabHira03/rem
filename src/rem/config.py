@@ -3,7 +3,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 
 DEFAULT_DATA_DIR = Path("~/.local/share/rem").expanduser()
 DEFAULT_CONFIG_PATH = Path("~/.config/rem/config.toml").expanduser()
@@ -33,11 +33,36 @@ class DaemonConfig(BaseModel):
     start_timeout_seconds: float = 15
 
 
+class LLMConfig(BaseModel):
+    provider: Literal["none", "anthropic", "openai", "ollama"] = "none"
+    model: str | None = None
+    base_url: str | None = None
+    api_key_env: str | None = None
+    timeout_seconds: float = 60
+    effort: Literal["low", "medium", "high"] = "low"
+    think: bool | None = None  # openai/ollama: false sends reasoning_effort "none"; unset = model default
+    allow_remote: bool = False
+
+    @model_validator(mode="after")
+    def _model_required(self):
+        if self.provider != "none" and not self.model:
+            raise ValueError(f"[llm] model is required when provider = '{self.provider}'")
+        return self
+
+
+class ExtractionConfig(BaseModel):
+    restate_min_similarity: float = 0.75  # floor for an LLM "restates" link to count
+    related_limit: int = 10
+    max_candidates: int = 20
+
+
 class RemConfig(BaseModel):
     data_dir: Path
     vector_store: VectorStoreConfig = VectorStoreConfig()
     embedder: EmbedderConfig = EmbedderConfig()
     daemon: DaemonConfig = DaemonConfig()
+    llm: LLMConfig = LLMConfig()
+    extraction: ExtractionConfig = ExtractionConfig()
 
     @property
     def db_path(self) -> Path:

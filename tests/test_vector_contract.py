@@ -74,3 +74,14 @@ def test_list_points_filters_including_null(store):
 
 def test_keyword_search_unsupported_returns_none(store):
     assert store.keyword_search("c", "anything", 5) is None
+
+
+def test_search_filters_on_payload_id(store):
+    # Memory.similarity scores one memory by filtering on its payload "id" field.
+    store.upsert("c", [
+        VectorPoint(ID1, [1, 0, 0], {"id": ID1, "scope": "global"}),
+        VectorPoint(ID2, [0.6, 0.8, 0], {"id": ID2, "scope": "global"}),
+    ])
+    [hit] = store.search("c", [1, 0, 0], 1, {"id": ID2, "scope": "global"})
+    assert hit.id == ID2 and hit.score == pytest.approx(0.6, abs=1e-6)
+    assert store.search("c", [1, 0, 0], 1, {"id": ID2, "scope": "system"}) == []
