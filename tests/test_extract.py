@@ -53,13 +53,21 @@ def test_extract_parses_and_caps():
 def test_extract_drops_invalid_items_but_keeps_valid(caplog):
     out = {"facts": [{"text": "  ", "scope": "global", "origin": "user", "restates": None},
                      {"text": "Uses Fedora secretplanet", "scope": "planet", "origin": "user", "restates": None},
-                     {"text": "Uses Fedora nometa", "scope": "system", "origin": "user"},
+                     {"text": "Uses Fedora noscope", "origin": "user", "restates": None},
                      "Uses Fedora as a bare string",
                      {"text": "Uses Fedora 44", "scope": "system", "origin": "user", "restates": None}]}
     assert [c.text for c in extract(FakeLLM([out]), T, [], [], 20).candidates] == ["Uses Fedora 44"]
     assert caplog.text.count("dropping") == 4
-    assert "secretplanet" not in caplog.text and "nometa" not in caplog.text and "bare string" not in caplog.text
+    assert "secretplanet" not in caplog.text and "noscope" not in caplog.text and "bare string" not in caplog.text
     assert "24 chars, sha256" in caplog.text
+
+
+def test_extract_missing_restates_key_means_null(caplog):
+    related = [rec("Uses Poetry", id="m-0")]
+    out = {"facts": [{"text": "Uses Poetry", "scope": "global", "origin": "user"}]}
+    [c] = extract(FakeLLM([out]), T, [], related, 20).candidates
+    assert c.text == "Uses Poetry" and c.restates is None
+    assert "WARNING" not in caplog.text
 
 
 def test_extract_keeps_duplicate_texts_for_apply_to_collapse():

@@ -116,8 +116,8 @@ def extract(
         raise LLMError("extraction response has no 'facts' list")
     candidates: list[Candidate] = []
     for n, item in enumerate(facts):
-        if not isinstance(item, dict) or "restates" not in item:
-            log.warning("dropping extracted fact #%d: not an object with a 'restates' field", n)
+        if not isinstance(item, dict):
+            log.warning("dropping extracted fact #%d: not an object", n)
             continue
         try:
             cand = Candidate.model_validate({k: v for k, v in item.items() if k != "restates"})
@@ -126,7 +126,8 @@ def extract(
             log.warning("dropping invalid extracted fact #%d (%s): %s: %s", n, _fingerprint(item.get("text")),
                         ".".join(str(p) for p in err["loc"]), err["msg"])
             continue
-        candidates.append(cand.model_copy(update={"restates": _resolve(item["restates"], related, n)}))
+        # The schema requires "restates", but a lenient provider may omit it: missing means null.
+        candidates.append(cand.model_copy(update={"restates": _resolve(item.get("restates"), related, n)}))
     if len(candidates) > max_candidates:
         log.warning(
             "dropping %d candidates over the cap of %d", len(candidates) - max_candidates, max_candidates
