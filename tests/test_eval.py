@@ -1,0 +1,78 @@
+import pytest
+
+from rem.cli import main
+from rem.embed.hashing import HashingEmbedder
+from rem.errors import LLMError
+from rem.evals.extraction import DEFAULT_DATASET, load_cases, match_facts, run_eval
+from rem.llm.fake import FakeLLM
+
+FISH = {"text": "Uses fish shell", "scope": "global", "origin": "user"}
+CASE_FISH = {
+    "id": "fish", "turns": [{"role": "user", "content": "I use fish shell"}], "context": [],
+    "existing": [], "expected": [FISH], "expect_corroborate": [],
+}
+CASE_EMPTY = {
+    "id": "empty", "turns": [{"role": "user", "content": "thanks"}], "context": [],
+    "existing": [], "expected": [], "expect_corroborate": [],
+}
+POETRY = "The project manages dependencies with Poetry"
+CASE_DEDUP = {
+    "id": "dedup", "turns": [{"role": "user", "content": "yes we use Poetry"}], "context": [],
+    "existing": [{"text": POETRY, "scope": "project", "status": "unverified"}],
+    "expected": [{"text": POETRY, "scope": "project", "origin": "user"}], "expect_corroborate": [POETRY],
+}
+
+
+@pytest.fixture
+def hashing():
+    return HashingEmbedder()
+
+
+def test_match_facts_one_to_one(hashing):
+    assert match_facts(["Uses fish shell"], ["Uses fish shell", "Uses zsh"], hashing) == [(0, 0)]
+
+
+def test_perfect_fake_scores_one(cfg, hashing):
+    llm = FakeLLM([{"facts": [FISH]}, {"facts": []}])
+    r = run_eval(llm, hashing, [CASE_FISH, CASE_EMPTY], cfg)
+    assert (r.precision, r.recall, r.scope_acc, r.origin_acc, r.json_valid_rate) == (1, 1, 1, 1, 1)
+    assert r.cases == 2 and r.failures == []
+
+
+def test_invalid_json_counts_against_validity(cfg, hashing):
+    r = run_eval(FakeLLM([LLMError("invalid JSON")]), hashing, [CASE_FISH], cfg)
+    assert r.json_valid_rate == 0 and r.recall == 0 and r.failures[0]["id"] == CASE_FISH["id"]
+
+
+def test_dedup_case_scores_corroboration(cfg, hashing):
+    llm = FakeLLM([{"facts": CASE_DEDUP["expected"]}])
+    assert run_eval(llm, hashing, [CASE_DEDUP], cfg).dedup_acc == 1
+
+
+def test_dedup_case_fails_when_nothing_extracted(cfg, hashing):
+    r = run_eval(FakeLLM([{"facts": []}]), hashing, [CASE_DEDUP], cfg)
+    assert r.dedup_acc == 0 and r.failures[0]["id"] == "dedup"
+
+
+def test_wrong_scope_lowers_scope_accuracy(cfg, hashing):
+    wrong = {**FISH, "scope": "system"}
+    r = run_eval(FakeLLM([{"facts": [wrong]}]), hashing, [CASE_FISH], cfg)
+    assert r.recall == 1 and r.scope_acc == 0 and r.origin_acc == 1
+
+
+def test_eval_never_touches_the_real_store(cfg, hashing):
+    run_eval(FakeLLM([{"facts": [FISH]}]), hashing, [CASE_FISH], cfg)
+    assert not cfg.db_path.exists()
+
+
+def test_shipped_dataset_is_well_formed():
+    cases = load_cases(DEFAULT_DATASET)
+    assert len(cases) >= 30 and len({c["id"] for c in cases}) == len(cases)
+    assert sum(1 for c in cases if not c["expected"]) >= 4
+    assert sum(1 for c in cases if c["expect_corroborate"]) >= 4
+    assert any("[REDACTED:" in t["content"] for c in cases for t in c["turns"])
+
+
+def test_cli_eval_without_llm_exits_3(rem_home, capsys):
+    assert main(["eval", "extraction"]) == 3
+    assert "no [llm] configured" in capsys.readouterr().err

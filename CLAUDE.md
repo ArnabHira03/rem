@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-rem is a local-first personal memory layer for AI agents, modelled on Mem0. Python 3.14, uv, `uv_build` backend, code in `src/rem/`. **M1 (core storage + Memory façade) and M2 (daemon) are implemented.** The CLI is a thin client of the daemon and starts it automatically. Later milestones (LLM extraction, hooks, MCP, …) are not built yet.
+rem is a local-first personal memory layer for AI agents, modelled on Mem0. Python 3.14, uv, `uv_build` backend, code in `src/rem/`. **M1 (core storage + Memory façade), M2 (daemon) and M3 (LLM extraction) are implemented.** The CLI is a thin client of the daemon and starts it automatically. Later milestones (hooks, MCP, …) are not built yet.
 
 The **approved design (rev 2)** is `docs/superpowers/specs/2026-11-15-rem-design.md`, with diagrams in `docs/superpowers/specs/2026-11-15-rem-architecture.html`. It is implemented milestone by milestone (M1 → M9). Background notes are in `plans/initial_plan.md` and `plans/Mem0 Memory Pipeline - Claude.pdf`; `plans/` is **gitignored** and local only.
 
@@ -13,11 +13,14 @@ Each milestone gets its own implementation plan before any code is written.
 ## Commands
 
 - `uv sync`: install dependencies into `.venv`
-- `uv run pytest`: run the test suite (excludes `slow`)
+- `uv run pytest`: run the test suite (excludes `slow` and `llm`)
 - `uv run pytest tests/test_memory.py::test_add_get_and_history -v`: run one test
 - `uv run pytest -m slow`: tests that download the real fastembed model (about 70 MB, once, into `~/.cache/rem/fastembed`)
 - `uv run rem <add|search|list|get|update|delete|confirm|history> ...`: memory commands; they auto-start the daemon. `--json` works before or after the subcommand.
+- `uv run pytest -m llm`: tests that call a real LLM provider (cost money; need `ANTHROPIC_API_KEY`)
+- `uv run rem eval extraction [--dataset PATH] [--limit N] [--json]`: score the configured LLM on the extraction dataset (`src/rem/evals/data/extraction.jsonl`). It runs in-process against throwaway stores, never contacts the daemon, and calls the LLM for every case, so it costs money with a remote provider. Exits 3 with no `[llm]` or without `allow_remote`.
 - `uv run rem start|stop|status|daemon|install-service [--enable]`: daemon lifecycle (`daemon` runs it in the foreground; `install-service` writes the systemd user unit)
+- Config for extraction: `[llm]` (`provider` = `none`|`anthropic`|`openai`|`ollama`, `model`, `base_url`, `api_key_env`, `timeout_seconds`, `effort`, `allow_remote`) and `[extraction]` (`dedup_threshold`, `related_limit`, `max_candidates`). A non-loopback endpoint (including the Anthropic API) needs `allow_remote = true`. API keys come only from environment variables, never from config.
 - Set `REM_HOME=<dir>` (data), `REM_CONFIG=<file>` (config) **and `REM_SOCKET=<short path>`** to run against a throwaway store. Without `REM_SOCKET` you talk to the real daemon at `$XDG_RUNTIME_DIR/rem.sock`. The config can set `[embedder] provider = "hashing"` for an offline embedder, and `[vector_store] provider = "memory"`.
 
 There is no lint or format tooling configured.
@@ -32,7 +35,9 @@ Read the design spec for the details. These are the invariants that span modules
   - `rem.daemon.server.run_daemon` runs uvicorn on a socket rem binds itself, never uvicorn's `uds=`, because uvicorn chmods that to 0666.
   - Every `Memory` and `RemDB` call goes through `StoreThread`, a single thread that is the single writer.
   - `/ingest` stores redacted turns and a debounced per-session job (`storage/queue.py`).
-  - `Worker` runs jobs through a `JobHandler`. It is `NoopHandler` until M3 plugs in extraction.
+  - `Worker` runs jobs through a `JobHandler`. With an `[llm]` configured it is `ExtractionHandler`; with none the worker doesn't start and jobs stay `pending`.
+  - Extraction is cached per job (`extractions` table, schema v3) before anything is written, so replaying a job never makes a second LLM call. The LLM call runs in a daemon thread, off the store thread, so the API keeps being served and shutdown never waits on it.
+  - The systemd unit needs `ANTHROPIC_API_KEY` through `systemctl --user edit rem` (`Environment=` or `EnvironmentFile=`), never a key in config.
   - Exit codes: 2 means already running, 3 means a config error. The systemd unit doesn't restart on either.
   - Socket paths must stay ≤ 100 bytes, so tests use `/tmp/rem-*` directories (the `short_dir` and `daemon_env` fixtures).
 

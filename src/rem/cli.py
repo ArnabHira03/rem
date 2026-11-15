@@ -54,6 +54,11 @@ def _parser() -> argparse.ArgumentParser:
     cmd("status", "show daemon status")
     i = cmd("install-service", "install the systemd user service")
     i.add_argument("--enable", action="store_true", help="also enable and start it now")
+
+    ev = cmd("eval", "score the configured LLM (runs in-process, no daemon)")
+    ev.add_argument("what", choices=["extraction"])
+    ev.add_argument("--dataset", type=Path, help="JSONL dataset (default: the one shipped with rem)")
+    ev.add_argument("--limit", type=int, help="only run the first N cases")
     return p
 
 
@@ -99,6 +104,43 @@ def _memory_command(args, cfg):
             return c.confirm(args.id)
         case "history":
             return c.history(args.id)
+
+
+def _eval(args, cfg) -> int:
+    from rem.embed.factory import create_embedder
+    from rem.errors import RemoteLLMNotAllowed
+    from rem.evals.extraction import DEFAULT_DATASET, load_cases, run_eval
+    from rem.llm.factory import create_llm
+
+    try:
+        llm = create_llm(cfg.llm)
+    except RemoteLLMNotAllowed as e:
+        print(f"rem: {e}", file=sys.stderr)
+        return 3
+    if llm is None:
+        print("rem: no [llm] configured; set [llm] provider/model", file=sys.stderr)
+        return 3
+    cases = load_cases(args.dataset or DEFAULT_DATASET)
+    if args.limit is not None:
+        cases = cases[: args.limit]
+    report = run_eval(llm, create_embedder(cfg.embedder), cases, cfg)
+    if args.json:
+        print(json.dumps({"llm": llm.name, **report.to_dict()}, indent=2))
+        return 0
+    print(f"extraction eval: {llm.name}, {report.cases} cases")
+    for label, value in [
+        ("precision", report.precision), ("recall", report.recall), ("scope accuracy", report.scope_acc),
+        ("origin accuracy", report.origin_acc), ("JSON validity", report.json_valid_rate),
+        ("dedup accuracy", report.dedup_acc),
+    ]:
+        print(f"  {label:<16}{value:6.2f}")
+    print(f"  {'latency p50':<16}{report.latency_p50:5.2f}s")
+    print(f"  {'latency p95':<16}{report.latency_p95:5.2f}s")
+    if report.failures:
+        print(f"{len(report.failures)} case(s) with problems:")
+        for f in report.failures:
+            print(f"  {f['id']}: " + "; ".join(f"{k}={v}" for k, v in f.items() if k != "id"))
+    return 0
 
 
 def _status(args, cfg) -> int:
@@ -153,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_daemon(cfg)
     try:
         match args.cmd:
+            case "eval":
+                return _eval(args, cfg)
             case "status":
                 return _status(args, cfg)
             case "stop":
