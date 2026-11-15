@@ -219,6 +219,12 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
     except SystemExit as e:
         return int(e.code or 0)
+    if args.cmd == "install":  # edits Claude Code settings only: works even with a broken rem config
+        try:
+            return _install(args)
+        except RemError as e:
+            print(f"rem: {e}", file=sys.stderr)
+            return 1
     try:
         cfg = load_config()
     except ValueError as e:
@@ -237,8 +243,6 @@ def main(argv: list[str] | None = None) -> int:
                 return _status(args, cfg)
             case "stop":
                 return _stop(cfg)
-            case "install":
-                return _install(args)
             case "install-service":
                 from rem.systemd import ENABLE_HINT, install_unit
 

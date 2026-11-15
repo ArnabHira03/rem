@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 
 from rem.client import DaemonUnavailable, RemClient, start_daemon_background
-from rem.config import RemConfig, load_config
+from rem.config import RemConfig, ensure_private_dir, load_config
 from rem.redact import redact
 from rem.spool import write_spool
 
@@ -95,7 +95,7 @@ def _log_line(cfg: RemConfig, event, what: str) -> None:
     """Append one line to hook.log: never prompt, reply or argv text, only fixed strings and class names."""
     try:
         name = event if isinstance(event, str) and event in _EVENTS else "unknown"
-        cfg.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        ensure_private_dir(cfg.data_dir)
         line = f"{datetime.now(timezone.utc).isoformat()} {name} {what}\n"
         fd = os.open(cfg.data_dir / "hook.log", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(fd, "a") as f:

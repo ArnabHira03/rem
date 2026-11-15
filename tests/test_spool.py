@@ -69,3 +69,33 @@ def test_valid_json_that_is_not_an_object_goes_to_bad(tmp_path):
     assert drain_spool(tmp_path, seen.append) == 0
     assert seen == []
     assert [q.name for q in (tmp_path / "spool" / "bad").iterdir()] == [p.name]
+
+
+def reject(b):
+    raise ValueError("bad")
+
+
+def test_first_spool_under_umask_022_is_private(tmp_path):
+    import os
+
+    data = tmp_path / "data"  # does not exist yet: rem creates it
+    old = os.umask(0o022)
+    try:
+        p = write_spool(data, body("a"))
+        assert drain_spool(data, reject) == 0  # quarantine creates spool/bad
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    assert stat.S_IMODE(p.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE((p.parent / "bad").stat().st_mode) == 0o700
+    assert stat.S_IMODE((p.parent / "bad" / p.name).stat().st_mode) == 0o600
+
+
+def test_existing_data_dir_mode_is_left_alone(tmp_path):
+    import os
+
+    data = tmp_path / "data"
+    data.mkdir()
+    os.chmod(data, 0o750)
+    write_spool(data, body("a"))
+    assert stat.S_IMODE(data.stat().st_mode) == 0o750

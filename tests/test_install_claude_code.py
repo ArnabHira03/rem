@@ -217,3 +217,57 @@ def test_cli_invalid_json_exit_1(path, tmp_path, monkeypatch, capsys):
     assert main(["install", "claude-code"]) == 1
     assert "not valid JSON" in capsys.readouterr().err
     assert path.read_text() == "nope"
+
+
+# --- final fix wave ---------------------------------------------------------------------------
+
+def test_backup_created_with_original_mode_under_umask_022(path, monkeypatch):
+    path.parent.mkdir(parents=True)
+    path.write_text('{"model": "x"}')
+    os.chmod(path, 0o600)
+    modes = []
+    real_open = os.open
+
+    def spy(p, flags, mode=0o777, *a, **kw):
+        fd = real_open(p, flags, mode, *a, **kw)
+        if str(p).endswith(".rem-backup"):
+            modes.append(stat.S_IMODE(os.fstat(fd).st_mode))  # the mode the file is born with
+        return fd
+
+    monkeypatch.setattr(ic.os, "open", spy)
+    old = os.umask(0o022)
+    try:
+        ic.install(path, CMD)
+    finally:
+        os.umask(old)
+    backup = path.with_name("settings.json.rem-backup")
+    assert modes == [0o600]
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert backup.read_text() == '{"model": "x"}'
+
+
+def test_uninstall_mentions_kept_backup(path):
+    path.parent.mkdir(parents=True)
+    path.write_text('{"model": "x"}')
+    ic.install(path, CMD)
+    msg = ic.uninstall(path)
+    backup = path.with_name("settings.json.rem-backup")
+    assert msg.splitlines()[0] == f"removed rem hooks from {path}"
+    assert str(backup) in msg.splitlines()[1]
+    assert backup.exists()
+
+
+def test_uninstall_without_backup_says_nothing_about_it(path):
+    path.parent.mkdir(parents=True)
+    path.write_text('{"model": "x"}')
+    assert ic.uninstall(path) == f"nothing to remove in {path}"
+
+
+@pytest.mark.parametrize("extra", [[], ["--uninstall"]])
+def test_cli_install_ignores_broken_rem_config(path, tmp_path, monkeypatch, capsys, extra):
+    bad = tmp_path / "bad.toml"
+    bad.write_text("[llm]\nprovider = 'nope'\n")
+    monkeypatch.setenv("REM_CONFIG", str(bad))
+    monkeypatch.chdir(tmp_path)
+    assert main(["install", "claude-code", *extra]) == 0
+    assert capsys.readouterr().err == ""

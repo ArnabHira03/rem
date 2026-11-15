@@ -81,15 +81,26 @@ def _read(path: Path) -> dict:
     return data
 
 
+def _backup_path(path: Path) -> Path:
+    return path.with_name(path.name + ".rem-backup")
+
+
 def _write(path: Path, data: dict) -> None:
     text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     mode = None
     if path.exists():
         mode = path.stat().st_mode & 0o777
-        backup = path.with_name(path.name + ".rem-backup")
+        backup = _backup_path(path)
         if not backup.exists():  # the first backup is the user's pre-rem settings: keep it
-            backup.write_bytes(path.read_bytes())
-            os.chmod(backup, mode)
+            # created with the original's mode from the start: no window where it is umask-readable
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    os.fchmod(f.fileno(), mode)  # os.open's mode is still masked by the umask
+                    f.write(path.read_bytes())
+            except BaseException:
+                backup.unlink(missing_ok=True)
+                raise
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -128,8 +139,11 @@ def install(path: Path, command: str, *, dry_run: bool = False) -> str:
 
 
 def uninstall(path: Path, *, dry_run: bool = False) -> str:
-    return _apply(path, removed, dry_run, f"removed rem hooks from {path}", f"nothing to remove in {path}")
-
+    msg = _apply(path, removed, dry_run, f"removed rem hooks from {path}", f"nothing to remove in {path}")
+    backup = _backup_path(path.resolve())
+    if not dry_run and backup.exists():
+        msg += f"\nyour settings from before rem was installed are kept in {backup}"
+    return msg
 
 
 def _has_marker(path: Path) -> bool:

@@ -10,6 +10,17 @@ DEFAULT_CONFIG_PATH = Path("~/.config/rem/config.toml").expanduser()
 DEFAULT_CACHE_DIR = Path("~/.cache/rem/fastembed").expanduser()
 
 
+def ensure_private_dir(path: Path) -> Path:
+    """Create `path` (and missing parents) if needed; a directory rem creates is chmod 0700 whatever the umask.
+    An existing directory is left as it is."""
+    try:
+        path.mkdir(mode=0o700, parents=True)
+    except FileExistsError:
+        return path
+    os.chmod(path, 0o700)
+    return path
+
+
 class VectorStoreConfig(BaseModel):
     provider: Literal["qdrant", "memory"] = "qdrant"
     path: Path | None = None

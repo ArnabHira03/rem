@@ -425,3 +425,20 @@ def test_subprocess_broken_stdout_pipe_is_silent(tmp_path):
         os.close(w_fd)
     assert (r.returncode, r.stderr) == (0, b"")
     assert "BrokenPipeError" in (tmp_path / "data" / "hook.log").read_text()
+
+
+# --- final fix wave ---------------------------------------------------------------------------
+
+def test_first_hook_log_under_umask_022_is_private(hook_env):
+    import os
+    import stat
+
+    from rem.adapters.claude_code import main
+
+    old = os.umask(0o022)
+    try:
+        assert main(stdin=io.StringIO("{not json"), stdout=io.StringIO()) == 0
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(hook_env.stat().st_mode) == 0o700
+    assert stat.S_IMODE((hook_env / "hook.log").stat().st_mode) == 0o600

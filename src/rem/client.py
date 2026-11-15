@@ -1,5 +1,6 @@
 """Talk to the rem daemon over its Unix socket, starting it on demand."""
 
+import os
 import subprocess
 import sys
 import time
@@ -7,7 +8,7 @@ from pathlib import Path
 
 import httpx
 
-from rem.config import RemConfig
+from rem.config import RemConfig, ensure_private_dir
 from rem.errors import MemoryNotFound, RemError
 
 
@@ -96,11 +97,13 @@ def _log_tail(path: Path, lines: int = 20) -> str:
 
 
 def _spawn_daemon(cfg: RemConfig) -> subprocess.Popen:
-    cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    with open(cfg.log_path, "a") as log, open("/dev/null") as devnull:
+    ensure_private_dir(cfg.data_dir)
+    # daemon.log carries job-failure text: create it 0600 here, before the daemon sets its umask
+    fd = os.open(cfg.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as log, open(os.devnull) as devnull:
         return subprocess.Popen(
             [sys.executable, "-m", "rem", "daemon"],
-            stdin=devnull, stdout=log, stderr=log, start_new_session=True,
+            stdin=devnull, stdout=log, stderr=log, start_new_session=True, cwd="/",
         )
 
 

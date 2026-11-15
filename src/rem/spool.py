@@ -10,12 +10,15 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from rem.config import ensure_private_dir
+
 log = logging.getLogger("rem.spool")
 
 
 def _spool_dir(data_dir: Path) -> Path:
+    ensure_private_dir(data_dir)
     d = data_dir / "spool"
-    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    d.mkdir(mode=0o700, exist_ok=True)
     os.chmod(d, 0o700)
     return d
 
@@ -37,7 +40,7 @@ def write_spool(data_dir: Path, body: dict) -> Path:
 
 def _quarantine(path: Path) -> None:
     bad = path.parent / "bad"
-    bad.mkdir(mode=0o700, exist_ok=True)
+    ensure_private_dir(bad)
     os.replace(path, bad / path.name)
 
 
