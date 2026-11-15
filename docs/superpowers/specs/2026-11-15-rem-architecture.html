@@ -1,0 +1,494 @@
+<title>rem Architecture</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+/* Layout: one reading column of numbered figures, each a mechanism drawn as inline SVG; blue = writes, amber dashed = reads */
+:root{
+  --bg:#f3f5f8; --panel:#ffffff; --soft:#e7ecf3; --fg:#17202c; --muted:#5a6577; --line:#c6cedb;
+  --write:#2a62c6; --read:#b5710e; --warn:#b5412c;
+  --display:"Space Grotesk",ui-sans-serif,system-ui,sans-serif;
+  --sans:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f141b; --panel:#171d26; --soft:#1f2734; --fg:#e3e8f0; --muted:#97a3b5; --line:#334050;
+  --write:#7aa7ff; --read:#efa84a; --warn:#ff8b75; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --panel:#171d26; --soft:#1f2734; --fg:#e3e8f0; --muted:#97a3b5; --line:#334050;
+  --write:#7aa7ff; --read:#efa84a; --warn:#ff8b75; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font:15px/1.6 var(--sans)}
+.wrap{max-width:1040px;margin:0 auto;padding-block:40px 64px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:grid;gap:44px}
+header{display:grid;gap:12px}
+.eyebrow{font:500 12px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+h1{font:600 clamp(30px,5vw,44px)/1.1 var(--display);margin:0;text-wrap:balance}
+h2{font:600 22px/1.25 var(--display);margin:0;text-wrap:balance}
+p{margin:0;max-width:68ch}
+.lede{color:var(--muted);font-size:16px}
+code,.mono{font-family:var(--mono);font-size:.9em}
+.legend{display:flex;flex-wrap:wrap;gap:8px 22px;font:13px var(--mono);color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:8px}
+.legend i{display:inline-block;width:30px;border-top:2px solid}
+.lg-w{border-color:var(--write)} .lg-r{border-color:var(--read);border-top-style:dashed!important}
+.lg-n{border-color:var(--muted)} .lg-x{border-color:var(--warn)}
+.glance{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.glance div{background:var(--panel);padding:14px 16px;display:grid;gap:4px;min-width:0}
+.glance dt{font:500 11px var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+.glance dd{margin:0;font-size:14px}
+section{display:grid;gap:14px}
+.sec-head{display:grid;gap:6px}
+.num{font:500 12px var(--mono);color:var(--write)}
+figure{margin:0;display:grid;gap:10px}
+.scroll{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.scroll svg{display:block;width:100%;min-width:760px;height:auto}
+figcaption{color:var(--muted);font-size:14px;max-width:80ch}
+/* svg vocabulary */
+.box{fill:var(--panel);stroke:var(--line);stroke-width:1.2}
+.soft{fill:var(--soft);stroke:var(--line);stroke-width:1}
+.key{fill:var(--panel);stroke:var(--write);stroke-width:1.8}
+.dash{stroke-dasharray:5 4}
+.bwarn{fill:var(--panel);stroke:var(--warn);stroke-width:1.6}
+.t{fill:var(--fg);font:500 12px var(--mono)}
+.tb{fill:var(--fg);font:600 13px var(--sans)}
+.tm{fill:var(--muted);font:11px var(--mono)}
+.tw{fill:var(--write);font:500 12px var(--mono)}
+.tr{fill:var(--read);font:500 11px var(--mono)}
+.tx{fill:var(--warn);font:600 13px var(--sans)}
+.lw{stroke:var(--write);stroke-width:1.7;fill:none}
+.lr{stroke:var(--read);stroke-width:1.6;fill:none;stroke-dasharray:6 4}
+.ln{stroke:var(--muted);stroke-width:1.3;fill:none}
+.lx{stroke:var(--warn);stroke-width:1.6;fill:none}
+.life{stroke:var(--line);stroke-width:1.2;stroke-dasharray:2 5}
+.mw{fill:var(--write)} .mr{fill:var(--read)} .mn{fill:var(--muted)} .mx{fill:var(--warn)}
+.dotc{fill:var(--write)} .dotg{fill:var(--panel);stroke:var(--write);stroke-width:2}
+/* storage panels */
+.stores{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.store{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;display:grid;gap:12px;align-content:start;min-width:0}
+.store.canon{border-color:var(--write);border-width:1.6px}
+.store h3{margin:0;font:600 17px var(--display)}
+.store .path{font:12px var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.role{font:500 11px var(--mono);letter-spacing:.07em;text-transform:uppercase}
+.canon .role{color:var(--write)} .ops .role{color:var(--muted)}
+.store ul{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.store li{display:grid;gap:2px;border-top:1px solid var(--line);padding-top:10px;min-width:0}
+.store li b{font:500 13px var(--mono)}
+.store li span{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.tag{font:500 10.5px var(--mono);color:var(--write);border:1px solid var(--write);border-radius:4px;padding:0 5px;margin-left:6px;vertical-align:1px}
+.note{font-size:13px;color:var(--muted)}
+footer{color:var(--muted);font-size:13px;border-top:1px solid var(--line);padding-top:16px}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">Design · rev 2 · 15 Nov 2026 · not built yet</div>
+  <h1>rem architecture</h1>
+  <p class="lede">A local-first personal memory layer. Agents send it raw conversation; rem's own LLM extracts facts, a rule-based trust step labels them, and one daemon stores them Mem0-style: canonical memories in a Qdrant vector store, history and operational state in SQLite.</p>
+  <div class="legend" aria-label="Line legend">
+    <span><i class="lg-w"></i>writes data</span>
+    <span><i class="lg-r"></i>reads data</span>
+    <span><i class="lg-n"></i>call / next step</span>
+    <span><i class="lg-x"></i>failure path</span>
+  </div>
+</header>
+
+<dl class="glance">
+  <div><dt>First client</dt><dd>Claude Code: hooks for capture and session start, MCP for search</dd></div>
+  <div><dt>Extraction</dt><dd>rem's own LLM. API while evaluating, local long-term</dd></div>
+  <div><dt>Process</dt><dd>One daemon, Unix socket, systemd + auto-start</dd></div>
+  <div><dt>Canonical store</dt><dd>Qdrant local mode, swappable behind a VectorStore interface</dd></div>
+  <div><dt>Scopes</dt><dd>global · system · project, with current project ranked first</dd></div>
+  <div><dt>Trust</dt><dd>Provenance on every memory; assistant claims start unverified</dd></div>
+</dl>
+
+<section>
+  <div class="sec-head"><span class="num">01 · system</span><h2>Who talks to whom</h2></div>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 960 592" role="img" aria-label="Clients reach the rem daemon only through a local Unix socket; inside the daemon, ingest feeds a job queue, the worker runs extract then trust, and only the Memory façade writes to Qdrant and SQLite.">
+      <defs>
+        <marker id="a1w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mw"/></marker>
+        <marker id="a1r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mr"/></marker>
+        <marker id="a1n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mn"/></marker>
+      </defs>
+      <!-- clients -->
+      <text x="40" y="14" class="tm">CLIENTS</text>
+      <rect x="40" y="22" width="320" height="56" rx="8" class="box"/>
+      <text x="200" y="46" text-anchor="middle" class="tb">Claude Code</text>
+      <text x="200" y="64" text-anchor="middle" class="tm">hooks · MCP client</text>
+      <rect x="400" y="22" width="220" height="56" rx="8" class="box dash"/>
+      <text x="510" y="46" text-anchor="middle" class="tb">Codex · Cursor</text>
+      <text x="510" y="64" text-anchor="middle" class="tm">later</text>
+      <rect x="660" y="22" width="260" height="56" rx="8" class="box"/>
+      <text x="790" y="46" text-anchor="middle" class="tb">You</text>
+      <text x="790" y="64" text-anchor="middle" class="tm">terminal</text>
+      <!-- entry points -->
+      <rect x="40" y="130" width="170" height="56" rx="8" class="box"/>
+      <text x="125" y="154" text-anchor="middle" class="tb">rem mcp</text>
+      <text x="125" y="172" text-anchor="middle" class="tm">stdio MCP shim</text>
+      <rect x="230" y="130" width="200" height="56" rx="8" class="box"/>
+      <text x="330" y="154" text-anchor="middle" class="tb">rem hook claude-code</text>
+      <text x="330" y="172" text-anchor="middle" class="tm">capture adapter · cursor</text>
+      <rect x="450" y="130" width="140" height="56" rx="8" class="box dash"/>
+      <text x="520" y="154" text-anchor="middle" class="tb">other adapters</text>
+      <text x="520" y="172" text-anchor="middle" class="tm">same contract</text>
+      <rect x="660" y="130" width="260" height="56" rx="8" class="box"/>
+      <text x="790" y="154" text-anchor="middle" class="tb">rem CLI</text>
+      <text x="790" y="172" text-anchor="middle" class="tm">search · add · status · eval</text>
+      <line x1="125" y1="78" x2="125" y2="127" class="ln" marker-end="url(#a1n)"/>
+      <text x="133" y="107" class="tm">tool calls</text>
+      <line x1="330" y1="78" x2="330" y2="127" class="ln" marker-end="url(#a1n)"/>
+      <text x="338" y="107" class="tm">hook events</text>
+      <line x1="520" y1="78" x2="520" y2="127" class="ln dash" marker-end="url(#a1n)"/>
+      <line x1="790" y1="78" x2="790" y2="127" class="ln" marker-end="url(#a1n)"/>
+      <!-- socket -->
+      <line x1="125" y1="186" x2="125" y2="228" class="ln" marker-end="url(#a1n)"/>
+      <text x="133" y="212" class="tm">search · add · confirm</text>
+      <line x1="330" y1="186" x2="330" y2="228" class="ln" marker-end="url(#a1n)"/>
+      <text x="338" y="212" class="tm">/ingest · /context</text>
+      <line x1="520" y1="186" x2="520" y2="228" class="ln dash" marker-end="url(#a1n)"/>
+      <line x1="790" y1="186" x2="790" y2="228" class="ln" marker-end="url(#a1n)"/>
+      <rect x="40" y="230" width="880" height="32" rx="6" class="soft"/>
+      <text x="480" y="251" text-anchor="middle" class="t">Unix socket · $XDG_RUNTIME_DIR/rem.sock · local only, no network port</text>
+      <!-- daemon -->
+      <rect x="40" y="300" width="880" height="190" rx="10" class="box"/>
+      <text x="60" y="324" class="tb">rem daemon</text>
+      <text x="146" y="324" class="tm">one process · flock on rem.lock · owns both stores</text>
+      <line x1="125" y1="262" x2="125" y2="342" class="ln" marker-end="url(#a1n)"/>
+      <rect x="60" y="345" width="130" height="44" rx="6" class="box"/>
+      <text x="125" y="364" text-anchor="middle" class="tb">HTTP API</text>
+      <text x="125" y="380" text-anchor="middle" class="tm">validates</text>
+      <rect x="215" y="345" width="130" height="44" rx="6" class="box"/>
+      <text x="280" y="364" text-anchor="middle" class="tb">ingest</text>
+      <text x="280" y="380" text-anchor="middle" class="tm">redact · dedup turns</text>
+      <rect x="370" y="345" width="140" height="44" rx="6" class="box"/>
+      <text x="440" y="364" text-anchor="middle" class="tb">job queue</text>
+      <text x="440" y="380" text-anchor="middle" class="tm">in rem.db · leases</text>
+      <rect x="535" y="345" width="110" height="44" rx="6" class="box"/>
+      <text x="590" y="364" text-anchor="middle" class="tb">extract</text>
+      <text x="590" y="380" text-anchor="middle" class="tm">candidates</text>
+      <rect x="665" y="345" width="100" height="44" rx="6" class="box"/>
+      <text x="715" y="364" text-anchor="middle" class="tb">trust</text>
+      <text x="715" y="380" text-anchor="middle" class="tm">rules, no LLM</text>
+      <rect x="785" y="345" width="120" height="44" rx="6" class="key"/>
+      <text x="845" y="364" text-anchor="middle" class="tb">Memory façade</text>
+      <text x="845" y="380" text-anchor="middle" class="tw">only writer</text>
+      <line x1="190" y1="367" x2="212" y2="367" class="ln" marker-end="url(#a1n)"/>
+      <line x1="345" y1="367" x2="367" y2="367" class="ln" marker-end="url(#a1n)"/>
+      <line x1="510" y1="367" x2="532" y2="367" class="ln" marker-end="url(#a1n)"/>
+      <line x1="645" y1="367" x2="662" y2="367" class="ln" marker-end="url(#a1n)"/>
+      <line x1="765" y1="367" x2="782" y2="367" class="ln" marker-end="url(#a1n)"/>
+      <rect x="60" y="410" width="200" height="44" rx="6" class="box"/>
+      <text x="160" y="429" text-anchor="middle" class="tb">retrieve</text>
+      <text x="160" y="445" text-anchor="middle" class="tm">search · context · read-only</text>
+      <rect x="290" y="410" width="170" height="44" rx="6" class="box"/>
+      <text x="375" y="429" text-anchor="middle" class="tb">Embedder</text>
+      <text x="375" y="445" text-anchor="middle" class="tm">fastembed · local</text>
+      <rect x="485" y="410" width="170" height="44" rx="6" class="box"/>
+      <text x="570" y="429" text-anchor="middle" class="tb">LLM</text>
+      <text x="570" y="445" text-anchor="middle" class="tm">API now → local later</text>
+      <line x1="100" y1="389" x2="100" y2="407" class="ln" marker-end="url(#a1n)"/>
+      <line x1="600" y1="389" x2="600" y2="407" class="ln" marker-end="url(#a1n)"/>
+      <!-- writes -->
+      <polyline points="825,389 825,472 300,472 300,527" class="lw" marker-end="url(#a1w)"/>
+      <text x="562" y="466" text-anchor="middle" class="tw">upsert memories + vectors</text>
+      <line x1="878" y1="389" x2="878" y2="527" class="lw" marker-end="url(#a1w)"/>
+      <text x="870" y="514" text-anchor="end" class="tw">history · job done</text>
+      <!-- reads -->
+      <line x1="160" y1="454" x2="160" y2="527" class="lr" marker-end="url(#a1r)"/>
+      <text x="168" y="505" class="tr">vector search</text>
+      <!-- stores -->
+      <rect x="80" y="530" width="380" height="54" rx="8" class="key"/>
+      <text x="270" y="553" text-anchor="middle" class="tb">Qdrant · local mode</text>
+      <text x="270" y="571" text-anchor="middle" class="tm">~/.local/share/rem/qdrant · canonical memories</text>
+      <rect x="500" y="530" width="400" height="54" rx="8" class="box"/>
+      <text x="700" y="553" text-anchor="middle" class="tb">rem.db · SQLite</text>
+      <text x="700" y="571" text-anchor="middle" class="tm">history · messages · sessions · jobs · meta</text>
+    </svg>
+    </div>
+    <figcaption>No client touches storage. Everything goes through one socket into one process, and inside it only the Memory façade writes. That single owner is what makes the queue, write ordering and Qdrant's single-process local mode all work.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">02 · write path</span><h2>From a finished turn to a stored memory</h2></div>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 960 566" role="img" aria-label="Sequence: the adapter posts new turns and gets 202 at once; later the worker claims the job, reads context and related memories, makes one LLM call, applies trust and dedup, then writes Qdrant, history, and job done in that order.">
+      <defs>
+        <marker id="a2w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mw"/></marker>
+        <marker id="a2r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mr"/></marker>
+        <marker id="a2n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mn"/></marker>
+      </defs>
+      <g>
+        <rect x="15" y="14" width="150" height="34" rx="6" class="box"/><text x="90" y="36" text-anchor="middle" class="tb">Claude Code adapter</text>
+        <rect x="175" y="14" width="150" height="34" rx="6" class="box"/><text x="250" y="36" text-anchor="middle" class="tb">daemon API</text>
+        <rect x="335" y="14" width="150" height="34" rx="6" class="box"/><text x="410" y="36" text-anchor="middle" class="tb">extraction worker</text>
+        <rect x="495" y="14" width="150" height="34" rx="6" class="box"/><text x="570" y="36" text-anchor="middle" class="tb">LLM</text>
+        <rect x="655" y="14" width="150" height="34" rx="6" class="key"/><text x="730" y="36" text-anchor="middle" class="tb">Qdrant</text>
+        <rect x="805" y="14" width="150" height="34" rx="6" class="box"/><text x="880" y="36" text-anchor="middle" class="tb">rem.db (SQLite)</text>
+      </g>
+      <line x1="90" y1="48" x2="90" y2="512" class="life"/>
+      <line x1="250" y1="48" x2="250" y2="512" class="life"/>
+      <line x1="410" y1="48" x2="410" y2="512" class="life"/>
+      <line x1="570" y1="48" x2="570" y2="512" class="life"/>
+      <line x1="730" y1="48" x2="730" y2="512" class="life"/>
+      <line x1="880" y1="48" x2="880" y2="512" class="life"/>
+
+      <line x1="90" y1="88" x2="247" y2="88" class="lw" marker-end="url(#a2w)"/>
+      <text x="170" y="81" text-anchor="middle" class="tw">POST /ingest · new turns</text>
+      <line x1="250" y1="118" x2="877" y2="118" class="lw" marker-end="url(#a2w)"/>
+      <text x="565" y="111" text-anchor="middle" class="tw">INSERT OR IGNORE turns · upsert job</text>
+      <line x1="250" y1="148" x2="93" y2="148" class="ln" marker-end="url(#a2n)"/>
+      <text x="170" y="141" text-anchor="middle" class="t">202 Accepted</text>
+      <text x="98" y="174" class="tm">advance cursor · exit 0</text>
+
+      <rect x="20" y="192" width="920" height="24" rx="5" class="soft"/>
+      <text x="480" y="208" text-anchor="middle" class="tm">debounce ≈ 5 s · a burst of hook calls becomes one job</text>
+
+      <line x1="410" y1="246" x2="877" y2="246" class="lw" marker-end="url(#a2w)"/>
+      <text x="645" y="239" text-anchor="middle" class="tw">claim job (lease)</text>
+      <line x1="880" y1="276" x2="413" y2="276" class="lr" marker-end="url(#a2r)"/>
+      <text x="645" y="269" text-anchor="middle" class="tr">new turns + 10 earlier turns</text>
+      <line x1="730" y1="306" x2="413" y2="306" class="lr" marker-end="url(#a2r)"/>
+      <text x="570" y="299" text-anchor="middle" class="tr">top-10 related memories (ids shown as 0, 1, 2…)</text>
+      <line x1="410" y1="336" x2="567" y2="336" class="ln" marker-end="url(#a2n)"/>
+      <text x="490" y="329" text-anchor="middle" class="t">one extraction call</text>
+      <line x1="570" y1="366" x2="413" y2="366" class="ln" marker-end="url(#a2n)"/>
+      <text x="490" y="359" text-anchor="middle" class="t">{text, scope, origin}</text>
+      <rect x="335" y="384" width="150" height="26" rx="5" class="box"/>
+      <text x="410" y="401" text-anchor="middle" class="t">trust → dedup</text>
+
+      <line x1="410" y1="440" x2="727" y2="440" class="lw" marker-end="url(#a2w)"/>
+      <text x="570" y="433" text-anchor="middle" class="tw">a · upsert · id = uuid5(job, hash)</text>
+      <line x1="410" y1="470" x2="877" y2="470" class="lw" marker-end="url(#a2w)"/>
+      <text x="645" y="463" text-anchor="middle" class="tw">b · history INSERT OR IGNORE</text>
+      <line x1="410" y1="500" x2="877" y2="500" class="lw" marker-end="url(#a2w)"/>
+      <text x="645" y="493" text-anchor="middle" class="tw">c · job = done</text>
+
+      <rect x="20" y="524" width="920" height="30" rx="5" class="box" style="stroke:var(--warn)"/>
+      <text x="480" y="544" text-anchor="middle" class="t">crash between a, b and c → lease expires → job replays → same ids → nothing duplicated</text>
+    </svg>
+    </div>
+    <figcaption>The hook returns before any LLM work starts, so Claude Code never waits. Qdrant and SQLite share no transaction, so safety comes from the write order and deterministic ids: replaying a job rewrites the same points and the history inserts are ignored.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">03 · read paths</span><h2>Two ways memories reach an agent</h2></div>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 960 420" role="img" aria-label="Left: at session start rem injects verified memories ordered current project, system, global, capped at about 400 tokens. Right: search_memory embeds the query, searches Qdrant, filters by threshold and ranks with project and trust boosts.">
+      <defs>
+        <marker id="a3n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mn"/></marker>
+        <marker id="a3r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mr"/></marker>
+      </defs>
+      <text x="40" y="24" class="tb">Session start · automatic</text>
+      <text x="540" y="24" class="tb">search_memory · on demand</text>
+      <g>
+        <rect x="40" y="40" width="380" height="46" rx="6" class="box"/><text x="56" y="59" class="tb">SessionStart hook</text><text x="56" y="76" class="tm">Claude Code opens a session</text>
+        <rect x="40" y="104" width="380" height="46" rx="6" class="box"/><text x="56" y="123" class="tb">GET /context?cwd=…</text><text x="56" y="140" class="tm">2 s timeout → prints nothing, never blocks</text>
+        <rect x="40" y="168" width="380" height="46" rx="6" class="box"/><text x="56" y="187" class="tb">cwd → git root → project</text><text x="56" y="204" class="tm">git remote kept so moved repos still match</text>
+        <rect x="40" y="232" width="380" height="46" rx="6" class="box"/><text x="56" y="251" class="tb">verified memories only</text><text x="56" y="268" class="tr">reads Qdrant · unverified never injected</text>
+        <rect x="40" y="296" width="380" height="46" rx="6" class="box"/><text x="56" y="315" class="tb">current project → system → global</text><text x="56" y="332" class="tm">newest first</text>
+        <rect x="40" y="360" width="380" height="46" rx="6" class="key"/><text x="56" y="379" class="tb">≤ ~400 tokens to stdout</text><text x="56" y="396" class="tm">added to Claude's context</text>
+      </g>
+      <g>
+        <rect x="540" y="40" width="380" height="46" rx="6" class="box"/><text x="556" y="59" class="tb">query + cwd</text><text x="556" y="76" class="tm">from the MCP tool call</text>
+        <rect x="540" y="104" width="380" height="46" rx="6" class="box"/><text x="556" y="123" class="tb">embed query</text><text x="556" y="140" class="tm">same embedder as the stored vectors</text>
+        <rect x="540" y="168" width="380" height="46" rx="6" class="box"/><text x="556" y="187" class="tb">Qdrant search · over-fetch ×4</text><text x="556" y="204" class="tr">+ BM25 keyword scores from M6</text>
+        <rect x="540" y="232" width="380" height="46" rx="6" class="box"/><text x="556" y="251" class="tb">eligibility</text><text x="556" y="268" class="tm">≥ 0.3 this project, global, system · ≥ 0.55 others</text>
+        <rect x="540" y="296" width="380" height="46" rx="6" class="box"/><text x="556" y="315" class="tb">score = semantic + boosts</text><text x="556" y="332" class="tm">+0.15 this project · −0.05 other · −0.05 unverified</text>
+        <rect x="540" y="360" width="380" height="46" rx="6" class="key"/><text x="556" y="379" class="tb">labelled results</text><text x="556" y="396" class="tm">scope · project · provenance · status · date</text>
+      </g>
+      <g class="arrows">
+        <line x1="230" y1="86" x2="230" y2="101" class="ln" marker-end="url(#a3n)"/>
+        <line x1="230" y1="150" x2="230" y2="165" class="ln" marker-end="url(#a3n)"/>
+        <line x1="230" y1="214" x2="230" y2="229" class="ln" marker-end="url(#a3n)"/>
+        <line x1="230" y1="278" x2="230" y2="293" class="ln" marker-end="url(#a3n)"/>
+        <line x1="230" y1="342" x2="230" y2="357" class="ln" marker-end="url(#a3n)"/>
+        <line x1="730" y1="86" x2="730" y2="101" class="ln" marker-end="url(#a3n)"/>
+        <line x1="730" y1="150" x2="730" y2="165" class="ln" marker-end="url(#a3n)"/>
+        <line x1="730" y1="214" x2="730" y2="229" class="ln" marker-end="url(#a3n)"/>
+        <line x1="730" y1="278" x2="730" y2="293" class="ln" marker-end="url(#a3n)"/>
+        <line x1="730" y1="342" x2="730" y2="357" class="ln" marker-end="url(#a3n)"/>
+      </g>
+    </svg>
+    </div>
+    <figcaption>Session start has no query, so it selects by rules and only uses verified facts. Search is query-driven and returns unverified facts too, ranked lower and labelled, so the agent can tell a guess from a confirmed fact.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">04 · storage</span><h2>Two stores, two jobs</h2></div>
+  <div class="stores">
+    <div class="store canon">
+      <div class="role">Canonical knowledge</div>
+      <h3>Qdrant · local mode</h3>
+      <div class="path">~/.local/share/rem/qdrant/ · opened only by the daemon</div>
+      <ul>
+        <li><b>rem_memories__bge-small_384 <span class="tag">M1</span></b><span>vector = embed(text). Payload is the memory: text, hash, scope, project_id, provenance, status, evidence_source, observed_at, source, session_id, job_id, entity_ids[], created_at, updated_at</span></li>
+        <li><b>+ BM25 sparse vector <span class="tag">M6</span></b><span>keyword search in the same collection, the same way Mem0 does it</span></li>
+        <li><b>rem_entities__… <span class="tag">M7</span></b><span>name, type, aliases[], scope, memory_ids[]</span></li>
+        <li><b>rem_relations__… <span class="tag">M8</span></b><span>source → type → target, evidence memory_ids[], provenance, status</span></li>
+      </ul>
+      <p class="note">Swap the backend through the VectorStore interface. To move to a Qdrant server, change <code>path</code> to <code>url</code> in config.</p>
+    </div>
+    <div class="store ops">
+      <div class="role">Operational state + audit, not the fact ledger</div>
+      <h3>rem.db · SQLite</h3>
+      <div class="path">~/.local/share/rem/rem.db · WAL mode</div>
+      <ul>
+        <li><b>history</b><span>target_kind (memory · entity · relation), event (ADD · UPDATE · DELETE · CONFIRM · CORROBORATE · MERGE · REEMBED), old → new, actor, job_id</span></li>
+        <li><b>messages</b><span>redacted raw turns, used as extraction context</span></li>
+        <li><b>sessions · projects</b><span>(source, session_id) · git root and remote</span></li>
+        <li><b>jobs</b><span>the durable ingestion queue, with leases</span></li>
+        <li><b>meta</b><span>schema version, active embedder and collection names</span></li>
+      </ul>
+      <p class="note">Changing the embedding model creates new collections; <code>rem reembed</code> copies payloads with the same ids, and the old collections are kept until finalize.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">05 · trust</span><h2>Extracted is not the same as trusted</h2></div>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 1040 280" role="img" aria-label="Extraction labels each candidate with its origin; deterministic trust rules map origin to provenance; only assistant-generated facts are stored unverified, and they are upgraded when corroborated or confirmed.">
+      <defs>
+        <marker id="a5n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mn"/></marker>
+        <marker id="a5w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mw"/></marker>
+      </defs>
+      <text x="140" y="24" text-anchor="middle" class="tm">EXTRACT PROPOSES</text>
+      <text x="480" y="24" text-anchor="middle" class="tm">TRUST DECIDES · RULES, NO LLM</text>
+      <text x="820" y="24" text-anchor="middle" class="tm">STORED STATUS</text>
+      <rect x="40" y="40" width="200" height="40" rx="6" class="box"/><text x="140" y="64" text-anchor="middle" class="t">origin: user</text>
+      <rect x="40" y="100" width="200" height="40" rx="6" class="box"/><text x="140" y="124" text-anchor="middle" class="t">origin: assistant</text>
+      <rect x="40" y="160" width="200" height="40" rx="6" class="box"/><text x="140" y="184" text-anchor="middle" class="t">origin: tool</text>
+      <rect x="40" y="220" width="200" height="40" rx="6" class="box"/><text x="140" y="244" text-anchor="middle" class="t">user confirms</text>
+      <rect x="360" y="40" width="240" height="40" rx="6" class="box"/><text x="480" y="64" text-anchor="middle" class="t">user_asserted</text>
+      <rect x="360" y="100" width="240" height="40" rx="6" class="box"/><text x="480" y="124" text-anchor="middle" class="t">assistant_generated</text>
+      <rect x="360" y="160" width="240" height="40" rx="6" class="box"/><text x="480" y="184" text-anchor="middle" class="t">tool_observed + source, time</text>
+      <rect x="360" y="220" width="240" height="40" rx="6" class="box"/><text x="480" y="244" text-anchor="middle" class="t">user_confirmed</text>
+      <rect x="720" y="40" width="200" height="40" rx="6" class="key"/><text x="820" y="65" text-anchor="middle" class="tb">verified</text>
+      <rect x="720" y="100" width="200" height="40" rx="6" class="bwarn"/><text x="820" y="125" text-anchor="middle" class="tx">unverified</text>
+      <rect x="720" y="160" width="200" height="40" rx="6" class="key"/><text x="820" y="185" text-anchor="middle" class="tb">verified</text>
+      <rect x="720" y="220" width="200" height="40" rx="6" class="key"/><text x="820" y="245" text-anchor="middle" class="tb">verified</text>
+      <line x1="240" y1="60" x2="357" y2="60" class="ln" marker-end="url(#a5n)"/>
+      <line x1="240" y1="120" x2="357" y2="120" class="ln" marker-end="url(#a5n)"/>
+      <line x1="240" y1="180" x2="357" y2="180" class="ln" marker-end="url(#a5n)"/>
+      <line x1="240" y1="240" x2="357" y2="240" class="ln" marker-end="url(#a5n)"/>
+      <line x1="600" y1="60" x2="717" y2="60" class="ln" marker-end="url(#a5n)"/>
+      <line x1="600" y1="120" x2="717" y2="120" class="ln" marker-end="url(#a5n)"/>
+      <line x1="600" y1="180" x2="717" y2="180" class="ln" marker-end="url(#a5n)"/>
+      <line x1="600" y1="240" x2="717" y2="240" class="ln" marker-end="url(#a5n)"/>
+      <path d="M920,120 C978,120 978,240 923,240" class="lw" marker-end="url(#a5w)"/>
+      <text x="984" y="176" class="tw">upgrade</text>
+      <text x="984" y="192" class="tm">history</text>
+    </svg>
+    </div>
+    <figcaption>When a later user statement or tool observation matches an unverified memory, that memory is upgraded in place (a CORROBORATE history row) rather than duplicated. <code>rem.retrieve</code> reads status but never changes it.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">06 · graph-ready</span><h2>Entities and relations, without a graph database</h2></div>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 960 316" role="img" aria-label="Memories link to entities through entity_ids; typed relations connect entities and cite the memories that are their evidence, with their own provenance and status.">
+      <defs>
+        <marker id="a6w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mw"/></marker>
+      </defs>
+      <rect x="60" y="20" width="340" height="62" rx="8" class="box"/>
+      <text x="78" y="42" class="tm">memory M1 · user_asserted · verified</text>
+      <text x="78" y="66" class="t">"User prefers uv over pip"</text>
+      <rect x="560" y="20" width="340" height="62" rx="8" class="box"/>
+      <text x="578" y="42" class="tm">memory M2 · user_asserted · verified</text>
+      <text x="578" y="66" class="t">"rem stores memories in Qdrant"</text>
+      <line x1="165" y1="82" x2="165" y2="168" class="ln dash"/>
+      <line x1="375" y1="82" x2="375" y2="168" class="ln dash"/>
+      <line x1="635" y1="82" x2="635" y2="168" class="ln dash"/>
+      <line x1="845" y1="82" x2="845" y2="168" class="ln dash"/>
+      <text x="173" y="130" class="tm">entity_ids</text>
+      <text x="643" y="130" class="tm">entity_ids</text>
+      <rect x="90" y="170" width="150" height="46" rx="23" class="box"/><text x="165" y="190" text-anchor="middle" class="tb">User</text><text x="165" y="206" text-anchor="middle" class="tm">person</text>
+      <rect x="300" y="170" width="150" height="46" rx="23" class="box"/><text x="375" y="190" text-anchor="middle" class="tb">uv</text><text x="375" y="206" text-anchor="middle" class="tm">tool · alias "astral uv"</text>
+      <rect x="560" y="170" width="150" height="46" rx="23" class="box"/><text x="635" y="190" text-anchor="middle" class="tb">rem</text><text x="635" y="206" text-anchor="middle" class="tm">project</text>
+      <rect x="770" y="170" width="150" height="46" rx="23" class="box"/><text x="845" y="190" text-anchor="middle" class="tb">Qdrant</text><text x="845" y="206" text-anchor="middle" class="tm">tool</text>
+      <path d="M180,216 Q270,292 360,218" class="lw" marker-end="url(#a6w)"/>
+      <text x="270" y="274" text-anchor="middle" class="tw">prefers</text>
+      <text x="270" y="292" text-anchor="middle" class="tm">evidence M1 · verified</text>
+      <path d="M650,216 Q740,292 830,218" class="lw" marker-end="url(#a6w)"/>
+      <text x="740" y="274" text-anchor="middle" class="tw">stores_data_in</text>
+      <text x="740" y="292" text-anchor="middle" class="tm">evidence M2 · verified</text>
+    </svg>
+    </div>
+    <figcaption>Entities (M7) and typed relations (M8) are two more Qdrant collections. Relations cite their evidence memories and follow the same trust rules. The memory payload carries <code>entity_ids</code> and history carries <code>target_kind</code> from M1, so adding the graph later needs no migration. The Obsidian-style view (M9) only draws this data; it never stores its own.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">07 · lifecycle</span><h2>Start, stop, crash</h2></div>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 960 262" role="img" aria-label="The daemon goes from stopped to starting via systemd or auto-start, to serving once the lock and embedder check pass, to stopping on SIGTERM and back to stopped; a crash restarts it through systemd with leases recovered.">
+      <defs>
+        <marker id="a7n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mn"/></marker>
+        <marker id="a7x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="mx"/></marker>
+      </defs>
+      <rect x="30" y="110" width="150" height="54" rx="8" class="box"/><text x="105" y="134" text-anchor="middle" class="tb">stopped</text><text x="105" y="151" text-anchor="middle" class="tm">no socket</text>
+      <rect x="270" y="110" width="210" height="54" rx="8" class="box"/><text x="375" y="134" text-anchor="middle" class="tb">starting</text><text x="375" y="151" text-anchor="middle" class="tm">flock · embedder check · leases</text>
+      <rect x="570" y="110" width="150" height="54" rx="8" class="key"/><text x="645" y="134" text-anchor="middle" class="tb">serving</text><text x="645" y="151" text-anchor="middle" class="tm">API + worker</text>
+      <rect x="790" y="110" width="150" height="54" rx="8" class="box"/><text x="865" y="134" text-anchor="middle" class="tb">stopping</text><text x="865" y="151" text-anchor="middle" class="tm">finish or release job</text>
+      <line x1="180" y1="137" x2="267" y2="137" class="ln" marker-end="url(#a7n)"/>
+      <text x="224" y="98" text-anchor="middle" class="tm">systemd at login</text>
+      <text x="224" y="84" text-anchor="middle" class="tm">or auto-start</text>
+      <line x1="480" y1="137" x2="567" y2="137" class="ln" marker-end="url(#a7n)"/>
+      <text x="524" y="98" text-anchor="middle" class="tm">checks pass</text>
+      <line x1="720" y1="137" x2="787" y2="137" class="ln" marker-end="url(#a7n)"/>
+      <text x="754" y="98" text-anchor="middle" class="tm">SIGTERM · rem stop</text>
+      <polyline points="865,164 865,222 105,222 105,167" class="ln" marker-end="url(#a7n)"/>
+      <text x="485" y="242" text-anchor="middle" class="tm">socket removed · stores closed cleanly</text>
+      <polyline points="645,110 645,44 375,44 375,107" class="lx" marker-end="url(#a7x)"/>
+      <text x="510" y="34" text-anchor="middle" class="tr" style="fill:var(--warn)">crash → systemd restarts · expired leases → pending · jobs replay</text>
+    </svg>
+    </div>
+    <figcaption>The daemon refuses to start if the configured embedder doesn't match the stored collections, and says to run <code>rem reembed</code>. If it's down when a hook fires, the hook exits 0 without moving its cursor, and the next hook resends the gap.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">08 · roadmap</span><h2>Build order</h2></div>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 960 206" role="img" aria-label="Milestones M1 to M6 build the core memory engine; M7 to M9 add entities, relations and the graph view.">
+      <path d="M60,58 L60,50 L585,50 L585,58" class="ln"/>
+      <text x="322" y="42" text-anchor="middle" class="tb">core memory engine</text>
+      <path d="M690,58 L690,50 L900,50 L900,58" class="ln"/>
+      <text x="795" y="42" text-anchor="middle" class="tb">graph</text>
+      <line x1="60" y1="84" x2="900" y2="84" class="ln"/>
+      <circle cx="60" cy="84" r="7" class="dotc"/><circle cx="165" cy="84" r="7" class="dotc"/><circle cx="270" cy="84" r="7" class="dotc"/>
+      <circle cx="375" cy="84" r="7" class="dotc"/><circle cx="480" cy="84" r="7" class="dotc"/><circle cx="585" cy="84" r="7" class="dotc"/>
+      <circle cx="690" cy="84" r="7" class="dotg"/><circle cx="795" cy="84" r="7" class="dotg"/><circle cx="900" cy="84" r="7" class="dotg"/>
+      <g text-anchor="middle">
+        <text x="60" y="114" class="tb">M1</text><text x="60" y="132" class="tm">storage</text><text x="60" y="147" class="tm">façade</text>
+        <text x="165" y="114" class="tb">M2</text><text x="165" y="132" class="tm">daemon</text><text x="165" y="147" class="tm">queue</text>
+        <text x="270" y="114" class="tb">M3</text><text x="270" y="132" class="tm">extraction</text><text x="270" y="147" class="tm">trust · evals</text>
+        <text x="375" y="114" class="tb">M4</text><text x="375" y="132" class="tm">Claude Code</text><text x="375" y="147" class="tm">hooks</text>
+        <text x="480" y="114" class="tb">M5</text><text x="480" y="132" class="tm">MCP</text><text x="480" y="147" class="tm">tools</text>
+        <text x="585" y="114" class="tb">M6</text><text x="585" y="132" class="tm">hybrid search</text><text x="585" y="147" class="tm">reembed</text>
+        <text x="690" y="114" class="tb">M7</text><text x="690" y="132" class="tm">entities</text><text x="690" y="147" class="tm">aliases</text>
+        <text x="795" y="114" class="tb">M8</text><text x="795" y="132" class="tm">relations</text><text x="795" y="147" class="tm">provenance</text>
+        <text x="900" y="114" class="tb">M9</text><text x="900" y="132" class="tm">graph view</text><text x="900" y="147" class="tm">read-only</text>
+      </g>
+      <text x="40" y="190" class="tm">Later: tool-output ingestion (tool_observed) · local LLM as default after evals · backfill · pruning · optional Qdrant server</text>
+    </svg>
+    </div>
+    <figcaption>The memory engine comes first. The graph milestones only add collections and a viewer on top of data the engine already records.</figcaption>
+  </figure>
+</section>
+
+<footer>Source: the approved design in rem's plan file and <span class="mono">plans/initial_plan.md</span>; Mem0 storage reference from mem0ai/mem0 at commit f1791da.</footer>
+</div>
