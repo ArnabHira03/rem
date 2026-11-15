@@ -1,2 +1,3 @@
-def main() -> None:
-    print("rem: no command yet")
+from rem.cli import main
+
+__all__ = ["main"]

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-rem is a local-first personal memory layer for AI agents, modelled on Mem0. **No code exists yet.** The repo is a bare uv scaffold (`pyproject.toml`, Python 3.14, `uv_build` backend). `pyproject.toml` declares the script `rem = "rem:main"`, but `src/rem/__init__.py` was deleted, so the entry point is broken until M1 recreates the package under `src/rem/`.
+rem is a local-first personal memory layer for AI agents, modelled on Mem0. Python 3.14, uv, `uv_build` backend, code in `src/rem/`. **M1 (core storage + Memory façade + CLI) is implemented**; the CLI runs in-process until the M2 daemon exists. Later milestones (daemon, extraction, hooks, MCP, …) are not built yet.
 
 The **approved design (rev 2)** is `docs/superpowers/specs/2026-11-15-rem-design.md`, with diagrams in `docs/superpowers/specs/2026-11-15-rem-architecture.html`. It is implemented milestone by milestone (M1 → M9). Background notes are in `plans/initial_plan.md` and `plans/Mem0 Memory Pipeline - Claude.pdf`; `plans/` is **gitignored** and local only.
 
@@ -12,12 +12,14 @@ Each milestone gets its own implementation plan before any code is written.
 
 ## Commands
 
-The only tooling so far is uv:
-- `uv sync`: create `.venv` and install dependencies (none yet)
-- `uv run rem`: run the CLI entry point (fails until `src/rem/__init__.py` exists)
-- `uv add <pkg>`: add a dependency
+- `uv sync`: install dependencies into `.venv`
+- `uv run pytest`: run the test suite (excludes `slow`)
+- `uv run pytest tests/test_memory.py::test_add_get_and_history -v`: run one test
+- `uv run pytest -m slow`: tests that download the real fastembed model (about 70 MB, once, into `~/.cache/rem/fastembed`)
+- `uv run rem <add|search|list|get|update|delete|confirm|history> ...`: the CLI; `--json` gives machine-readable output
+- Set `REM_HOME=<dir>` (data) and `REM_CONFIG=<file>` (config) to run against a throwaway store. The config can set `[embedder] provider = "hashing"` for an offline embedder, and `[vector_store] provider = "memory"`.
 
-No test, lint or format tooling is configured yet. The design calls for pytest.
+There is no lint or format tooling configured.
 
 `.env` exists and Claude is denied read access to it (`.claude/settings.json`). Leave it that way.
 
