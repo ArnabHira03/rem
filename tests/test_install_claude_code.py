@@ -44,13 +44,70 @@ def test_fresh_install_creates_four_events(path):
     assert not path.with_name("settings.json.rem-backup").exists()
 
 
-def test_install_twice_is_identical_and_backs_up(path):
+def test_install_twice_is_noop(path):
     ic.install(path, CMD)
     first = path.read_text()
-    ic.install(path, CMD)
-    assert path.read_text() == first
+    mtime = path.stat().st_mtime_ns
+    assert "already installed" in ic.install(path, CMD)
+    assert path.read_text() == first and path.stat().st_mtime_ns == mtime
     assert sorted(ev for ev, _ in rem_handlers(json.loads(first))) == sorted(EVENTS)
-    assert path.with_name("settings.json.rem-backup").read_text() == first
+    assert not path.with_name("settings.json.rem-backup").exists()
+
+
+def test_backup_is_first_pre_rem_content_and_never_overwritten(path):
+    path.parent.mkdir(parents=True)
+    path.write_text('{"model": "x"}')
+    ic.install(path, CMD)
+    backup = path.with_name("settings.json.rem-backup")
+    assert backup.read_text() == '{"model": "x"}'
+    ic.install(path, "/other/python -m rem hook claude-code")  # a real change
+    ic.uninstall(path)
+    assert backup.read_text() == '{"model": "x"}'
+
+
+def test_uninstall_noops(path):
+    assert "nothing to remove" in ic.uninstall(path)
+    assert not path.parent.exists()
+    path.parent.mkdir(parents=True)
+    path.write_text('{"model":   "x"}')
+    assert "nothing to remove" in ic.uninstall(path)
+    assert path.read_text() == '{"model":   "x"}'
+    assert not path.with_name("settings.json.rem-backup").exists()
+
+
+def test_symlinked_settings_keeps_link(path, tmp_path):
+    target = tmp_path / "dotfiles" / "settings.json"
+    target.parent.mkdir()
+    target.write_text('{"model": "x"}')
+    path.parent.mkdir(parents=True)
+    path.symlink_to(target)
+    ic.install(path, CMD)
+    assert path.is_symlink() and path.resolve() == target
+    assert set(json.loads(target.read_text())["hooks"]) == EVENTS
+    ic.uninstall(path)
+    assert path.is_symlink() and json.loads(target.read_text()) == {"model": "x"}
+
+
+def test_non_ascii_preserved(path):
+    path.parent.mkdir(parents=True)
+    path.write_text('{"note": "héllo ✓"}', encoding="utf-8")
+    ic.install(path, CMD)
+    assert "héllo ✓" in path.read_text(encoding="utf-8")
+
+
+def test_non_list_event_refused(path):
+    path.parent.mkdir(parents=True)
+    text = '{"hooks": {"Stop": {"oops": 1}}}'
+    path.write_text(text)
+    with pytest.raises(RemError, match=r"hooks\.Stop is not a list; not modified"):
+        ic.install(path, CMD)
+    assert path.read_text() == text
+    assert not path.with_name("settings.json.rem-backup").exists()
+
+
+def test_empty_config_dir_means_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "")
+    assert ic.settings_path(False, tmp_path) == ic.Path("~/.claude").expanduser() / "settings.json"
 
 
 def test_user_settings_survive_install_and_uninstall(path):

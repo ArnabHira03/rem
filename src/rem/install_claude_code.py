@@ -16,7 +16,7 @@ EVENTS = {"SessionStart": 10, "UserPromptSubmit": 10, "Stop": 10, "SessionEnd": 
 def settings_path(project: bool, cwd: Path) -> Path:
     if project:
         return Path(resolve_project(cwd).root_path) / ".claude" / "settings.local.json"
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser() / "settings.json"
+    return Path((os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")).expanduser() / "settings.json"
 
 
 def hook_command() -> str:
@@ -69,7 +69,7 @@ def merged(settings: dict, command: str) -> dict:
 
 def _read(path: Path) -> dict:
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
     try:
@@ -82,17 +82,18 @@ def _read(path: Path) -> dict:
 
 
 def _write(path: Path, data: dict) -> None:
-    text = json.dumps(data, indent=2) + "\n"
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     mode = None
     if path.exists():
         mode = path.stat().st_mode & 0o777
         backup = path.with_name(path.name + ".rem-backup")
-        backup.write_bytes(path.read_bytes())
-        os.chmod(backup, mode)
+        if not backup.exists():  # the first backup is the user's pre-rem settings: keep it
+            backup.write_bytes(path.read_bytes())
+            os.chmod(backup, mode)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         if mode is not None:
             os.chmod(tmp, mode)
@@ -102,25 +103,38 @@ def _write(path: Path, data: dict) -> None:
         raise
 
 
-def _apply(path: Path, compute, dry_run: bool, summary: str) -> str:
-    result = compute(_read(path))
+def _apply(path: Path, compute, dry_run: bool, done: str, noop: str, check=False) -> str:
+    path = path.resolve()  # a symlinked settings file: write the real target, keep the link
+    original = _read(path)
+    if check:
+        hooks = original.get("hooks")
+        if hooks is not None and not isinstance(hooks, dict):
+            raise RemError(f"{path}: hooks is not an object; not modified")
+        for event in EVENTS:
+            if event in (hooks or {}) and not isinstance(hooks[event], list):
+                raise RemError(f"{path}: hooks.{event} is not a list; not modified")
+    result = compute(original)
     if dry_run:
-        return json.dumps(result, indent=2)
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    if result == original:
+        return noop
     _write(path, result)
-    return summary
+    return done
 
 
 def install(path: Path, command: str, *, dry_run: bool = False) -> str:
-    return _apply(path, lambda s: merged(s, command), dry_run, f"installed rem hooks in {path}")
+    return _apply(path, lambda s: merged(s, command), dry_run,
+                  f"installed rem hooks in {path}", f"rem hooks already installed in {path}", check=True)
 
 
 def uninstall(path: Path, *, dry_run: bool = False) -> str:
-    return _apply(path, removed, dry_run, f"removed rem hooks from {path}")
+    return _apply(path, removed, dry_run, f"removed rem hooks from {path}", f"nothing to remove in {path}")
+
 
 
 def _has_marker(path: Path) -> bool:
     try:
-        hooks = json.loads(path.read_text()).get("hooks")
+        hooks = json.loads(path.read_text(encoding="utf-8")).get("hooks")
     except (OSError, ValueError, AttributeError):
         return False
     if not isinstance(hooks, dict):
