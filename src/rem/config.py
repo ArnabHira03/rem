@@ -22,10 +22,22 @@ class EmbedderConfig(BaseModel):
     cache_dir: Path | None = None
 
 
+MAX_SOCKET_PATH_BYTES = 100  # AF_UNIX paths are limited to ~107 bytes on Linux
+
+
+class DaemonConfig(BaseModel):
+    socket_path: Path | None = None
+    debounce_seconds: float = 5
+    lease_seconds: float = 120
+    max_attempts: int = 5
+    start_timeout_seconds: float = 15
+
+
 class RemConfig(BaseModel):
     data_dir: Path
     vector_store: VectorStoreConfig = VectorStoreConfig()
     embedder: EmbedderConfig = EmbedderConfig()
+    daemon: DaemonConfig = DaemonConfig()
 
     @property
     def db_path(self) -> Path:
@@ -34,6 +46,30 @@ class RemConfig(BaseModel):
     @property
     def qdrant_path(self) -> Path:
         return self.vector_store.path or self.data_dir / "qdrant"
+
+    @property
+    def socket_path(self) -> Path:
+        """Config, then REM_SOCKET, then $XDG_RUNTIME_DIR/rem.sock, then <data_dir>/rem.sock."""
+        if self.daemon.socket_path:
+            path = self.daemon.socket_path
+        elif env := os.environ.get("REM_SOCKET"):
+            path = Path(env)
+        elif runtime := os.environ.get("XDG_RUNTIME_DIR"):
+            path = Path(runtime) / "rem.sock"
+        else:
+            path = self.data_dir / "rem.sock"
+        size = len(os.fsencode(path))
+        if size > MAX_SOCKET_PATH_BYTES:
+            raise ValueError(f"socket path too long ({size} bytes, max {MAX_SOCKET_PATH_BYTES}): {path}")
+        return path
+
+    @property
+    def lock_path(self) -> Path:
+        return self.data_dir / "rem.lock"
+
+    @property
+    def log_path(self) -> Path:
+        return self.data_dir / "daemon.log"
 
 
 def load_config(path: Path | None = None) -> RemConfig:

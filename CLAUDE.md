@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-rem is a local-first personal memory layer for AI agents, modelled on Mem0. Python 3.14, uv, `uv_build` backend, code in `src/rem/`. **M1 (core storage + Memory façade + CLI) is implemented**; the CLI runs in-process until the M2 daemon exists. Later milestones (daemon, extraction, hooks, MCP, …) are not built yet.
+rem is a local-first personal memory layer for AI agents, modelled on Mem0. Python 3.14, uv, `uv_build` backend, code in `src/rem/`. **M1 (core storage + Memory façade) and M2 (daemon) are implemented.** The CLI is a thin client of the daemon and starts it automatically. Later milestones (LLM extraction, hooks, MCP, …) are not built yet.
 
 The **approved design (rev 2)** is `docs/superpowers/specs/2026-11-15-rem-design.md`, with diagrams in `docs/superpowers/specs/2026-11-15-rem-architecture.html`. It is implemented milestone by milestone (M1 → M9). Background notes are in `plans/initial_plan.md` and `plans/Mem0 Memory Pipeline - Claude.pdf`; `plans/` is **gitignored** and local only.
 
@@ -16,8 +16,9 @@ Each milestone gets its own implementation plan before any code is written.
 - `uv run pytest`: run the test suite (excludes `slow`)
 - `uv run pytest tests/test_memory.py::test_add_get_and_history -v`: run one test
 - `uv run pytest -m slow`: tests that download the real fastembed model (about 70 MB, once, into `~/.cache/rem/fastembed`)
-- `uv run rem <add|search|list|get|update|delete|confirm|history> ...`: the CLI; `--json` gives machine-readable output
-- Set `REM_HOME=<dir>` (data) and `REM_CONFIG=<file>` (config) to run against a throwaway store. The config can set `[embedder] provider = "hashing"` for an offline embedder, and `[vector_store] provider = "memory"`.
+- `uv run rem <add|search|list|get|update|delete|confirm|history> ...`: memory commands; they auto-start the daemon. `--json` works before or after the subcommand.
+- `uv run rem start|stop|status|daemon|install-service [--enable]`: daemon lifecycle (`daemon` runs it in the foreground; `install-service` writes the systemd user unit)
+- Set `REM_HOME=<dir>` (data), `REM_CONFIG=<file>` (config) **and `REM_SOCKET=<short path>`** to run against a throwaway store. Without `REM_SOCKET` you talk to the real daemon at `$XDG_RUNTIME_DIR/rem.sock`. The config can set `[embedder] provider = "hashing"` for an offline embedder, and `[vector_store] provider = "memory"`.
 
 There is no lint or format tooling configured.
 
@@ -26,6 +27,14 @@ There is no lint or format tooling configured.
 ## Architecture (as designed)
 
 Read the design spec for the details. These are the invariants that span modules:
+
+- **What exists in M2:**
+  - `rem.daemon.server.run_daemon` runs uvicorn on a socket rem binds itself, never uvicorn's `uds=`, because uvicorn chmods that to 0666.
+  - Every `Memory` and `RemDB` call goes through `StoreThread`, a single thread that is the single writer.
+  - `/ingest` stores redacted turns and a debounced per-session job (`storage/queue.py`).
+  - `Worker` runs jobs through a `JobHandler`. It is `NoopHandler` until M3 plugs in extraction.
+  - Exit codes: 2 means already running, 3 means a config error. The systemd unit doesn't restart on either.
+  - Socket paths must stay ≤ 100 bytes, so tests use `/tmp/rem-*` directories (the `short_dir` and `daemon_env` fixtures).
 
 - **One daemon owns everything.** Clients never touch storage. Claude Code hooks (`rem hook claude-code`), the stdio MCP shim (`rem mcp`) and the CLI all talk to one `rem daemon` over a Unix socket (`$XDG_RUNTIME_DIR/rem.sock`). It runs as a systemd user service with auto-start as a fallback, and `flock` guarantees a single instance.
 - **Storage follows Mem0's split.**

@@ -6,9 +6,10 @@ Current memory text lives in the vector store; SQLite only keeps history old/new
 import sqlite3
 from pathlib import Path
 
+from rem.errors import RemError
 from rem.models import HistoryEvent, HistoryRow, TargetKind, utcnow
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MIGRATIONS = {
     1: """
@@ -33,6 +34,41 @@ _MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS history_target ON history (target_id);
     """,
+    2: """
+    CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY,
+        source TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        project_id INTEGER,
+        cwd TEXT,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        UNIQUE (source, session_id)
+    );
+    CREATE TABLE messages (
+        id INTEGER PRIMARY KEY,
+        session_pk INTEGER NOT NULL REFERENCES sessions(id),
+        message_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        ts TEXT,
+        job_id INTEGER,
+        UNIQUE (session_pk, message_id)
+    );
+    CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY,
+        session_pk INTEGER NOT NULL REFERENCES sessions(id),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        lease_until REAL,
+        not_before REAL NOT NULL,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX jobs_status ON jobs (status, not_before);
+    CREATE INDEX messages_job ON messages (session_pk, job_id);
+    """,
 }
 
 
@@ -48,9 +84,23 @@ class RemDB:
     def _migrate(self) -> None:
         self._conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         current = int(self.get_meta("schema_version") or 0)
+        if current > SCHEMA_VERSION:
+            raise RemError(f"rem.db was written by a newer rem (schema {current}); upgrade rem")
         for version in range(current + 1, SCHEMA_VERSION + 1):
-            self._conn.executescript(f"BEGIN; {_MIGRATIONS[version]} COMMIT;")
-            self.set_meta("schema_version", str(version))
+            # DDL and the version bump commit together, or not at all.
+            try:
+                self._conn.executescript(
+                    f"BEGIN; {_MIGRATIONS[version]}\n"
+                    f"INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '{version}'); COMMIT;"
+                )
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
+                raise
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        return self._conn
 
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()

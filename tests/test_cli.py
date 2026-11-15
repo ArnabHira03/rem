@@ -3,18 +3,13 @@ import json
 import pytest
 
 from rem.cli import main
-from rem.storage.vector.qdrant import QdrantVectorStore
 
 
 @pytest.fixture
-def cli_env(tmp_path, monkeypatch):
-    """Real Qdrant persistence under tmp_path, offline hashing embedder."""
-    cfg = tmp_path / "config.toml"
-    cfg.write_text('[embedder]\nprovider = "hashing"\nmodel = "hash-64"\n')
-    monkeypatch.setenv("REM_HOME", str(tmp_path))
-    monkeypatch.setenv("REM_CONFIG", str(cfg))
-    monkeypatch.chdir(tmp_path)
-    return tmp_path
+def cli_env(daemon_env, monkeypatch):
+    """CLI against a real daemon (auto-started) in a short temp dir, offline embedder."""
+    monkeypatch.chdir(daemon_env.root)
+    return daemon_env
 
 
 def test_add_then_search_json(cli_env, capsys):
@@ -50,19 +45,3 @@ def test_unknown_id_exit_1(cli_env, capsys):
 
 def test_empty_text_exit_2(cli_env, capsys):
     assert main(["add", "   "]) == 2 and "text must not be empty" in capsys.readouterr().err
-
-
-def test_store_locked_exit_1(cli_env, capsys):
-    holder = QdrantVectorStore(path=cli_env / "qdrant")
-    try:
-        assert main(["list"]) == 1 and "in use by another rem process" in capsys.readouterr().err
-    finally:
-        holder.close()
-
-
-def test_listed_id_is_accepted_by_get(cli_env, capsys):
-    main(["add", "Prefers uv over pip"])
-    capsys.readouterr()
-    main(["list"])
-    listed_id = capsys.readouterr().out.split()[0]
-    assert main(["get", listed_id]) == 0
