@@ -18,3 +18,11 @@ class EmbedderMismatchError(RemError):
 
 class EmbedderUnavailableError(RemError):
     """The embedding model could not be loaded."""
+
+
+class LLMError(RemError):
+    """An LLM provider call failed or returned unusable output."""
+
+
+class RemoteLLMNotAllowed(RemError):
+    """The configured LLM endpoint is remote and [llm] allow_remote is false."""

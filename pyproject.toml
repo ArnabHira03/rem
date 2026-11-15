@@ -25,8 +25,11 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: downloads the real embedding model"]
-addopts = "-m 'not slow'"
+markers = [
+    "slow: downloads the real embedding model",
+    "llm: calls a real LLM provider (costs money; opt-in)",
+]
+addopts = "-m 'not slow and not llm'"
 
 [dependency-groups]
 dev = [
