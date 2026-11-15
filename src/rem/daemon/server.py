@@ -22,9 +22,10 @@ from rem.daemon.extraction import ExtractionHandler
 from rem.daemon.worker import JobHandler, Worker
 from rem.errors import RemError
 from rem.llm.factory import create_llm
-from rem.spool import drain_spool
+from rem.spool import drain_spool, spool_count
 
 EXIT_OK, EXIT_ALREADY_RUNNING, EXIT_CONFIG = 0, 2, 3
+SPOOL_POLL_SECONDS = 30  # a hook that timed out spools without starting a daemon: pick its turns up while running
 
 log = logging.getLogger("rem.daemon")
 
@@ -94,11 +95,19 @@ def _drain(service: RemService, cfg: RemConfig) -> None:
         log.info("drained %d spooled ingest(s)", drained)
 
 
-async def _drain_when_serving(server: uvicorn.Server, service: RemService, cfg: RemConfig) -> None:
-    """Second drain, once hooks can reach us: catches turns spooled while we were starting up."""
+async def _drain_periodically(server: uvicorn.Server, service: RemService, cfg: RemConfig) -> None:
+    """Drain again as soon as hooks can reach us (turns spooled while we were starting up), then
+    every SPOOL_POLL_SECONDS while spool files exist (turns a hook spooled after a timeout)."""
     while not server.started:
         await asyncio.sleep(0.02)
-    await asyncio.get_running_loop().run_in_executor(None, _drain, service, cfg)
+    loop = asyncio.get_running_loop()
+    while True:
+        if spool_count(cfg.data_dir):
+            try:
+                await loop.run_in_executor(None, _drain, service, cfg)
+            except Exception as e:  # keep serving; the next round retries
+                log.error("spool drain failed: %s", type(e).__name__)
+        await asyncio.sleep(SPOOL_POLL_SECONDS)
 
 
 async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler | None) -> None:
@@ -117,7 +126,7 @@ async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler | None
         log.info("extraction disabled: no [llm] configured; jobs stay pending")
     else:
         worker = asyncio.create_task(Worker(service, handler).run(stop))
-    late_drain = asyncio.create_task(_drain_when_serving(server, service, cfg))
+    late_drain = asyncio.create_task(_drain_periodically(server, service, cfg))
     log.info("listening on %s (pid %d)", sock, os.getpid())
     try:
         await server.serve(sockets=[listener])  # returns once a signal sets should_exit

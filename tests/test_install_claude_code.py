@@ -194,7 +194,7 @@ def test_cli_install_uninstall_project_and_status_without_daemon(tmp_path, monke
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     monkeypatch.chdir(repo)
     assert main(["status"]) == 1
-    assert capsys.readouterr().out == "claude_code_hooks: none\nrem daemon is not running\n"
+    assert capsys.readouterr().out == "claude_code_hooks: none\nspooled: 0\nrem daemon is not running\n"
     assert main(["install", "claude-code"]) == 0
     assert main(["install", "claude-code", "--project"]) == 0
     capsys.readouterr()

@@ -442,3 +442,19 @@ def test_first_hook_log_under_umask_022_is_private(hook_env):
         os.umask(old)
     assert stat.S_IMODE(hook_env.stat().st_mode) == 0o700
     assert stat.S_IMODE((hook_env / "hook.log").stat().st_mode) == 0o600
+
+
+def test_full_spool_is_logged_by_class_only(hook_env, monkeypatch, starts):
+    from rem import spool
+    from rem.adapters import claude_code
+
+    monkeypatch.setattr(spool, "SPOOL_MAX_FILES", 0)
+    monkeypatch.setattr(claude_code, "RemClient", Fake(down()))
+    p = payload("UserPromptSubmit", prompt="the secret prompt", prompt_id="p1")
+    out = io.StringIO()
+    assert claude_code.main(stdin=io.StringIO(json.dumps(p)), stdout=out) == 0
+    assert out.getvalue() == ""
+    (line,) = (hook_env / "hook.log").read_text().splitlines()
+    assert line.endswith(" UserPromptSubmit SpoolFull: hook failed")
+    assert not list((hook_env / "spool").glob("*.json"))
+    assert len(starts) == 1  # the daemon is still started (subject to its backoff)

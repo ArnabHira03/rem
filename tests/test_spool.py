@@ -91,6 +91,32 @@ def test_first_spool_under_umask_022_is_private(tmp_path):
     assert stat.S_IMODE((p.parent / "bad" / p.name).stat().st_mode) == 0o600
 
 
+def test_full_spool_refuses_new_files(tmp_path, monkeypatch):
+    import pytest
+
+    from rem import spool
+    from rem.errors import RemError
+
+    monkeypatch.setattr(spool, "SPOOL_MAX_FILES", 3)
+    for sid in ("a", "b", "c"):
+        write_spool(tmp_path, body(sid))
+    with pytest.raises(spool.SpoolFull) as e:
+        write_spool(tmp_path, body("d"))
+    assert isinstance(e.value, RemError)
+    assert spool.spool_count(tmp_path) == 3
+    assert not list((tmp_path / "spool").glob(".*.tmp"))
+
+
+def test_spool_count_ignores_quarantined_and_missing(tmp_path):
+    from rem.spool import spool_count
+
+    assert spool_count(tmp_path) == 0
+    write_spool(tmp_path, body("a"))
+    drain_spool(tmp_path, reject)  # a is now in spool/bad
+    write_spool(tmp_path, body("b"))
+    assert spool_count(tmp_path) == 1
+
+
 def test_existing_data_dir_mode_is_left_alone(tmp_path):
     import os
 

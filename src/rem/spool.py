@@ -1,6 +1,7 @@
 """Spool for turns captured while the daemon is down.
 
-A hook writes the (already redacted) /ingest body here; the daemon drains it at startup.
+A hook writes the (already redacted) /ingest body here; the daemon drains it at startup and
+then periodically while it runs. The spool is capped at SPOOL_MAX_FILES files.
 """
 
 import json
@@ -11,8 +12,23 @@ from collections.abc import Callable
 from pathlib import Path
 
 from rem.config import ensure_private_dir
+from rem.errors import RemError
 
 log = logging.getLogger("rem.spool")
+
+SPOOL_MAX_FILES = 1000
+
+
+class SpoolFull(RemError):
+    """The spool already holds SPOOL_MAX_FILES files (the daemon has not drained it for a long time)."""
+
+
+def spool_count(data_dir: Path) -> int:
+    """How many bodies are waiting in the spool (quarantined spool/bad files not counted)."""
+    try:
+        return sum(1 for _ in (data_dir / "spool").glob("*.json"))
+    except OSError:
+        return 0
 
 
 def _spool_dir(data_dir: Path) -> Path:
@@ -24,6 +40,8 @@ def _spool_dir(data_dir: Path) -> Path:
 
 
 def write_spool(data_dir: Path, body: dict) -> Path:
+    if spool_count(data_dir) >= SPOOL_MAX_FILES:
+        raise SpoolFull(f"spool holds {SPOOL_MAX_FILES} files or more")
     d = _spool_dir(data_dir)
     name = f"{time.time_ns()}-{os.getpid()}"
     tmp, final = d / f".{name}.tmp", d / f"{name}.json"

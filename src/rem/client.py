@@ -107,13 +107,31 @@ def _spawn_daemon(cfg: RemConfig) -> subprocess.Popen:
         )
 
 
-def start_daemon_background(cfg: RemConfig) -> None:
-    """Spawn a detached `rem daemon` and return immediately."""
+START_BACKOFF_SECONDS = 60
+
+
+def start_daemon_background(cfg: RemConfig) -> bool:
+    """Spawn a detached `rem daemon` and return immediately (used by hooks).
+
+    At most one spawn per START_BACKOFF_SECONDS (stamp file `daemon-start.stamp`): a daemon that
+    can't start must not be respawned by every hook. Returns whether a daemon was spawned.
+    """
+    stamp = cfg.data_dir / "daemon-start.stamp"
+    try:
+        if time.time() - stamp.stat().st_mtime < START_BACKOFF_SECONDS:
+            return False
+    except FileNotFoundError:
+        pass
+    ensure_private_dir(cfg.data_dir)
+    os.close(os.open(stamp, os.O_WRONLY | os.O_CREAT, 0o600))
+    os.utime(stamp)
     _spawn_daemon(cfg)
+    return True
 
 
 def ensure_daemon(cfg: RemConfig) -> RemClient:
-    """Return a client for a running daemon, starting one in the background if needed."""
+    """Return a client for a running daemon, starting one in the background if needed.
+    Not subject to the hook's start backoff: an interactive user wants the real error."""
     client = RemClient(cfg.socket_path)
     try:
         client.status()

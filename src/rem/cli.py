@@ -174,17 +174,25 @@ def _status(args, cfg) -> int:
     from rem.client import DaemonUnavailable, RemClient
     from rem.install_claude_code import installed_where
 
-    hooks = ",".join(installed_where()) or "none"  # local check: works with the daemon down
+    from rem.spool import spool_count
+
+    hooks = ",".join(installed_where()) or "none"  # local checks: work with the daemon down
+    spooled = spool_count(cfg.data_dir)
     try:
         st = RemClient(cfg.socket_path, timeout=5).status()
     except DaemonUnavailable:
         print(f"claude_code_hooks: {hooks}")
-        print("rem daemon is not running")
+        print(f"spooled: {spooled}")
+        if spooled:
+            print(f"rem daemon is not running; spooled turns will be ingested when it starts (see {cfg.log_path})")
+        else:
+            print("rem daemon is not running")
         return 1
     if args.json:
-        print(json.dumps({**st, "claude_code_hooks": hooks}, indent=2))
+        print(json.dumps({**st, "claude_code_hooks": hooks, "spooled": spooled}, indent=2))
     else:
         print(f"claude_code_hooks: {hooks}")
+        print(f"spooled: {spooled}")
         for k, v in st.items():
             print(f"{k}: {v}")
     return 0

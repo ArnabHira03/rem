@@ -162,5 +162,10 @@ def _has_marker(path: Path) -> bool:
 
 
 def installed_where(cwd: Path | None = None) -> list[str]:
-    cwd = cwd or Path.cwd()
-    return [name for name, project in (("user", False), ("project", True)) if _has_marker(settings_path(project, cwd))]
+    where = ["user"] if _has_marker(settings_path(False, Path("/"))) else []
+    try:
+        if _has_marker(settings_path(True, cwd or Path.cwd())):
+            where.append("project")
+    except OSError:  # e.g. the current directory was deleted: the project is unknown
+        pass
+    return where

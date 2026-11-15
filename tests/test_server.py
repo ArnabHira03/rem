@@ -213,3 +213,43 @@ def test_startup_drain_failure_still_closes_service_and_releases_lock(daemon_env
     assert p.wait(20) != 0
     assert "service closed" in daemon_env.log.read_text()
     assert InstanceLock.holder_pid(daemon_env.lock) is None
+
+
+FAST_POLL_DAEMON = """
+import sys
+from rem.config import load_config
+import rem.daemon.server as server
+
+server.SPOOL_POLL_SECONDS = 0.2
+sys.exit(server.run_daemon(load_config()))
+"""
+
+
+def test_spool_file_written_while_serving_is_drained_without_restart(daemon_env):
+    import subprocess
+    import sys
+    import time
+
+    from rem.spool import write_spool
+
+    script = daemon_env.root / "fastpoll.py"
+    script.write_text(FAST_POLL_DAEMON)
+    p = subprocess.Popen([sys.executable, str(script)], env=daemon_env.env,
+                         stdout=open(daemon_env.log, "a"), stderr=subprocess.STDOUT)
+    try:
+        pid = wait_for_socket(daemon_env.sock)
+        c = uds_client(daemon_env.sock)
+        time.sleep(0.5)  # well past the first drain: only the periodic one can pick this up
+        assert c.get("/status").json()["jobs"]["pending"] == 0
+        write_spool(daemon_env.root, {"source": "claude-code", "session_id": "timeout", "cwd": None,
+                                      "turns": [{"role": "user", "content": "spooled after a timeout"}],
+                                      "enqueue": True})
+        deadline = time.time() + 5
+        while c.get("/status").json()["jobs"]["pending"] != 1 and time.time() < deadline:
+            time.sleep(0.05)
+        assert c.get("/status").json()["jobs"]["pending"] == 1
+        assert list((daemon_env.root / "spool").glob("*.json")) == []
+        assert c.get("/status").json()["pid"] == pid  # same daemon, no restart
+    finally:
+        p.terminate()
+        assert p.wait(10) == 0
