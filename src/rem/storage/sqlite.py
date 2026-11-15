@@ -9,7 +9,7 @@ from pathlib import Path
 from rem.errors import RemError
 from rem.models import HistoryEvent, HistoryRow, TargetKind, utcnow
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _MIGRATIONS = {
     1: """
@@ -68,6 +68,14 @@ _MIGRATIONS = {
     );
     CREATE INDEX jobs_status ON jobs (status, not_before);
     CREATE INDEX messages_job ON messages (session_pk, job_id);
+    """,
+    3: """
+    CREATE TABLE extractions (
+        job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+        model TEXT NOT NULL,
+        candidates TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
     """,
 }
 
@@ -153,6 +161,18 @@ class RemDB:
             "SELECT * FROM history WHERE target_id = ? ORDER BY id", (target_id,)
         ).fetchall()
         return [HistoryRow(**dict(r)) for r in rows]
+
+    def save_extraction(self, job_id: int, model: str, candidates_json: str) -> None:
+        """Cache a job's extraction. The first write wins, so a replay reuses the original candidates."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO extractions (job_id, model, candidates, created_at) VALUES (?, ?, ?, ?)",
+            (job_id, model, candidates_json, utcnow()),
+        )
+
+    def get_extraction(self, job_id: int) -> tuple[str, str] | None:
+        """(model, candidates_json) cached for a job, if any."""
+        row = self._conn.execute("SELECT model, candidates FROM extractions WHERE job_id = ?", (job_id,)).fetchone()
+        return (row["model"], row["candidates"]) if row else None
 
     def close(self) -> None:
         self._conn.close()

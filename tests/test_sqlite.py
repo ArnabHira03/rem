@@ -1,10 +1,10 @@
 from rem.models import HistoryEvent, TargetKind
-from rem.storage.sqlite import RemDB
+from rem.storage.sqlite import SCHEMA_VERSION, RemDB
 
 
 def test_schema_and_meta(tmp_path):
     db = RemDB(tmp_path / "rem.db")
-    assert db.get_meta("schema_version") == "2"
+    assert db.get_meta("schema_version") == str(SCHEMA_VERSION)
     db.set_meta("active_embedder", "hash-64")
     assert db.get_meta("active_embedder") == "hash-64"
 

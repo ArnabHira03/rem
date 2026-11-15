@@ -4,7 +4,7 @@ import pytest
 
 import rem.storage.sqlite
 from rem.errors import RemError
-from rem.storage.sqlite import RemDB
+from rem.storage.sqlite import SCHEMA_VERSION, RemDB
 
 V1_SCHEMA_SQL = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
@@ -24,7 +24,7 @@ def _tables(path):
 
 def test_fresh_db_is_v2_with_queue_tables(tmp_path):
     db = RemDB(tmp_path / "rem.db")
-    assert db.get_meta("schema_version") == "2"
+    assert db.get_meta("schema_version") == str(SCHEMA_VERSION)
     assert {"sessions", "messages", "jobs", "history", "projects", "meta"} <= _tables(tmp_path / "rem.db")
     assert db.conn is not None
 
@@ -37,7 +37,7 @@ def test_v1_db_upgrades_in_place(tmp_path):
     c.commit()
     c.close()
     db = RemDB(p)
-    assert db.get_meta("schema_version") == "2" and len(db.get_history("m1")) == 1
+    assert db.get_meta("schema_version") == str(SCHEMA_VERSION) and len(db.get_history("m1")) == 1
 
 
 def test_newer_schema_refused(tmp_path):
