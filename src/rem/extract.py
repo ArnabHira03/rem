@@ -1,37 +1,15 @@
 import hashlib
 import logging
-from typing import Literal
 
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ValidationError
 
 from rem.errors import LLMError
 from rem.llm.base import LLM
-from rem.models import MemoryRecord, Scope
+from rem.models import Candidate, MemoryRecord, Origin, Scope  # noqa: F401  (re-exported)
 from rem.redact import redact
 from rem.storage.queue import Turn
 
 log = logging.getLogger(__name__)
-
-Origin = Literal["user", "assistant", "tool"]
-
-
-class Candidate(BaseModel):
-    text: str
-    scope: Scope
-    origin: Origin
-    evidence_source: str | None = None
-    # Id of an existing memory the LLM says this fact restates (resolved from its integer index at
-    # extraction time, so a cached extraction replays against the same memory).
-    restates: str | None = None
-
-    @field_validator("text")
-    @classmethod
-    def _text_not_empty(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("text must not be empty")
-        return v
-
 
 class Extraction(BaseModel):
     candidates: list[Candidate]
@@ -86,14 +64,26 @@ If there is nothing durable, return {"facts": []}.
 Respond with JSON: {"facts": [{"text": ..., "scope": ..., "origin": ..., "restates": ...}]}"""
 
 
+MAX_TURN_CHARS = 4000  # per turn sent to the LLM: a pasted log or file must not blow up the prompt
+
+
+def clip_turn(text: str, limit: int = MAX_TURN_CHARS) -> str:
+    """Keep the first and last limit/2 characters of an over-long turn, marking what was left out."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}\n[… {len(text) - 2 * half} chars omitted …]\n{text[-half:]}"
+
+
 def build_prompt(
     turns: list[Turn], context: list[Turn], related: list[MemoryRecord]
 ) -> tuple[str, str]:
     existing = "\n".join(
         f"[{i}] ({m.scope.value}, {m.status.value}) {redact(m.text)}" for i, m in enumerate(related)
     )
-    earlier = "\n".join(f"{t.role}: {redact(t.content)}" for t in context)
-    new = "\n".join(f"{t.role}: {redact(t.content)}" for t in turns)
+    # redact before clipping, so a cut can't leave half a secret the patterns no longer match
+    earlier = "\n".join(f"{t.role}: {clip_turn(redact(t.content))}" for t in context)
+    new = "\n".join(f"{t.role}: {clip_turn(redact(t.content))}" for t in turns)
     user = (
         f"## Existing memories\n{existing}\n\n"
         f"## Earlier conversation\n{earlier}\n\n"

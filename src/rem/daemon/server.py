@@ -16,13 +16,16 @@ import uvicorn
 from rem.config import RemConfig
 from rem.daemon.app import build_app
 from rem.daemon.lock import AlreadyRunning, InstanceLock
+from rem.daemon.schemas import IngestBody
 from rem.daemon.service import RemService
 from rem.daemon.extraction import ExtractionHandler
 from rem.daemon.worker import JobHandler, Worker
 from rem.errors import RemError
 from rem.llm.factory import create_llm
+from rem.spool import drain_spool, spool_count
 
 EXIT_OK, EXIT_ALREADY_RUNNING, EXIT_CONFIG = 0, 2, 3
+SPOOL_POLL_SECONDS = 30  # a hook that timed out spools without starting a daemon: pick its turns up while running
 
 log = logging.getLogger("rem.daemon")
 
@@ -65,6 +68,10 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
             log.error("%s", e)
             return EXIT_CONFIG
         try:
+            recovered = service.store.call(service.ingest_store.recover)
+            if recovered:
+                log.info("recovered %d interrupted job(s)", recovered)
+            _drain(service, cfg)
             asyncio.run(_serve(service, cfg, handler))
         finally:
             service.close()
@@ -75,12 +82,36 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         lock.release()
 
 
+def _drain(service: RemService, cfg: RemConfig) -> None:
+    """Ingest turns that hooks spooled while the daemon was down (blocking; runs the ingest on the store thread)."""
+
+    def ingest(body: dict) -> None:
+        b = IngestBody.model_validate(body)  # same validation as POST /ingest; ValueError -> spool/bad/
+        service.store.call(service.ingest_store.ingest, b.source, b.session_id, b.cwd_path(),
+                           b.turns_for_ingest(), b.enqueue)
+
+    drained = drain_spool(cfg.data_dir, ingest)
+    if drained:
+        log.info("drained %d spooled ingest(s)", drained)
+
+
+async def _drain_periodically(server: uvicorn.Server, service: RemService, cfg: RemConfig) -> None:
+    """Drain again as soon as hooks can reach us (turns spooled while we were starting up), then
+    every SPOOL_POLL_SECONDS while spool files exist (turns a hook spooled after a timeout)."""
+    while not server.started:
+        await asyncio.sleep(0.02)
+    loop = asyncio.get_running_loop()
+    while True:
+        if spool_count(cfg.data_dir):
+            try:
+                await loop.run_in_executor(None, _drain, service, cfg)
+            except Exception as e:  # keep serving; the next round retries
+                log.error("spool drain failed: %s", type(e).__name__)
+        await asyncio.sleep(SPOOL_POLL_SECONDS)
+
+
 async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler | None) -> None:
     sock = cfg.socket_path
-    recovered = await service.recover_jobs()
-    if recovered:
-        log.info("recovered %d interrupted job(s)", recovered)
-
     # Bind the socket ourselves: uvicorn's own uds= path chmods it to 0666 after binding.
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(sock))
@@ -95,10 +126,12 @@ async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler | None
         log.info("extraction disabled: no [llm] configured; jobs stay pending")
     else:
         worker = asyncio.create_task(Worker(service, handler).run(stop))
+    late_drain = asyncio.create_task(_drain_periodically(server, service, cfg))
     log.info("listening on %s (pid %d)", sock, os.getpid())
     try:
         await server.serve(sockets=[listener])  # returns once a signal sets should_exit
     finally:
+        late_drain.cancel()
         stop.set()
         if worker is not None:
             await worker

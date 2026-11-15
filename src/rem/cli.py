@@ -57,6 +57,16 @@ def _parser() -> argparse.ArgumentParser:
     i = cmd("install-service", "install the systemd user service")
     i.add_argument("--enable", action="store_true", help="also enable and start it now")
 
+    # listed for --help only: main() dispatches `rem hook ...` before argparse
+    h = cmd("hook", "handle an agent hook event read from stdin (installed by `rem install`)")
+    h.add_argument("agent", choices=["claude-code"])
+
+    ins = cmd("install", "install rem's hooks into an agent's settings")
+    ins.add_argument("agent", choices=["claude-code"])
+    ins.add_argument("--project", action="store_true", help="use <git root>/.claude/settings.local.json")
+    ins.add_argument("--uninstall", action="store_true", help="remove rem's hooks")
+    ins.add_argument("--dry-run", action="store_true", help="print the resulting settings, write nothing")
+
     ev = cmd("eval", "score the configured LLM (runs in-process, no daemon)")
     ev.add_argument("what", choices=["extraction"])
     ev.add_argument("--dataset", type=Path, help="JSONL dataset (default: the one shipped with rem)")
@@ -149,17 +159,46 @@ def _eval(args, cfg) -> int:
     return 0
 
 
+def _install(args) -> int:
+    from rem import install_claude_code as ic
+
+    path = ic.settings_path(args.project, Path.cwd())
+    if args.uninstall:
+        print(ic.uninstall(path, dry_run=args.dry_run))
+    else:
+        print(ic.install(path, ic.hook_command(), dry_run=args.dry_run))
+        if not args.dry_run:
+            from rem.systemd import unit_path
+
+            if not unit_path().exists():
+                print("tip: run 'rem install-service --enable' so the daemon is up before your first "
+                      "Claude Code session")
+    return 0
+
+
 def _status(args, cfg) -> int:
     from rem.client import DaemonUnavailable, RemClient
+    from rem.install_claude_code import installed_where
 
+    from rem.spool import spool_count
+
+    hooks = ",".join(installed_where()) or "none"  # local checks: work with the daemon down
+    spooled = spool_count(cfg.data_dir)
     try:
         st = RemClient(cfg.socket_path, timeout=5).status()
     except DaemonUnavailable:
-        print("rem daemon is not running")
+        print(f"claude_code_hooks: {hooks}")
+        print(f"spooled: {spooled}")
+        if spooled:
+            print(f"rem daemon is not running; spooled turns will be ingested when it starts (see {cfg.log_path})")
+        else:
+            print("rem daemon is not running")
         return 1
     if args.json:
-        print(json.dumps(st, indent=2))
+        print(json.dumps({**st, "claude_code_hooks": hooks, "spooled": spooled}, indent=2))
     else:
+        print(f"claude_code_hooks: {hooks}")
+        print(f"spooled: {spooled}")
         for k, v in st.items():
             print(f"{k}: {v}")
     return 0
@@ -184,11 +223,22 @@ def _stop(cfg) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args_in = sys.argv[1:] if argv is None else argv
+    if args_in[:1] == ["hook"]:  # before argparse/config/daemon: a hook must never fail, print or block
+        from rem.adapters import claude_code
+
+        return claude_code.main() if args_in[1:] == ["claude-code"] else claude_code.bad_args()
     parser = _parser()
     try:
         args = parser.parse_args(argv)
     except SystemExit as e:
         return int(e.code or 0)
+    if args.cmd == "install":  # edits Claude Code settings only: works even with a broken rem config
+        try:
+            return _install(args)
+        except RemError as e:
+            print(f"rem: {e}", file=sys.stderr)
+            return 1
     try:
         cfg = load_config()
     except ValueError as e:

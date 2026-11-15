@@ -3,11 +3,22 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 DEFAULT_DATA_DIR = Path("~/.local/share/rem").expanduser()
 DEFAULT_CONFIG_PATH = Path("~/.config/rem/config.toml").expanduser()
 DEFAULT_CACHE_DIR = Path("~/.cache/rem/fastembed").expanduser()
+
+
+def ensure_private_dir(path: Path) -> Path:
+    """Create `path` (and missing parents) if needed; a directory rem creates is chmod 0700 whatever the umask.
+    An existing directory is left as it is."""
+    try:
+        path.mkdir(mode=0o700, parents=True)
+    except FileExistsError:
+        return path
+    os.chmod(path, 0o700)
+    return path
 
 
 class VectorStoreConfig(BaseModel):
@@ -56,6 +67,17 @@ class ExtractionConfig(BaseModel):
     max_candidates: int = 20
 
 
+class ClaudeCodeConfig(BaseModel):
+    exclude: list[Path] = []
+    context_max_chars: int = Field(1600, ge=1, le=10000)  # Claude Code moves context over 10,000 chars to a file
+    hook_budget_seconds: float = Field(2.0, gt=0, le=9)  # below the installed 10 s hook timeout
+
+    @field_validator("exclude")
+    @classmethod
+    def _expand(cls, v: list[Path]) -> list[Path]:
+        return [p.expanduser() for p in v]
+
+
 class RemConfig(BaseModel):
     data_dir: Path
     vector_store: VectorStoreConfig = VectorStoreConfig()
@@ -63,6 +85,7 @@ class RemConfig(BaseModel):
     daemon: DaemonConfig = DaemonConfig()
     llm: LLMConfig = LLMConfig()
     extraction: ExtractionConfig = ExtractionConfig()
+    claude_code: ClaudeCodeConfig = ClaudeCodeConfig()
 
     @property
     def db_path(self) -> Path:

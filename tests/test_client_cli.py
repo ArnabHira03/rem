@@ -27,6 +27,42 @@ def test_status_start_stop(daemon_env, capsys):
     assert main(["stop"]) == 0 and "not running" in capsys.readouterr().out
 
 
+SPOOL_BODY = {"source": "claude-code", "session_id": "s", "cwd": None,
+              "turns": [{"role": "user", "content": "hi"}], "enqueue": True}
+
+
+def test_status_shows_spooled_count_and_hint_with_daemon_down(daemon_env, capsys):
+    from rem.spool import write_spool
+
+    assert main(["status"]) == 1
+    assert capsys.readouterr().out.splitlines()[1:] == ["spooled: 0", "rem daemon is not running"]
+    write_spool(daemon_env.root, SPOOL_BODY)
+    write_spool(daemon_env.root, SPOOL_BODY)
+    assert main(["status"]) == 1
+    assert capsys.readouterr().out.splitlines()[1:] == [
+        "spooled: 2",
+        f"rem daemon is not running; spooled turns will be ingested when it starts (see {daemon_env.log})",
+    ]
+
+
+def test_status_shows_spooled_count_with_daemon_up(daemon_env, capsys):
+    assert main(["start"]) == 0
+    capsys.readouterr()
+    assert main(["status"]) == 0
+    assert capsys.readouterr().out.splitlines()[1] == "spooled: 0"
+    assert main(["status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["spooled"] == 0
+
+
+def test_status_survives_deleted_cwd(daemon_env, tmp_path, monkeypatch, capsys):
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    assert main(["status"]) == 1
+    assert capsys.readouterr().out.startswith("claude_code_hooks: none\nspooled: 0\n")
+
+
 def test_concurrent_cold_start_single_daemon(daemon_env):
     procs = [
         subprocess.Popen([sys.executable, "-m", "rem", "add", f"fact {i}"], env=daemon_env.env,

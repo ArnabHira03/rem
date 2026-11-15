@@ -4,6 +4,20 @@ from rem.config import EmbedderConfig, RemConfig, VectorStoreConfig
 from rem.models import Provenance, Scope, Status
 
 
+@pytest.fixture(autouse=True)
+def _never_touch_real_rem(tmp_path_factory, monkeypatch):
+    """Default every test (and the subprocesses it inherits os.environ into) to a throwaway store,
+    so nothing can reach ~/.local/share/rem, ~/.config/rem or the real daemon's socket.
+    Fixtures and tests that need other values set them on top of these."""
+    import os
+
+    home = tmp_path_factory.mktemp("rem-home")
+    monkeypatch.setenv("REM_HOME", str(home))
+    monkeypatch.setenv("REM_CONFIG", str(home / "no-config.toml"))
+    monkeypatch.setenv("REM_SOCKET", f"/tmp/rem-test-{os.getpid()}-none.sock")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / "claude"))  # never the real ~/.claude
+
+
 @pytest.fixture
 def rem_home(tmp_path, monkeypatch):
     monkeypatch.setenv("REM_HOME", str(tmp_path))

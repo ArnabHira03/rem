@@ -1,5 +1,6 @@
 """Talk to the rem daemon over its Unix socket, starting it on demand."""
 
+import os
 import subprocess
 import sys
 import time
@@ -7,7 +8,7 @@ from pathlib import Path
 
 import httpx
 
-from rem.config import RemConfig
+from rem.config import RemConfig, ensure_private_dir
 from rem.errors import MemoryNotFound, RemError
 
 
@@ -57,6 +58,9 @@ class RemClient:
             "query": query, "cwd": str(cwd) if cwd else None, "limit": limit, "scope": scope,
         })
 
+    def context(self, cwd, max_chars=1600) -> str:
+        return self._call("POST", "/context", json={"cwd": str(cwd) if cwd else None, "max_chars": max_chars})["text"]
+
     def list(self, scope=None, status=None) -> list[dict]:
         params = {k: v for k, v in {"scope": scope, "status": status}.items() if v}
         return self._call("GET", "/memories", params=params)
@@ -76,9 +80,9 @@ class RemClient:
     def history(self, id) -> list[dict]:
         return self._call("GET", f"/memories/{id}/history", ref=id)
 
-    def ingest(self, source, session_id, cwd, turns: list[dict]) -> dict:
+    def ingest(self, source, session_id, cwd, turns: list[dict], enqueue: bool = True) -> dict:
         return self._call("POST", "/ingest", json={
-            "source": source, "session_id": session_id, "cwd": str(cwd) if cwd else None, "turns": turns,
+            "source": source, "session_id": session_id, "cwd": str(cwd) if cwd else None, "turns": turns, "enqueue": enqueue,
         })
 
     def retry_failed(self) -> int:
@@ -92,8 +96,42 @@ def _log_tail(path: Path, lines: int = 20) -> str:
         return "(no daemon log)"
 
 
+def _spawn_daemon(cfg: RemConfig) -> subprocess.Popen:
+    ensure_private_dir(cfg.data_dir)
+    # daemon.log carries job-failure text: create it 0600 here, before the daemon sets its umask
+    fd = os.open(cfg.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as log, open(os.devnull) as devnull:
+        return subprocess.Popen(
+            [sys.executable, "-m", "rem", "daemon"],
+            stdin=devnull, stdout=log, stderr=log, start_new_session=True, cwd="/",
+        )
+
+
+START_BACKOFF_SECONDS = 60
+
+
+def start_daemon_background(cfg: RemConfig) -> bool:
+    """Spawn a detached `rem daemon` and return immediately (used by hooks).
+
+    At most one spawn per START_BACKOFF_SECONDS (stamp file `daemon-start.stamp`): a daemon that
+    can't start must not be respawned by every hook. Returns whether a daemon was spawned.
+    """
+    stamp = cfg.data_dir / "daemon-start.stamp"
+    try:
+        if time.time() - stamp.stat().st_mtime < START_BACKOFF_SECONDS:
+            return False
+    except FileNotFoundError:
+        pass
+    ensure_private_dir(cfg.data_dir)
+    os.close(os.open(stamp, os.O_WRONLY | os.O_CREAT, 0o600))
+    os.utime(stamp)
+    _spawn_daemon(cfg)
+    return True
+
+
 def ensure_daemon(cfg: RemConfig) -> RemClient:
-    """Return a client for a running daemon, starting one in the background if needed."""
+    """Return a client for a running daemon, starting one in the background if needed.
+    Not subject to the hook's start backoff: an interactive user wants the real error."""
     client = RemClient(cfg.socket_path)
     try:
         client.status()
@@ -101,12 +139,7 @@ def ensure_daemon(cfg: RemConfig) -> RemClient:
     except DaemonUnavailable:
         pass
 
-    cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    with open(cfg.log_path, "a") as log, open("/dev/null") as devnull:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "rem", "daemon"],
-            stdin=devnull, stdout=log, stderr=log, start_new_session=True,
-        )
+    proc = _spawn_daemon(cfg)
     deadline = time.monotonic() + cfg.daemon.start_timeout_seconds
     while time.monotonic() < deadline:
         try:

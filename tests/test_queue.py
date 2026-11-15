@@ -180,3 +180,45 @@ def test_other_sessions_are_not_blocked(q, clock):
     q.ingest("cli", "s2", None, [T("user", "x", "1")])
     clock.t += 5
     assert q.claim().session_id in {"s1", "s2"}
+
+
+def test_held_turn_creates_no_job(q):
+    r = q.ingest("claude-code", "s", None, [Turn("user", "I use fish", "cc:p1:user")], enqueue=False)
+    assert r.accepted == 1 and r.job_id is None and q.counts()["pending"] == 0
+
+
+def test_reply_job_takes_held_prompt(q, clock):
+    q.ingest("claude-code", "s", None, [Turn("user", "I use fish", "cc:p1:user")], enqueue=False)
+    q.ingest("claude-code", "s", None, [Turn("assistant", "Noted.", "cc:p1:assistant")])
+    clock.t += 10
+    job = q.claim()
+    assert [t.role for t in q.messages_for(job.id)] == ["user", "assistant"]
+
+
+def test_empty_enqueue_flushes_held_turns(q, clock):
+    q.ingest("claude-code", "s", None, [Turn("user", "I use fish", "cc:p1:user")], enqueue=False)
+    r = q.ingest("claude-code", "s", None, [], enqueue=True)
+    assert r.job_id is not None and r.accepted == 0
+    clock.t += 10
+    assert len(q.messages_for(q.claim().id)) == 1
+
+
+def test_empty_enqueue_without_held_turns_is_noop(q):
+    assert q.ingest("claude-code", "s", None, [], enqueue=True).job_id is None
+
+
+def test_quick_follow_up_prompt_lands_in_the_previous_job(q, clock):
+    """Documents the debounce split: a prompt sent within the debounce window of the previous reply
+    joins that reply's job (J1 = [p1, r1, p2]); its own reply becomes the next job (J2 = [r2])."""
+    q.ingest("claude-code", "s", None, [Turn("user", "p1", "cc:1:user")], enqueue=False)
+    q.ingest("claude-code", "s", None, [Turn("assistant", "r1", "cc:1:assistant")])
+    clock.t += 2  # within the 5 s debounce
+    q.ingest("claude-code", "s", None, [Turn("user", "p2", "cc:2:user")], enqueue=False)
+    clock.t += 5
+    j1 = q.claim()
+    assert [t.content for t in q.messages_for(j1.id)] == ["p1", "r1", "p2"]
+    q.ingest("claude-code", "s", None, [Turn("assistant", "r2", "cc:2:assistant")])
+    q.complete(j1.id)
+    clock.t += 5
+    j2 = q.claim()
+    assert [t.content for t in q.messages_for(j2.id)] == ["r2"]

@@ -124,13 +124,13 @@ Deletes are **hard deletes in Qdrant + a DELETE history row holding the old text
 ## Decisions carried over from rev 1 (unchanged)
 1. Claude Code is the first client: hooks (capture + SessionStart context) and an MCP server.
 2. rem owns extraction with its own LLM. Develop and evaluate against an API model with non-sensitive data; local is the long-term preference. Remote use requires `allow_remote = true` and is shown in `rem status`.
-3. An agent-independent ingestion API plus per-agent capture adapters (cursor, session id, incremental sync, dedup).
+3. An agent-independent ingestion API plus per-agent capture adapters (cursor, session id, incremental sync, dedup). *Deviation:* M4 captures from hook payloads only — no transcript cursor or backfill (decided 2026-11-15; the transcript format is internal and unstable).
 4. One daemon owns both stores, the LLM and the durable job queue. systemd user service plus auto-start; `flock`; Unix socket at `$XDG_RUNTIME_DIR/rem.sock`.
 5. Scopes `global` / `system` / `project`. Ranking: current project +0.15, other projects −0.05 with a stricter threshold (~0.55 vs ~0.3), unverified −0.05, a small recency tiebreak. Every result shows scope, project, provenance, status and created_at.
 6. Session-start injection: verified memories only, current project → system → global, ~400-token cap, 2s hook timeout. No per-prompt injection.
 7. Provenance + trust rules (user → user_asserted/verified; assistant → assistant_generated/unverified; tool → tool_observed/verified with evidence; confirm → user_confirmed). Corroboration upgrades instead of duplicating.
 8. Extraction pipeline as in Mem0's additive design: context turns, top-10 related memories with integer IDs, one JSON LLM call `{text, scope, origin}`, batch embed, hash and near-dup dedup.
-9. Redaction before storage or LLM calls; no backfill in v1 (last ~20 turns of an unseen session); raw messages kept.
+9. Redaction before storage or LLM calls; no backfill in v1 (last ~20 turns of an unseen session); raw messages kept. *Deviation:* M4 captures from hook payloads only — no transcript cursor or backfill (decided 2026-11-15; the transcript format is internal and unstable).
 10. MCP tools: `search_memory, list_memories, add_memory (assistant_generated), confirm_memory, update_memory, delete_memory, memory_history`.
 11. Extraction eval harness (`rem eval extraction`), measuring recall/precision, scope, origin, JSON validity, dedup and latency.
 
@@ -140,7 +140,7 @@ Deletes are **hard deletes in Qdrant + a DELETE history row holding the old text
 | M1 | Skeleton + fix the entry point; config; `VectorStore` ABC + **Qdrant local** + in-memory fake; fastembed embedder; SQLite `rem.db` (meta, history); `Memory` façade with `add(infer=False)/search/get/list/update/delete/history`; deterministic IDs + write ordering; scope/provenance payload incl. empty `entity_ids`; CLI in-process | Mem0's storage split |
 | M2 | Daemon: socket API, durable job queue + leases, single owner of both stores, flock, start/stop/status, systemd, auto-start. CLI switches to talking to the daemon | concurrency, crash safety |
 | M3 | LLM providers; `extract`, `trust`, dedup/corroboration; redaction; `allow_remote`; eval harness + dataset | Mem0's write path |
-| M4 | Claude Code adapter: ingest hooks, cursor, project detection, SessionStart context, `rem install claude-code` | incremental sync |
+| M4 | Claude Code adapter: ingest hooks, cursor, project detection, SessionStart context, `rem install claude-code`. *Deviation:* M4 captures from hook payloads only — no transcript cursor or backfill (decided 2026-11-15; the transcript format is internal and unstable). | incremental sync |
 | M5 | MCP shim + tools; end-to-end in Claude Code | MCP |
 | M6 | Hybrid retrieval: BM25 sparse vectors in Qdrant (as in Mem0) + `score_and_rank`; `rem reembed` | Mem0's read path |
 | M7 | Entities: extraction (spaCy or LLM), alias resolution, `rem_entities` collection, memory ↔ entity links, entity boost in search | Mem0 entity store |

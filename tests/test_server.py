@@ -125,3 +125,131 @@ def test_sigterm_exits_promptly_with_llm_call_in_flight(daemon_env):
         if p.poll() is None:
             p.kill()
             p.wait()
+
+
+def test_spool_is_drained_once_at_startup(daemon_env):
+    from rem.spool import write_spool
+
+    write_spool(daemon_env.root, {"source": "claude-code", "session_id": "sp", "cwd": None,
+                                  "turns": [{"role": "user", "content": "hello from the spool"}],
+                                  "enqueue": True})
+    write_spool(daemon_env.root, {"source": "claude-code", "turns": "invalid"})
+    p = spawn_daemon(daemon_env)
+    wait_for_socket(daemon_env.sock)
+    assert uds_client(daemon_env.sock).get("/status").json()["jobs"]["pending"] == 1
+    spool = daemon_env.root / "spool"
+    assert list(spool.glob("*.json")) == []
+    assert len(list((spool / "bad").iterdir())) == 1
+    p.terminate()
+    assert p.wait(10) == 0
+
+    p2 = spawn_daemon(daemon_env)
+    wait_for_socket(daemon_env.sock)
+    assert uds_client(daemon_env.sock).get("/status").json()["jobs"]["pending"] == 1
+    assert daemon_env.log.read_text().count("drained 1 spooled") == 1
+    p2.terminate()
+    assert p2.wait(10) == 0
+
+
+SPOOL_PATCH_DAEMON = """
+import sys
+from rem.config import load_config
+import rem.daemon.server as server
+from rem.daemon.service import RemService
+from rem.spool import write_spool
+
+MODE = sys.argv[1]
+real_drain, real_close, calls = server.drain_spool, RemService.close, []
+
+def drain(data_dir, ingest):
+    calls.append(1)
+    if MODE == "raise":
+        raise OSError("disk gone")
+    n = real_drain(data_dir, ingest)
+    if len(calls) == 1:  # a hook spools while we are still starting up
+        write_spool(data_dir, {"source": "claude-code", "session_id": "late", "cwd": None,
+                               "turns": [{"role": "user", "content": "late turn"}], "enqueue": True})
+    return n
+
+def close(self):
+    print("service closed", file=sys.stderr, flush=True)
+    real_close(self)
+
+server.drain_spool = drain
+RemService.close = close
+sys.exit(server.run_daemon(load_config()))
+"""
+
+
+def _spawn_patched(daemon_env, mode):
+    import subprocess
+    import sys
+
+    script = daemon_env.root / "patched.py"
+    script.write_text(SPOOL_PATCH_DAEMON)
+    log = open(daemon_env.log, "a")
+    return subprocess.Popen([sys.executable, str(script), mode], env=daemon_env.env, stdout=log, stderr=log)
+
+
+def test_spool_file_written_during_startup_is_drained_without_restart(daemon_env):
+    import time
+
+    p = _spawn_patched(daemon_env, "late")
+    try:
+        wait_for_socket(daemon_env.sock)
+        c = uds_client(daemon_env.sock)
+        deadline = time.time() + 5
+        while c.get("/status").json()["jobs"]["pending"] != 1 and time.time() < deadline:
+            time.sleep(0.05)
+        assert c.get("/status").json()["jobs"]["pending"] == 1
+        assert list((daemon_env.root / "spool").glob("*.json")) == []
+    finally:
+        p.terminate()
+        assert p.wait(10) == 0
+
+
+def test_startup_drain_failure_still_closes_service_and_releases_lock(daemon_env):
+    p = _spawn_patched(daemon_env, "raise")
+    assert p.wait(20) != 0
+    assert "service closed" in daemon_env.log.read_text()
+    assert InstanceLock.holder_pid(daemon_env.lock) is None
+
+
+FAST_POLL_DAEMON = """
+import sys
+from rem.config import load_config
+import rem.daemon.server as server
+
+server.SPOOL_POLL_SECONDS = 0.2
+sys.exit(server.run_daemon(load_config()))
+"""
+
+
+def test_spool_file_written_while_serving_is_drained_without_restart(daemon_env):
+    import subprocess
+    import sys
+    import time
+
+    from rem.spool import write_spool
+
+    script = daemon_env.root / "fastpoll.py"
+    script.write_text(FAST_POLL_DAEMON)
+    p = subprocess.Popen([sys.executable, str(script)], env=daemon_env.env,
+                         stdout=open(daemon_env.log, "a"), stderr=subprocess.STDOUT)
+    try:
+        pid = wait_for_socket(daemon_env.sock)
+        c = uds_client(daemon_env.sock)
+        time.sleep(0.5)  # well past the first drain: only the periodic one can pick this up
+        assert c.get("/status").json()["jobs"]["pending"] == 0
+        write_spool(daemon_env.root, {"source": "claude-code", "session_id": "timeout", "cwd": None,
+                                      "turns": [{"role": "user", "content": "spooled after a timeout"}],
+                                      "enqueue": True})
+        deadline = time.time() + 5
+        while c.get("/status").json()["jobs"]["pending"] != 1 and time.time() < deadline:
+            time.sleep(0.05)
+        assert c.get("/status").json()["jobs"]["pending"] == 1
+        assert list((daemon_env.root / "spool").glob("*.json")) == []
+        assert c.get("/status").json()["pid"] == pid  # same daemon, no restart
+    finally:
+        p.terminate()
+        assert p.wait(10) == 0

@@ -14,8 +14,8 @@ from rem.config import RemConfig
 from rem.embed.base import Embedder, collection_slug
 from rem.embed.factory import create_embedder
 from rem.errors import EmbedderMismatchError, MemoryNotFound
-from rem.extract import Candidate
 from rem.models import (
+    Candidate,
     HistoryEvent,
     REM_NAMESPACE,
     HistoryRow,
@@ -48,6 +48,15 @@ class ApplyResult:
     corroborated: list[str] = field(default_factory=list)
     skipped: int = 0
     dropped: int = 0
+
+
+@dataclass
+class ContextResult:
+    text: str
+    count: int
+
+
+CONTEXT_HEADER = "Facts rem remembers from earlier sessions (verified):"
 
 
 class Memory:
@@ -114,6 +123,39 @@ class Memory:
         )
         candidates = [(MemoryRecord.from_payload(h.payload), h.score) for h in hits]
         return rank(candidates, current, limit, datetime.now(UTC))
+
+    def context(self, cwd: Path | None, max_chars: int) -> ContextResult:
+        """Verified memories for SessionStart: current project, then system, then global; read-only."""
+        current = self.db.find_project(resolve_project(cwd).root_path) if cwd is not None else None
+        verified = self.list(status=Status.VERIFIED)
+        sections: list[tuple[str, list[MemoryRecord]]] = []
+        if current is not None:
+            proj = [r for r in verified if r.scope == Scope.PROJECT and r.project_id == current]
+            name = next((r.project_name for r in proj if r.project_name), None)
+            sections.append((f"Project {name or 'this project'}:", proj))
+        sections.append(("This machine:", [r for r in verified if r.scope == Scope.SYSTEM]))
+        sections.append(("About the user:", [r for r in verified if r.scope == Scope.GLOBAL]))
+
+        lines, used, count, full = [CONTEXT_HEADER], len(CONTEXT_HEADER), 0, False
+        for title, recs in sections:
+            pending = len(title) + 1  # a section title is only emitted together with a fact
+            for r in sorted(recs, key=lambda r: r.updated_at, reverse=True):
+                if full:
+                    break
+                line = "- " + " ".join(r.text.split())
+                cost = len(line) + 1 + pending
+                if used + cost > max_chars:
+                    full = True
+                    break
+                if pending:
+                    lines.append(title)
+                    pending = 0
+                lines.append(line)
+                used += cost
+                count += 1
+        if count == 0:
+            return ContextResult("", 0)
+        return ContextResult("\n".join(lines), count)
 
     def related(self, text: str, project_id: int | None, limit: int) -> list[MemoryRecord]:
         """Memories across all scopes related to text, ranked with project_id as the current project."""

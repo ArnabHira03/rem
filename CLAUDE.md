@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-rem is a local-first personal memory layer for AI agents, modelled on Mem0. Python 3.14, uv, `uv_build` backend, code in `src/rem/`. **M1 (core storage + Memory façade), M2 (daemon) and M3 (LLM extraction) are implemented.** The CLI is a thin client of the daemon and starts it automatically. Later milestones (hooks, MCP, …) are not built yet.
+rem is a local-first personal memory layer for AI agents, modelled on Mem0. Python 3.14, uv, `uv_build` backend, code in `src/rem/`. **M1 (core storage + Memory façade), M2 (daemon), M3 (LLM extraction) and M4 (Claude Code adapter) are implemented.** The CLI is a thin client of the daemon and starts it automatically. Later milestones (MCP, BM25, entities, …) are not built yet.
 
 The **approved design (rev 2)** is `docs/superpowers/specs/2026-11-15-rem-design.md`, with diagrams in `docs/superpowers/specs/2026-11-15-rem-architecture.html`. It is implemented milestone by milestone (M1 → M9). Background notes are in `plans/initial_plan.md` and `plans/Mem0 Memory Pipeline - Claude.pdf`; `plans/` is **gitignored** and local only.
 
@@ -20,7 +20,8 @@ Each milestone gets its own implementation plan before any code is written.
 - `uv run pytest -m llm`: tests that call a real LLM provider. `test_anthropic_live` needs `ANTHROPIC_API_KEY` (costs money); `test_ollama_live` needs a running Ollama and `REM_TEST_OLLAMA_MODEL=<model>` (e.g. `qwen3.5:4b`). Each skips when its variable is unset.
 - `uv run rem eval extraction [--dataset PATH] [--limit N] [--json]`: score the configured LLM on the extraction dataset (`src/rem/evals/data/extraction.jsonl`). It runs in-process against throwaway stores, never contacts the daemon, and calls the LLM for every case, so it costs money with a remote provider. Exits 3 with no `[llm]` or without `allow_remote`.
 - `uv run rem retry-failed`: requeue extraction jobs that used up their attempts (e.g. after fixing the LLM config or key). They go back to `pending` with attempts reset; they kept their turns and any cached extraction, so a retry only re-runs what failed.
-- `uv run rem start|stop|status|daemon|install-service [--enable]`: daemon lifecycle (`daemon` runs it in the foreground; `install-service` writes the systemd user unit)
+- `uv run rem start|stop|status|daemon|install-service [--enable]`: daemon lifecycle (`daemon` runs it in the foreground; `install-service` writes the systemd user unit). `rem status` also prints `claude_code_hooks:` (where the hooks are installed, or `none`) and `spooled: N` (hook turns waiting in the spool), even with the daemon down.
+- `uv run rem install claude-code [--project] [--uninstall] [--dry-run]`: add (or remove) rem's hooks in Claude Code settings (user settings by default, `--project` for `<git root>/.claude/settings.local.json`). `rem hook claude-code` is the internal command those hooks run; don't call it by hand. It doesn't need a valid rem config. When the systemd unit isn't installed it prints a tip to run `rem install-service --enable`: without the unit the first session after boot gets no SessionStart context (the hook only starts the daemon, it never waits for it).
 - Config for extraction: `[llm]` (`provider` = `none`|`anthropic`|`openai`|`ollama`, `model`, `base_url`, `api_key_env`, `timeout_seconds`, `effort`, `think`, `allow_remote`; `think = false` turns off model thinking on openai/ollama by sending `reasoning_effort: "none"`, e.g. for `qwen3.5:4b`) and `[extraction]` (`restate_min_similarity`, `related_limit`, `max_candidates`). A non-loopback endpoint (including the Anthropic API) needs `allow_remote = true`. API keys come only from environment variables, never from config: the one named by `api_key_env`, else `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, with no fallback from a custom name to the default. Anthropic, and OpenAI at a non-loopback endpoint, without a key exit 3 at startup.
 - Set `REM_HOME=<dir>` (data), `REM_CONFIG=<file>` (config) **and `REM_SOCKET=<short path>`** to run against a throwaway store. Without `REM_SOCKET` you talk to the real daemon at `$XDG_RUNTIME_DIR/rem.sock`. The config can set `[embedder] provider = "hashing"` for an offline embedder, and `[vector_store] provider = "memory"`.
 
@@ -32,13 +33,20 @@ There is no lint or format tooling configured.
 
 Read the design spec for the details. These are the invariants that span modules:
 
-- **What exists in M2:**
+- **What exists (M1–M4):**
   - `rem.daemon.server.run_daemon` runs uvicorn on a socket rem binds itself, never uvicorn's `uds=`, because uvicorn chmods that to 0666.
   - Every `Memory` and `RemDB` call goes through `StoreThread`, a single thread that is the single writer.
   - `/ingest` stores redacted turns and a debounced per-session job (`storage/queue.py`).
   - `Worker` runs jobs through a `JobHandler`. With an `[llm]` configured it is `ExtractionHandler`; with none the worker doesn't start and jobs stay `pending`.
+  - The extraction prompt clips each turn to 4000 chars (first and last 2000, `extract.MAX_TURN_CHARS`); stored messages are not clipped.
   - Extraction is cached per job (`extractions` table, schema v3) before anything is written, so replaying a job never makes a second LLM call. The LLM call runs in a daemon thread, off the store thread, so the API keeps being served. On shutdown the worker waits up to `lease_seconds / 2` for an in-flight job, then releases it back to `pending` and abandons the LLM thread; only process exit never waits on that thread.
   - The systemd unit needs `ANTHROPIC_API_KEY` through `systemctl --user edit rem` (`Environment=` or `EnvironmentFile=`), never a key in config.
+  - **Claude Code adapter (M4):** `rem hook claude-code` (`adapters/claude_code.py`) reads one hook payload from stdin and always exits 0, never writes to stderr, and imports no storage, embedder or qdrant code. Config is `[claude_code]`: `exclude` (folders where rem does nothing at all), `context_max_chars` (default 1600, 1..10000) and `hook_budget_seconds` (default 2.0, > 0 and ≤ 9, the HTTP timeout to the daemon).
+    - Capture comes from hook payloads only (`prompt` on `UserPromptSubmit`, `last_assistant_message` on `Stop`), never from the transcript file, so there is no transcript cursor or backfill. Turns are redacted in the hook, with ids `cc:<prompt_id>:user` and `cc:<prompt_id>:assistant:<sha256(redacted reply)[:12]>` (a second `Stop` for the same prompt with a different reply is a new turn; the same reply re-sent is a duplicate).
+    - A prompt turn is held (`enqueue=false`, no job) until the `Stop` (or `SessionEnd`) ingest enqueues the debounced job, so a user turn and its reply are usually extracted together; a quick follow-up prompt (within the debounce window) can land in the previous job, and its reply then starts the next one.
+    - If the daemon is down (or the ingest fails other than as invalid), the hook writes the `/ingest` body to `<data_dir>/spool/` (dir 0700, files 0600, at most 1000 files, then `SpoolFull`). On a connection failure (not a timeout) it also starts the daemon in the background, at most once a minute (`<data_dir>/daemon-start.stamp`; the CLI's auto-start ignores this). The daemon drains the spool at startup (right after interrupted jobs are recovered), when it begins serving and then every 30 s (`SPOOL_POLL_SECONDS`) while files are waiting; unparseable or invalid files go to `spool/bad/`.
+    - rem creates its data dir 0700 and `daemon.log`/`hook.log` 0600 whatever the umask (`rem.config.ensure_private_dir`).
+    - `SessionStart` prints `POST /context` output: verified memories only, no other projects', ordered project, then system, then global (newest first), whole lines only, within `context_max_chars`. No memories means no output. The other events print nothing.
   - Exit codes: 2 means already running, 3 means a config error. The systemd unit doesn't restart on either.
   - Socket paths must stay ≤ 100 bytes, so tests use `/tmp/rem-*` directories (the `short_dir` and `daemon_env` fixtures).
 

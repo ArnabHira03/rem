@@ -60,3 +60,24 @@ def test_payload_without_corroborated_by_loads():
     p = rec.to_payload()
     del p["corroborated_by"]
     assert MemoryRecord.from_payload(p).corroborated_by is None
+
+
+def test_candidate_lives_in_models():
+    from rem.extract import Candidate as C2
+    from rem.models import Candidate
+
+    assert Candidate is C2
+
+
+def test_memory_does_not_import_extract():
+    import subprocess
+    import sys
+
+    import rem.memory  # noqa: F401
+    import rem.trust  # noqa: F401
+
+    out = subprocess.run(
+        [sys.executable, "-c", "import rem.memory, rem.trust, sys; print('rem.extract' in sys.modules)"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert out == "False"

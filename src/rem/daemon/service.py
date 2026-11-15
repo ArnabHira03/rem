@@ -35,6 +35,9 @@ class RemService:
     async def search(self, query: str, *, cwd: Path | None, limit: int, scope: Scope | None):
         return await self.store.run(self.memory.search, query, cwd=cwd, limit=limit, scope=scope)
 
+    async def context(self, cwd: Path | None, max_chars: int):
+        return await self.store.run(self.memory.context, cwd, max_chars)
+
     async def list(self, *, scope: Scope | None, status: Status | None, project_id: int | None):
         return await self.store.run(self.memory.list, scope=scope, status=status, project_id=project_id)
 
@@ -54,14 +57,12 @@ class RemService:
         return await self.store.run(self.memory.history, id)
 
     # ingestion
-    async def ingest(self, source: str, session_id: str, cwd: Path | None, turns: list[Turn]):
-        return await self.store.run(self.ingest_store.ingest, source, session_id, cwd, turns)
+    async def ingest(self, source: str, session_id: str, cwd: Path | None, turns: list[Turn],
+                     enqueue: bool = True):
+        return await self.store.run(self.ingest_store.ingest, source, session_id, cwd, turns, enqueue)
 
     async def retry_failed(self) -> int:
         return await self.store.run(self.ingest_store.retry_failed)
-
-    async def recover_jobs(self) -> int:
-        return await self.store.run(self.ingest_store.recover)
 
     async def status(self) -> dict:
         def snapshot():
