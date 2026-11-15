@@ -31,6 +31,32 @@ def test_prompt_is_redacted_everywhere():
     assert secret not in u and "[REDACTED:anthropic_key]" in u
 
 
+def test_clip_turn_keeps_head_and_tail():
+    from rem.extract import MAX_TURN_CHARS, clip_turn
+
+    assert MAX_TURN_CHARS == 4000
+    exact = "x" * 4000
+    assert clip_turn(exact) is exact
+    long = "A" * 2000 + "M" * 1234 + "Z" * 2000
+    assert clip_turn(long) == "A" * 2000 + "\n[… 1234 chars omitted …]\n" + "Z" * 2000
+    assert clip_turn("short") == "short"
+
+
+def test_prompt_clips_new_and_context_turns_but_not_memories():
+    big = "B" * 2000 + "middle" + "E" * 2000
+    _, u = build_prompt([Turn("user", big)], [Turn("assistant", big)], [rec("M" * 5000)])
+    assert u.count("[… 6 chars omitted …]") == 2 and "middle" not in u
+    assert "M" * 5000 in u
+
+
+def test_prompt_redacts_before_clipping():
+    secret = "sk-ant-" + "a" * 30
+    text = "x" * 1990 + f" {secret} " + "y" * 3000  # the secret straddles the 2000-char cut
+    _, u = build_prompt([Turn("user", text)], [], [])
+    assert "sk-ant-" not in u  # clipping first would leave a partial key the pattern no longer matches
+    assert "[REDACTED" in u and "chars omitted" in u
+
+
 def test_schema_is_strict():
     def walk(n):
         if isinstance(n, dict):

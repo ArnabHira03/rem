@@ -64,14 +64,26 @@ If there is nothing durable, return {"facts": []}.
 Respond with JSON: {"facts": [{"text": ..., "scope": ..., "origin": ..., "restates": ...}]}"""
 
 
+MAX_TURN_CHARS = 4000  # per turn sent to the LLM: a pasted log or file must not blow up the prompt
+
+
+def clip_turn(text: str, limit: int = MAX_TURN_CHARS) -> str:
+    """Keep the first and last limit/2 characters of an over-long turn, marking what was left out."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}\n[… {len(text) - 2 * half} chars omitted …]\n{text[-half:]}"
+
+
 def build_prompt(
     turns: list[Turn], context: list[Turn], related: list[MemoryRecord]
 ) -> tuple[str, str]:
     existing = "\n".join(
         f"[{i}] ({m.scope.value}, {m.status.value}) {redact(m.text)}" for i, m in enumerate(related)
     )
-    earlier = "\n".join(f"{t.role}: {redact(t.content)}" for t in context)
-    new = "\n".join(f"{t.role}: {redact(t.content)}" for t in turns)
+    # redact before clipping, so a cut can't leave half a secret the patterns no longer match
+    earlier = "\n".join(f"{t.role}: {clip_turn(redact(t.content))}" for t in context)
+    new = "\n".join(f"{t.role}: {clip_turn(redact(t.content))}" for t in turns)
     user = (
         f"## Existing memories\n{existing}\n\n"
         f"## Earlier conversation\n{earlier}\n\n"
