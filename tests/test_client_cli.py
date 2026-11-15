@@ -58,3 +58,18 @@ def test_client_ingest(daemon_env):
     main(["start"])
     r = RemClient(daemon_env.sock).ingest("cli", "s1", None, [{"role": "user", "content": "hi"}])
     assert r["accepted"] == 1
+
+
+def test_parallel_clients_reads_and_writes(daemon_env):
+    from concurrent.futures import ThreadPoolExecutor
+
+    main(["start"])
+
+    def work(i):
+        c = RemClient(daemon_env.sock)
+        c.add(f"fact number {i}")
+        return c.search("fact number", None, 5)
+
+    with ThreadPoolExecutor(8) as ex:
+        results = list(ex.map(work, range(40)))
+    assert all(results) and len(RemClient(daemon_env.sock).list()) == 40

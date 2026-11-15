@@ -52,6 +52,8 @@ def _parser() -> argparse.ArgumentParser:
     cmd("start", "start the rem daemon in the background")
     cmd("stop", "stop the rem daemon")
     cmd("status", "show daemon status")
+    i = cmd("install-service", "install the systemd user service")
+    i.add_argument("--enable", action="store_true", help="also enable and start it now")
     return p
 
 
@@ -155,6 +157,12 @@ def main(argv: list[str] | None = None) -> int:
                 return _status(args, cfg)
             case "stop":
                 return _stop(cfg)
+            case "install-service":
+                from rem.systemd import ENABLE_HINT, install_unit
+
+                print(f"wrote {install_unit(enable=args.enable)}")
+                print("rem.service enabled and started" if args.enable else f"next: {ENABLE_HINT}")
+                return 0
             case "start":
                 from rem.client import ensure_daemon
 
