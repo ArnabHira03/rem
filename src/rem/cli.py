@@ -35,6 +35,8 @@ def _parser() -> argparse.ArgumentParser:
                         ("confirm", "mark a memory as confirmed by you"), ("history", "show a memory's history")]:
         sub.add_parser(name, help=help_).add_argument("id")
 
+    sub.add_parser("daemon", help="run the rem daemon in the foreground")
+
     u = sub.add_parser("update", help="change a memory's text")
     u.add_argument("id")
     u.add_argument("text")
@@ -115,6 +117,15 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
     except SystemExit as e:
         return int(e.code or 0)
+    if args.cmd == "daemon":
+        from rem.daemon.server import EXIT_CONFIG, run_daemon
+
+        try:
+            cfg = load_config()
+        except ValueError as e:
+            print(f"rem: {e}", file=sys.stderr)
+            return EXIT_CONFIG
+        return run_daemon(cfg)
     try:
         _emit(args, _run(args))
     except RemError as e:
