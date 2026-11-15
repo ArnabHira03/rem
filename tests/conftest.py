@@ -63,3 +63,27 @@ def daemon_cfg(short_dir):
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+async def wait_until(predicate, timeout=2.0, interval=0.01):
+    """Poll a sync predicate inside the event loop."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(interval)
+
+
+async def wait_until_async(producer, predicate, timeout=2.0, interval=0.01):
+    """Poll an async producer until predicate(value) holds."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate(await producer()):
+        if loop.time() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(interval)
