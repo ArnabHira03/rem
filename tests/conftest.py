@@ -34,3 +34,27 @@ def add(mem, text="Prefers uv over pip", **kw):
     """Add a user-confirmed memory (global scope unless given)."""
     kw.setdefault("scope", Scope.GLOBAL)
     return mem.add(text, provenance=Provenance.USER_CONFIRMED, status=Status.VERIFIED, source="cli", actor="cli", **kw)
+
+
+@pytest.fixture
+def short_dir():
+    """A short /tmp directory: Unix socket paths must stay under ~100 bytes."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    d = Path(tempfile.mkdtemp(prefix="rem-", dir="/tmp"))
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture
+def daemon_cfg(short_dir):
+    from rem.config import DaemonConfig
+
+    return RemConfig(
+        data_dir=short_dir,
+        vector_store=VectorStoreConfig(provider="qdrant", path=short_dir / "qdrant"),
+        embedder=EmbedderConfig(provider="hashing", model="hash-64"),
+        daemon=DaemonConfig(socket_path=short_dir / "s.sock", debounce_seconds=0.2, lease_seconds=2),
+    )
