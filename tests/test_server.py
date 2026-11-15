@@ -37,19 +37,30 @@ def test_kill_9_then_restart_removes_stale_socket(daemon_env):
     p2.wait(10)
 
 
-def test_ingested_job_reaches_done(daemon_env):
+def test_ingested_job_stays_pending_without_llm(daemon_env):
+    import time
+
     p = spawn_daemon(daemon_env)
     wait_for_socket(daemon_env.sock)
     c = uds_client(daemon_env.sock)
     c.post("/ingest", json={"source": "cli", "session_id": "s", "turns": [{"role": "user", "content": "hi"}]})
-    import time
-
-    deadline = time.time() + 5
-    while c.get("/status").json()["jobs"]["done"] != 1:
-        assert time.time() < deadline
-        time.sleep(0.05)
+    time.sleep(0.6)  # past the 0.2s debounce: a running worker would have claimed the job by now
+    status = c.get("/status").json()
+    assert status["jobs"]["pending"] == 1 and status["jobs"]["done"] == 0
+    assert status["llm"] == {"provider": "none"}
     p.terminate()
-    p.wait(10)
+    assert p.wait(10) == 0
+    assert "extraction disabled: no [llm] configured; jobs stay pending" in daemon_env.log.read_text()
+
+
+def test_remote_llm_without_allow_remote_exits_3(daemon_env):
+    daemon_env.config.write_text(
+        daemon_env.config.read_text() + '[llm]\nprovider = "anthropic"\nmodel = "claude-haiku-5-5"\n'
+    )
+    assert spawn_daemon(daemon_env).wait(10) == 3
+    assert "allow_remote" in daemon_env.log.read_text()
+    assert InstanceLock.holder_pid(daemon_env.lock) is None
+    assert not daemon_env.sock.exists()
 
 
 def test_embedder_mismatch_exits_3(daemon_env):
