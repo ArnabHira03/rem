@@ -43,7 +43,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _line(r: MemoryRecord) -> str:
     where = f"{r.scope}:{r.project_name}" if r.project_name else str(r.scope)
-    return f"{r.id[:8]}  [{where}] {r.status}  {r.text}"
+    return f"{r.id}  [{where}] {r.status}  {r.text}"
 
 
 def _emit(args, value) -> None:

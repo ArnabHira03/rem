@@ -58,3 +58,11 @@ def test_store_locked_exit_1(cli_env, capsys):
         assert main(["list"]) == 1 and "in use by another rem process" in capsys.readouterr().err
     finally:
         holder.close()
+
+
+def test_listed_id_is_accepted_by_get(cli_env, capsys):
+    main(["add", "Prefers uv over pip"])
+    capsys.readouterr()
+    main(["list"])
+    listed_id = capsys.readouterr().out.split()[0]
+    assert main(["get", listed_id]) == 0

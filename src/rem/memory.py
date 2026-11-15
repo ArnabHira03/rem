@@ -5,6 +5,7 @@ duplicates: the vector store (canonical record) is written first, history second
 """
 
 from datetime import UTC, datetime
+import uuid
 from pathlib import Path
 
 from rem.config import RemConfig
@@ -13,6 +14,7 @@ from rem.embed.factory import create_embedder
 from rem.errors import EmbedderMismatchError, MemoryNotFound
 from rem.models import (
     HistoryEvent,
+    REM_NAMESPACE,
     HistoryRow,
     MemoryRecord,
     Provenance,
@@ -130,12 +132,17 @@ class Memory:
             project_id = self.db.upsert_project(info.root_path, info.name, info.git_remote)
             project_name = info.name
 
+        duplicate = self._find_by_text(text, scope, project_id)
+        if duplicate is not None:
+            # Same fact already stored (or a crashed add being retried): make sure its ADD row exists.
+            if not any(h.event == HistoryEvent.ADD for h in self.db.get_history(duplicate.id)):
+                self.db.add_history(TargetKind.MEMORY, duplicate.id, HistoryEvent.ADD, None, duplicate.text, actor, job_id)
+            return duplicate
+
         mid = memory_id(text, scope, project_id, job_id)
-        existing = self.get(mid)
-        if existing is not None:
-            if job_id is not None:  # replay of a job: finish its history row if the crash beat it
-                self.db.add_history(TargetKind.MEMORY, mid, HistoryEvent.ADD, None, existing.text, actor, job_id)
-            return existing
+        while self.get(mid) is not None:
+            # An updated memory keeps the id derived from its old text; derive the next id deterministically.
+            mid = str(uuid.uuid5(REM_NAMESPACE, mid))
 
         now = utcnow()
         record = MemoryRecord(
@@ -152,6 +159,9 @@ class Memory:
         normalize_text(text)
         text = text.strip()
         old = self._require(id)
+        other = self._find_by_text(text, old.scope, old.project_id)
+        if other is not None and other.id != id:
+            raise ValueError(f"another memory already has this text: {other.id}")
         record = old.model_copy(update={"text": text, "hash": text_hash(text), "updated_at": utcnow()})
         self.vectors.upsert(self.col, [VectorPoint(id, self.embedder.embed([text])[0], record.to_payload())])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)
@@ -173,6 +183,13 @@ class Memory:
         old = self._require(id)
         self.vectors.delete(self.col, [id])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.DELETE, old.text, None, actor)
+
+    def _find_by_text(self, text: str, scope: Scope, project_id: int | None) -> MemoryRecord | None:
+        """A live memory with the same normalized text in the same scope and project, if any."""
+        found = self.vectors.list_points(
+            self.col, {"hash": text_hash(text), "scope": str(scope), "project_id": project_id}, limit=1
+        )
+        return MemoryRecord.from_payload(found[0].payload) if found else None
 
     def _require(self, id: str) -> MemoryRecord:
         record = self.get(id)

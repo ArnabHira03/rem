@@ -90,3 +90,44 @@ def test_embedder_mismatch_refuses(cfg):
     other = cfg.model_copy(update={"embedder": EmbedderConfig(provider="hashing", model="hash-32")})
     with pytest.raises(EmbedderMismatchError, match="rem reembed"):
         Memory(other, vector_store=InMemoryVectorStore())
+
+
+def test_add_after_update_stores_the_new_fact(mem):
+    a = add(mem, "Prefers uv")
+    mem.update(a.id, "Prefers pip", actor="cli")
+    b = add(mem, "Prefers uv")
+    assert b.id != a.id and b.text == "Prefers uv"
+    assert sorted(r.text for r in mem.list()) == ["Prefers pip", "Prefers uv"]
+
+
+def test_add_matching_updated_text_returns_existing(mem):
+    a = add(mem, "Prefers uv")
+    mem.update(a.id, "Prefers pip", actor="cli")
+    assert add(mem, "prefers  PIP").id == a.id and len(mem.list()) == 1
+
+
+def test_update_to_text_of_another_memory_is_refused(mem):
+    add(mem, "Prefers pip")
+    b = add(mem, "Prefers uv")
+    with pytest.raises(ValueError, match="already has this text"):
+        mem.update(b.id, "prefers PIP", actor="cli")
+    assert mem.get(b.id).text == "Prefers uv"
+
+
+def test_crash_during_direct_add_recovers_history_on_retry(mem, monkeypatch):
+    real = mem.db.add_history
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("crash")
+        return real(*a, **k)
+
+    monkeypatch.setattr(mem.db, "add_history", flaky)
+    with pytest.raises(RuntimeError):
+        add(mem)
+    r = add(mem)
+    assert [h.event for h in mem.history(r.id)] == ["ADD"]
+    add(mem)
+    assert [h.event for h in mem.history(r.id)] == ["ADD"]
