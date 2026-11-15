@@ -4,6 +4,7 @@ import pytest
 
 from rem.storage.vector.base import VectorPoint
 from rem.storage.vector.memory import InMemoryVectorStore
+from rem.storage.vector.qdrant import QdrantVectorStore
 
 ID1 = "00000000-0000-0000-0000-000000000001"
 ID2 = "00000000-0000-0000-0000-000000000002"
@@ -13,10 +14,14 @@ ID3 = "00000000-0000-0000-0000-000000000003"
 def make_store(kind, tmp_path):
     if kind == "memory":
         return InMemoryVectorStore()
+    if kind == "qdrant":
+        return QdrantVectorStore(location=":memory:")
+    if kind == "qdrant-path":
+        return QdrantVectorStore(path=tmp_path / "q")
     raise ValueError(kind)
 
 
-@pytest.fixture(params=["memory"])
+@pytest.fixture(params=["memory", "qdrant", "qdrant-path"])
 def store(request, tmp_path):
     s = make_store(request.param, tmp_path)
     s.create_col("c", 3)
