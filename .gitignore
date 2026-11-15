@@ -11,4 +11,4 @@ wheels/
 
 # Secrets
 .env
-plans/
+/plans/
