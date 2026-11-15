@@ -15,6 +15,7 @@ def _never_touch_real_rem(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("REM_HOME", str(home))
     monkeypatch.setenv("REM_CONFIG", str(home / "no-config.toml"))
     monkeypatch.setenv("REM_SOCKET", f"/tmp/rem-test-{os.getpid()}-none.sock")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / "claude"))  # never the real ~/.claude
 
 
 @pytest.fixture

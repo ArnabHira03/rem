@@ -61,6 +61,12 @@ def _parser() -> argparse.ArgumentParser:
     h = cmd("hook", "handle an agent hook event read from stdin (installed by `rem install`)")
     h.add_argument("agent", choices=["claude-code"])
 
+    ins = cmd("install", "install rem's hooks into an agent's settings")
+    ins.add_argument("agent", choices=["claude-code"])
+    ins.add_argument("--project", action="store_true", help="use <git root>/.claude/settings.local.json")
+    ins.add_argument("--uninstall", action="store_true", help="remove rem's hooks")
+    ins.add_argument("--dry-run", action="store_true", help="print the resulting settings, write nothing")
+
     ev = cmd("eval", "score the configured LLM (runs in-process, no daemon)")
     ev.add_argument("what", choices=["extraction"])
     ev.add_argument("--dataset", type=Path, help="JSONL dataset (default: the one shipped with rem)")
@@ -153,17 +159,32 @@ def _eval(args, cfg) -> int:
     return 0
 
 
+def _install(args) -> int:
+    from rem import install_claude_code as ic
+
+    path = ic.settings_path(args.project, Path.cwd())
+    if args.uninstall:
+        print(ic.uninstall(path, dry_run=args.dry_run))
+    else:
+        print(ic.install(path, ic.hook_command(), dry_run=args.dry_run))
+    return 0
+
+
 def _status(args, cfg) -> int:
     from rem.client import DaemonUnavailable, RemClient
+    from rem.install_claude_code import installed_where
 
+    hooks = ",".join(installed_where()) or "none"  # local check: works with the daemon down
     try:
         st = RemClient(cfg.socket_path, timeout=5).status()
     except DaemonUnavailable:
+        print(f"claude_code_hooks: {hooks}")
         print("rem daemon is not running")
         return 1
     if args.json:
-        print(json.dumps(st, indent=2))
+        print(json.dumps({**st, "claude_code_hooks": hooks}, indent=2))
     else:
+        print(f"claude_code_hooks: {hooks}")
         for k, v in st.items():
             print(f"{k}: {v}")
     return 0
@@ -216,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _status(args, cfg)
             case "stop":
                 return _stop(cfg)
+            case "install":
+                return _install(args)
             case "install-service":
                 from rem.systemd import ENABLE_HINT, install_unit
 
