@@ -1,7 +1,7 @@
 from urllib.parse import urlparse
 
 from rem.config import LLMConfig
-from rem.errors import RemoteLLMNotAllowed
+from rem.errors import LLMError, RemoteLLMNotAllowed
 from rem.llm.base import LLM, is_loopback
 
 OLLAMA_DEFAULT_URL = "http://localhost:11434/v1"
@@ -26,9 +26,14 @@ def is_remote(cfg: LLMConfig) -> bool:
 def check_remote_allowed(cfg: LLMConfig) -> None:
     if is_remote(cfg) and not cfg.allow_remote:
         url = resolved_base_url(cfg)
-        host = (urlparse(url).hostname if url else None) or ANTHROPIC_HOST
+        if url:
+            where = urlparse(url).hostname or url
+        elif cfg.provider == "anthropic":
+            where = ANTHROPIC_HOST
+        else:
+            where = "a remote endpoint (base_url is unset)"
         raise RemoteLLMNotAllowed(
-            f"llm provider '{cfg.provider}' sends conversation data to {host}; "
+            f"llm provider '{cfg.provider}' sends conversation data to {where}; "
             "set [llm] allow_remote = true to allow it"
         )
 
@@ -41,9 +46,11 @@ def create_llm(cfg: LLMConfig) -> LLM | None:
         from rem.llm.anthropic import AnthropicLLM  # lazy: SDK only imported when used
 
         return AnthropicLLM(cfg)
-    from rem.llm.openai_compat import OpenAICompatLLM
+    if cfg.provider in ("openai", "ollama"):
+        from rem.llm.openai_compat import OpenAICompatLLM
 
-    return OpenAICompatLLM(cfg)
+        return OpenAICompatLLM(cfg)
+    raise LLMError(f"unknown llm provider '{cfg.provider}'")
 
 
 def describe_llm(cfg: LLMConfig) -> dict:
