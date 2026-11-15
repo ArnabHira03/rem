@@ -99,3 +99,7 @@ def test_slow_first_start_says_still_starting(daemon_env, monkeypatch):
     cfg = cfg.model_copy(update={"daemon": cfg.daemon.model_copy(update={"start_timeout_seconds": 0.0})})
     with pytest.raises(DaemonUnavailable, match="still starting"):
         ensure_daemon(cfg)
+    # let the daemon finish starting so the fixture's teardown can stop it
+    from tests.conftest import wait_for_socket
+
+    wait_for_socket(daemon_env.sock)
