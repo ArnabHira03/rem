@@ -4,6 +4,7 @@ Like Mem0's Memory class, but with a fixed write order so a crash never leaves
 duplicates: the vector store (canonical record) is written first, history second.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rem.config import RemConfig
@@ -15,6 +16,7 @@ from rem.models import (
     HistoryRow,
     MemoryRecord,
     Provenance,
+    SearchResult,
     Scope,
     Status,
     TargetKind,
@@ -24,6 +26,7 @@ from rem.models import (
     utcnow,
 )
 from rem.projects import resolve_project
+from rem.retrieve import overfetch, rank
 from rem.storage.sqlite import RemDB
 from rem.storage.vector.base import VectorPoint, VectorStore
 from rem.storage.vector.factory import create_vector_store
@@ -74,6 +77,27 @@ class Memory:
                    {"scope": scope, "project_id": project_id, "status": status}.items() if v is not None}
         records = [MemoryRecord.from_payload(p.payload) for p in self.vectors.list_points(self.col, filters)]
         return sorted(records, key=lambda r: r.created_at, reverse=True)
+
+    def search(
+        self,
+        query: str,
+        *,
+        cwd: Path | None = None,
+        limit: int = 10,
+        scope: Scope | None = None,
+    ) -> list[SearchResult]:
+        normalize_text(query)  # rejects empty queries
+        current = None
+        if cwd is not None:  # search never registers new projects
+            current = self.db.find_project(resolve_project(cwd).root_path)
+        hits = self.vectors.search(
+            self.col,
+            self.embedder.embed_query(query),
+            overfetch(limit),
+            {"scope": str(scope)} if scope else None,
+        )
+        candidates = [(MemoryRecord.from_payload(h.payload), h.score) for h in hits]
+        return rank(candidates, current, limit, datetime.now(UTC))
 
     def history(self, id: str) -> list[HistoryRow]:
         rows = self.db.get_history(id)

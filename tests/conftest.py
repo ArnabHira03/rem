@@ -1,6 +1,7 @@
 import pytest
 
 from rem.config import EmbedderConfig, RemConfig, VectorStoreConfig
+from rem.models import Provenance, Scope, Status
 
 
 @pytest.fixture
@@ -27,3 +28,9 @@ def mem(cfg):
     m = Memory(cfg)
     yield m
     m.close()
+
+
+def add(mem, text="Prefers uv over pip", **kw):
+    """Add a user-confirmed memory (global scope unless given)."""
+    kw.setdefault("scope", Scope.GLOBAL)
+    return mem.add(text, provenance=Provenance.USER_CONFIRMED, status=Status.VERIFIED, source="cli", actor="cli", **kw)

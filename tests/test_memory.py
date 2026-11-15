@@ -5,11 +5,7 @@ from rem.errors import EmbedderMismatchError, MemoryNotFound
 from rem.memory import Memory
 from rem.models import Provenance, Scope, Status
 from rem.storage.vector.memory import InMemoryVectorStore
-
-
-def add(mem, text="Prefers uv over pip", **kw):
-    kw.setdefault("scope", Scope.GLOBAL)
-    return mem.add(text, provenance=Provenance.USER_CONFIRMED, status=Status.VERIFIED, source="cli", actor="cli", **kw)
+from tests.conftest import add
 
 
 def test_add_get_and_history(mem):
