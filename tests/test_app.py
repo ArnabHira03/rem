@@ -33,6 +33,17 @@ async def test_memory_crud_round_trip(api):
     assert [h["event"] for h in (await api.get(f"/memories/{mid}/history")).json()] == ["ADD", "UPDATE", "DELETE"]
 
 
+async def test_context_route(api):
+    await api.post("/memories", json={"text": "Prefers uv over pip"})
+    r = await api.post("/context", json={"cwd": None})
+    assert r.status_code == 200
+    assert r.json() == {
+        "text": "Facts rem remembers from earlier sessions (verified):\nAbout the user:\n- Prefers uv over pip",
+        "count": 1,
+    }
+    assert (await api.post("/context", json={"max_chars": 0})).status_code == 400
+
+
 async def test_error_mapping(api):
     r = await api.get("/memories/00000000-0000-0000-0000-000000000000")
     assert r.status_code == 404 and r.json()["error"] == "not_found"

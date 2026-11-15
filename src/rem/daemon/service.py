@@ -35,6 +35,9 @@ class RemService:
     async def search(self, query: str, *, cwd: Path | None, limit: int, scope: Scope | None):
         return await self.store.run(self.memory.search, query, cwd=cwd, limit=limit, scope=scope)
 
+    async def context(self, cwd: Path | None, max_chars: int):
+        return await self.store.run(self.memory.context, cwd, max_chars)
+
     async def list(self, *, scope: Scope | None, status: Status | None, project_id: int | None):
         return await self.store.run(self.memory.list, scope=scope, status=status, project_id=project_id)
 

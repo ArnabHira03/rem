@@ -57,6 +57,9 @@ class RemClient:
             "query": query, "cwd": str(cwd) if cwd else None, "limit": limit, "scope": scope,
         })
 
+    def context(self, cwd, max_chars=1600) -> str:
+        return self._call("POST", "/context", json={"cwd": str(cwd) if cwd else None, "max_chars": max_chars})["text"]
+
     def list(self, scope=None, status=None) -> list[dict]:
         params = {k: v for k, v in {"scope": scope, "status": status}.items() if v}
         return self._call("GET", "/memories", params=params)

@@ -41,6 +41,11 @@ class SearchBody(BaseModel):
     scope: Scope | None = None
 
 
+class ContextBody(BaseModel):
+    cwd: str | None = None
+    max_chars: int = Field(1600, ge=1, le=10000)
+
+
 def _error(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse({"error": code, "message": message}, status_code=status)
 
@@ -118,6 +123,11 @@ def build_app(service: RemService) -> Starlette:
         b = await _body(request, SearchBody)
         return _json(await service.search(b.query, cwd=_path(b.cwd), limit=b.limit, scope=b.scope))
 
+    async def context(request: Request):
+        b = await _body(request, ContextBody)
+        r = await service.context(_path(b.cwd), b.max_chars)
+        return _json({"text": r.text, "count": r.count})
+
     async def ingest(request: Request):
         b = await _body(request, IngestBody)
         r = await service.ingest(b.source, b.session_id, b.cwd_path(), b.turns_for_ingest(), b.enqueue)
@@ -151,6 +161,7 @@ def build_app(service: RemService) -> Starlette:
             Route("/memories/{id}/confirm", confirm, methods=["POST"]),
             Route("/memories/{id}/history", history, methods=["GET"]),
             Route("/search", search, methods=["POST"]),
+            Route("/context", context, methods=["POST"]),
             Route("/ingest", ingest, methods=["POST"]),
             Route("/jobs/retry", retry_failed, methods=["POST"]),
         ],
