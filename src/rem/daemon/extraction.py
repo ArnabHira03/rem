@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import threading
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from rem.config import ExtractionConfig
@@ -14,6 +16,36 @@ if TYPE_CHECKING:
     from rem.daemon.service import RemService
 
 log = logging.getLogger("rem.extraction")
+
+
+async def _in_daemon_thread[T](fn: Callable[..., T], *args) -> T:
+    """Run fn in a daemon thread and await its result.
+
+    Not asyncio.to_thread: a slow LLM call (timeout x retries can be minutes) would hold
+    asyncio.run's default-executor shutdown, and a ThreadPoolExecutor's threads are joined at
+    interpreter exit even after shutdown(wait=False). A daemon thread is simply abandoned on
+    exit. If the awaiting task is cancelled (shutdown grace expired), the late result is dropped,
+    so it is never saved or applied.
+    """
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[T] = loop.create_future()
+
+    def deliver(ok: bool, value) -> None:
+        if not fut.done():
+            fut.set_result(value) if ok else fut.set_exception(value)
+
+    def target() -> None:
+        try:
+            ok, value = True, fn(*args)
+        except Exception as e:
+            ok, value = False, e
+        try:
+            loop.call_soon_threadsafe(deliver, ok, value)
+        except RuntimeError:
+            pass  # the loop is closed: the daemon stopped and nobody wants this result
+
+    threading.Thread(target=target, name="rem-llm", daemon=True).start()
+    return await fut
 
 
 class ExtractionHandler:
@@ -28,7 +60,7 @@ class ExtractionHandler:
             text = "\n".join(t.content for t in turns)
             related = await store.run(memory.related, text, job.project_id, self.settings.related_limit)
             # The LLM call runs off the store thread so the API keeps being served meanwhile.
-            extraction = await asyncio.to_thread(
+            extraction = await _in_daemon_thread(
                 extract, self.llm, turns, context, related, self.settings.max_candidates
             )
             payload = json.dumps([c.model_dump(mode="json") for c in extraction.candidates])

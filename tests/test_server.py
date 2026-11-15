@@ -71,3 +71,46 @@ def test_embedder_mismatch_exits_3(daemon_env):
     daemon_env.config.write_text(daemon_env.config.read_text().replace("hash-64", "hash-32"))
     assert spawn_daemon(daemon_env).wait(10) == 3
     assert "rem reembed" in daemon_env.log.read_text()
+
+
+STUCK_LLM_DAEMON = """
+import sys, threading
+from rem.config import ExtractionConfig, load_config
+from rem.daemon.extraction import ExtractionHandler
+from rem.daemon.server import run_daemon
+from rem.llm.fake import FakeLLM
+
+class StuckLLM(FakeLLM):
+    def complete_json(self, system, user, schema):
+        print("llm call entered", file=sys.stderr, flush=True)
+        threading.Event().wait()
+
+sys.exit(run_daemon(load_config(), ExtractionHandler(StuckLLM([]), ExtractionConfig())))
+"""
+
+
+def test_sigterm_exits_promptly_with_llm_call_in_flight(daemon_env):
+    import subprocess
+    import sys
+    import time
+
+    script = daemon_env.root / "stuck.py"
+    script.write_text(STUCK_LLM_DAEMON)
+    log = open(daemon_env.log, "a")
+    p = subprocess.Popen([sys.executable, str(script)], env=daemon_env.env, stdout=log, stderr=log)
+    try:
+        wait_for_socket(daemon_env.sock)
+        uds_client(daemon_env.sock).post(
+            "/ingest", json={"source": "cli", "session_id": "s", "turns": [{"role": "user", "content": "hi"}]}
+        )
+        deadline = time.time() + 5
+        while "llm call entered" not in daemon_env.log.read_text():
+            assert time.time() < deadline
+            time.sleep(0.05)
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(10) == 0  # grace is lease/2 = 1s; the stuck call must not hold process exit
+        assert InstanceLock.holder_pid(daemon_env.lock) is None
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()

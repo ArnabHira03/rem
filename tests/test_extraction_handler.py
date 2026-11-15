@@ -157,3 +157,25 @@ async def test_store_thread_not_blocked_during_llm_call(svc):
 
 async def test_status_reports_llm(svc):
     assert (await svc.status())["llm"] == {"provider": "none"}
+
+
+async def test_stuck_llm_call_does_not_block_worker_stop(svc):
+    entered, never = threading.Event(), threading.Event()
+
+    class StuckLLM(FakeLLM):
+        def complete_json(self, system, user, schema):
+            entered.set()
+            never.wait(10)
+            return {"facts": [{"text": "Prefers uv over pip", "scope": "global", "origin": "user"}]}
+
+    await svc.ingest("claude-code", "s1", None, [Turn("user", "I prefer uv over pip")])
+    stop = asyncio.Event()
+    task = asyncio.create_task(Worker(svc, ExtractionHandler(StuckLLM([]), ExtractionConfig()), 0.01).run(stop))
+    await wait_until(entered.is_set)
+    stop.set()
+    await asyncio.wait_for(task, 2)  # grace is lease/2 = 0.1s, then the job is released
+    assert job_row(svc)["status"] == "pending"
+    never.set()  # the abandoned call now returns; its result must be dropped
+    await asyncio.sleep(0.1)
+    assert svc.memory.db.get_extraction(1) is None
+    assert await svc.list(scope=None, status=None, project_id=None) == []
