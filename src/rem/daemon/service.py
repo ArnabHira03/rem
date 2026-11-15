@@ -61,9 +61,6 @@ class RemService:
     async def retry_failed(self) -> int:
         return await self.store.run(self.ingest_store.retry_failed)
 
-    async def recover_jobs(self) -> int:
-        return await self.store.run(self.ingest_store.recover)
-
     async def status(self) -> dict:
         def snapshot():
             return len(self.memory.vectors.list_points(self.memory.col)), self.ingest_store.counts()

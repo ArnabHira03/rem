@@ -2,18 +2,17 @@
 
 import json
 from pathlib import Path
-from typing import Literal
 
-from pydantic import BaseModel, Field, StrictBool, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from rem.daemon.schemas import IngestBody
 from rem.daemon.service import RemService
 from rem.errors import MemoryNotFound, RemError
 from rem.models import HistoryRow, MemoryRecord, Provenance, Scope, SearchResult, Status
-from rem.storage.queue import Turn
 
 
 class AddBody(BaseModel):
@@ -40,21 +39,6 @@ class SearchBody(BaseModel):
     cwd: str | None = None
     limit: int = Field(10, ge=1, le=100)
     scope: Scope | None = None
-
-
-class TurnBody(BaseModel):
-    role: Literal["user", "assistant", "system"]
-    content: str
-    message_id: str | None = None
-    ts: str | None = None
-
-
-class IngestBody(BaseModel):
-    source: str = Field(min_length=1)
-    session_id: str = Field(min_length=1)
-    cwd: str | None = None
-    turns: list[TurnBody] = Field(max_length=500)
-    enqueue: StrictBool = True
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -136,8 +120,7 @@ def build_app(service: RemService) -> Starlette:
 
     async def ingest(request: Request):
         b = await _body(request, IngestBody)
-        turns = [Turn(t.role, t.content, t.message_id, t.ts) for t in b.turns]
-        r = await service.ingest(b.source, b.session_id, _path(b.cwd), turns, b.enqueue)
+        r = await service.ingest(b.source, b.session_id, b.cwd_path(), b.turns_for_ingest(), b.enqueue)
         return _json({"session_pk": r.session_pk, "accepted": r.accepted,
                       "duplicates": r.duplicates, "job_id": r.job_id}, 202)
 

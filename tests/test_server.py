@@ -125,3 +125,27 @@ def test_sigterm_exits_promptly_with_llm_call_in_flight(daemon_env):
         if p.poll() is None:
             p.kill()
             p.wait()
+
+
+def test_spool_is_drained_once_at_startup(daemon_env):
+    from rem.spool import write_spool
+
+    write_spool(daemon_env.root, {"source": "claude-code", "session_id": "sp", "cwd": None,
+                                  "turns": [{"role": "user", "content": "hello from the spool"}],
+                                  "enqueue": True})
+    write_spool(daemon_env.root, {"source": "claude-code", "turns": "invalid"})
+    p = spawn_daemon(daemon_env)
+    wait_for_socket(daemon_env.sock)
+    assert uds_client(daemon_env.sock).get("/status").json()["jobs"]["pending"] == 1
+    spool = daemon_env.root / "spool"
+    assert list(spool.glob("*.json")) == []
+    assert len(list((spool / "bad").iterdir())) == 1
+    p.terminate()
+    assert p.wait(10) == 0
+
+    p2 = spawn_daemon(daemon_env)
+    wait_for_socket(daemon_env.sock)
+    assert uds_client(daemon_env.sock).get("/status").json()["jobs"]["pending"] == 1
+    assert daemon_env.log.read_text().count("drained 1 spooled") == 1
+    p2.terminate()
+    assert p2.wait(10) == 0

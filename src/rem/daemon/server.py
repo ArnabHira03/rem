@@ -16,11 +16,13 @@ import uvicorn
 from rem.config import RemConfig
 from rem.daemon.app import build_app
 from rem.daemon.lock import AlreadyRunning, InstanceLock
+from rem.daemon.schemas import IngestBody
 from rem.daemon.service import RemService
 from rem.daemon.extraction import ExtractionHandler
 from rem.daemon.worker import JobHandler, Worker
 from rem.errors import RemError
 from rem.llm.factory import create_llm
+from rem.spool import drain_spool
 
 EXIT_OK, EXIT_ALREADY_RUNNING, EXIT_CONFIG = 0, 2, 3
 
@@ -64,6 +66,18 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         except RemError as e:
             log.error("%s", e)
             return EXIT_CONFIG
+        recovered = service.store.call(service.ingest_store.recover)
+        if recovered:
+            log.info("recovered %d interrupted job(s)", recovered)
+
+        def ingest(body: dict) -> None:
+            b = IngestBody.model_validate(body)  # same validation as POST /ingest; ValueError -> spool/bad/
+            service.store.call(service.ingest_store.ingest, b.source, b.session_id, b.cwd_path(),
+                               b.turns_for_ingest(), b.enqueue)
+
+        drained = drain_spool(cfg.data_dir, ingest)
+        if drained:
+            log.info("drained %d spooled ingest(s)", drained)
         try:
             asyncio.run(_serve(service, cfg, handler))
         finally:
@@ -77,10 +91,6 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
 
 async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler | None) -> None:
     sock = cfg.socket_path
-    recovered = await service.recover_jobs()
-    if recovered:
-        log.info("recovered %d interrupted job(s)", recovered)
-
     # Bind the socket ourselves: uvicorn's own uds= path chmods it to 0666 after binding.
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(sock))

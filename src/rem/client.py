@@ -92,6 +92,20 @@ def _log_tail(path: Path, lines: int = 20) -> str:
         return "(no daemon log)"
 
 
+def _spawn_daemon(cfg: RemConfig) -> subprocess.Popen:
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    with open(cfg.log_path, "a") as log, open("/dev/null") as devnull:
+        return subprocess.Popen(
+            [sys.executable, "-m", "rem", "daemon"],
+            stdin=devnull, stdout=log, stderr=log, start_new_session=True,
+        )
+
+
+def start_daemon_background(cfg: RemConfig) -> None:
+    """Spawn a detached `rem daemon` and return immediately."""
+    _spawn_daemon(cfg)
+
+
 def ensure_daemon(cfg: RemConfig) -> RemClient:
     """Return a client for a running daemon, starting one in the background if needed."""
     client = RemClient(cfg.socket_path)
@@ -101,12 +115,7 @@ def ensure_daemon(cfg: RemConfig) -> RemClient:
     except DaemonUnavailable:
         pass
 
-    cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    with open(cfg.log_path, "a") as log, open("/dev/null") as devnull:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "rem", "daemon"],
-            stdin=devnull, stdout=log, stderr=log, start_new_session=True,
-        )
+    proc = _spawn_daemon(cfg)
     deadline = time.monotonic() + cfg.daemon.start_timeout_seconds
     while time.monotonic() < deadline:
         try:
