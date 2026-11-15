@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, StrictBool, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -54,6 +54,7 @@ class IngestBody(BaseModel):
     session_id: str = Field(min_length=1)
     cwd: str | None = None
     turns: list[TurnBody] = Field(max_length=500)
+    enqueue: StrictBool = True
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -136,7 +137,7 @@ def build_app(service: RemService) -> Starlette:
     async def ingest(request: Request):
         b = await _body(request, IngestBody)
         turns = [Turn(t.role, t.content, t.message_id, t.ts) for t in b.turns]
-        r = await service.ingest(b.source, b.session_id, _path(b.cwd), turns)
+        r = await service.ingest(b.source, b.session_id, _path(b.cwd), turns, b.enqueue)
         return _json({"session_pk": r.session_pk, "accepted": r.accepted,
                       "duplicates": r.duplicates, "job_id": r.job_id}, 202)
 

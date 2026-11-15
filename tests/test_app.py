@@ -54,6 +54,12 @@ async def test_ingest_accepts_and_dedupes(api):
     assert (await api.post("/ingest", json={**body, "turns": body["turns"] * 501})).status_code == 400
 
 
+async def test_ingest_empty_turns_and_enqueue_flag(api):
+    body = {"source": "claude-code", "session_id": "s1", "turns": []}
+    assert (await api.post("/ingest", json={**body, "enqueue": True})).status_code == 202
+    assert (await api.post("/ingest", json={**body, "enqueue": "x"})).status_code == 400
+
+
 async def test_status_reports_counts(api):
     s = (await api.get("/status")).json()
     assert s["memories"] == 0 and s["jobs"] == {"pending": 0, "processing": 0, "done": 0, "failed": 0}

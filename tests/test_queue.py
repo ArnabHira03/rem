@@ -180,3 +180,28 @@ def test_other_sessions_are_not_blocked(q, clock):
     q.ingest("cli", "s2", None, [T("user", "x", "1")])
     clock.t += 5
     assert q.claim().session_id in {"s1", "s2"}
+
+
+def test_held_turn_creates_no_job(q):
+    r = q.ingest("claude-code", "s", None, [Turn("user", "I use fish", "cc:p1:user")], enqueue=False)
+    assert r.accepted == 1 and r.job_id is None and q.counts()["pending"] == 0
+
+
+def test_reply_job_takes_held_prompt(q, clock):
+    q.ingest("claude-code", "s", None, [Turn("user", "I use fish", "cc:p1:user")], enqueue=False)
+    q.ingest("claude-code", "s", None, [Turn("assistant", "Noted.", "cc:p1:assistant")])
+    clock.t += 10
+    job = q.claim()
+    assert [t.role for t in q.messages_for(job.id)] == ["user", "assistant"]
+
+
+def test_empty_enqueue_flushes_held_turns(q, clock):
+    q.ingest("claude-code", "s", None, [Turn("user", "I use fish", "cc:p1:user")], enqueue=False)
+    r = q.ingest("claude-code", "s", None, [], enqueue=True)
+    assert r.job_id is not None and r.accepted == 0
+    clock.t += 10
+    assert len(q.messages_for(q.claim().id)) == 1
+
+
+def test_empty_enqueue_without_held_turns_is_noop(q):
+    assert q.ingest("claude-code", "s", None, [], enqueue=True).job_id is None

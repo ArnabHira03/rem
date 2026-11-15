@@ -60,7 +60,8 @@ class IngestStore:
 
     # ---- ingest -------------------------------------------------------------
 
-    def ingest(self, source: str, session_id: str, cwd: Path | None, turns: list[Turn]) -> IngestResult:
+    def ingest(self, source: str, session_id: str, cwd: Path | None, turns: list[Turn],
+               enqueue: bool = True) -> IngestResult:
         project_id = None
         if cwd is not None:
             info = resolve_project(cwd)
@@ -91,8 +92,10 @@ class IngestStore:
                 accepted += cur.rowcount
 
             job_id = None
-            if accepted:
-                not_before = now + self.settings.debounce_seconds
+            # enqueue=False holds the turns (no job). enqueue=True also flushes held turns: with
+            # nothing new accepted, a job is still created if the session has unjobbed messages
+            # and no waiting job to take them (a duplicate ingest never extends the debounce).
+            if enqueue:
                 # Only a job that has never been claimed may take new turns: a claimed job's
                 # inputs are fixed so that a retry or replay sees exactly the same messages.
                 row = self.conn.execute(
@@ -100,17 +103,23 @@ class IngestStore:
                     "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.job_id = j.id)",
                     (session_pk,),
                 ).fetchone()
-                if row:
-                    job_id = row[0]
-                    self.conn.execute(
-                        "UPDATE jobs SET not_before = ?, updated_at = ? WHERE id = ?", (not_before, stamp, job_id)
-                    )
-                else:
-                    job_id = self.conn.execute(
-                        "INSERT INTO jobs (session_pk, status, not_before, created_at, updated_at) "
-                        "VALUES (?, 'pending', ?, ?, ?)",
-                        (session_pk, not_before, stamp, stamp),
-                    ).lastrowid
+                held = not accepted and not row and self.conn.execute(
+                    "SELECT 1 FROM messages WHERE session_pk = ? AND job_id IS NULL LIMIT 1", (session_pk,)
+                ).fetchone()
+                if accepted or held:
+                    not_before = now + self.settings.debounce_seconds
+                    if row:
+                        job_id = row[0]
+                        self.conn.execute(
+                            "UPDATE jobs SET not_before = ?, updated_at = ? WHERE id = ?",
+                            (not_before, stamp, job_id),
+                        )
+                    else:
+                        job_id = self.conn.execute(
+                            "INSERT INTO jobs (session_pk, status, not_before, created_at, updated_at) "
+                            "VALUES (?, 'pending', ?, ?, ?)",
+                            (session_pk, not_before, stamp, stamp),
+                        ).lastrowid
             self.conn.execute("COMMIT")
         except BaseException:
             self.conn.execute("ROLLBACK")

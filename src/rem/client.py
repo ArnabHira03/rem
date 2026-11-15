@@ -76,9 +76,9 @@ class RemClient:
     def history(self, id) -> list[dict]:
         return self._call("GET", f"/memories/{id}/history", ref=id)
 
-    def ingest(self, source, session_id, cwd, turns: list[dict]) -> dict:
+    def ingest(self, source, session_id, cwd, turns: list[dict], enqueue: bool = True) -> dict:
         return self._call("POST", "/ingest", json={
-            "source": source, "session_id": session_id, "cwd": str(cwd) if cwd else None, "turns": turns,
+            "source": source, "session_id": session_id, "cwd": str(cwd) if cwd else None, "turns": turns, "enqueue": enqueue,
         })
 
     def retry_failed(self) -> int:
