@@ -7,7 +7,11 @@ authors = [
     { name = "ArnabHira03", email = "myarnab03@gmail.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "fastembed>=0.9.1",
+    "pydantic>=2.14.3",
+    "qdrant-client>=1.20.0",
+]
 
 [project.scripts]
 rem = "rem:main"
@@ -15,3 +19,13 @@ rem = "rem:main"
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: downloads the real embedding model"]
+addopts = "-m 'not slow'"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
