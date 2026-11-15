@@ -58,3 +58,8 @@ def daemon_cfg(short_dir):
         embedder=EmbedderConfig(provider="hashing", model="hash-64"),
         daemon=DaemonConfig(socket_path=short_dir / "s.sock", debounce_seconds=0.2, lease_seconds=2),
     )
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
