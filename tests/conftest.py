@@ -18,3 +18,12 @@ def cfg(tmp_path):
         vector_store=VectorStoreConfig(provider="memory"),
         embedder=EmbedderConfig(provider="hashing", model="hash-64"),
     )
+
+
+@pytest.fixture
+def mem(cfg):
+    from rem.memory import Memory
+
+    m = Memory(cfg)
+    yield m
+    m.close()
