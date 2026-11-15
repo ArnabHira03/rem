@@ -8,6 +8,7 @@ import contextlib
 import logging
 import os
 import signal
+import socket
 import sys
 
 import uvicorn
@@ -74,23 +75,20 @@ async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler) -> No
     if recovered:
         log.info("recovered %d interrupted job(s)", recovered)
 
-    server = _Server(uvicorn.Config(build_app(service), uds=str(sock), log_level="warning", lifespan="off"))
+    # Bind the socket ourselves: uvicorn's own uds= path chmods it to 0666 after binding.
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(sock))
+    os.chmod(sock, 0o600)
+    server = _Server(uvicorn.Config(build_app(service), log_level="warning", lifespan="off"))
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: setattr(server, "should_exit", True))
     stop = asyncio.Event()
     worker = asyncio.create_task(Worker(service, handler).run(stop))
-
-    async def announce():
-        while not server.started:
-            await asyncio.sleep(0.01)
-        os.chmod(sock, 0o600)
-        log.info("listening on %s (pid %d)", sock, os.getpid())
-
-    ready = asyncio.create_task(announce())
+    log.info("listening on %s (pid %d)", sock, os.getpid())
     try:
-        await server.serve()  # returns once a signal sets should_exit
+        await server.serve(sockets=[listener])  # returns once a signal sets should_exit
     finally:
-        ready.cancel()
         stop.set()
         await worker
+        listener.close()
