@@ -57,6 +57,9 @@ def _parser() -> argparse.ArgumentParser:
     i = cmd("install-service", "install the systemd user service")
     i.add_argument("--enable", action="store_true", help="also enable and start it now")
 
+    h = cmd("hook", "handle an agent hook event read from stdin (installed by `rem install`)")
+    h.add_argument("agent", choices=["claude-code"])
+
     ev = cmd("eval", "score the configured LLM (runs in-process, no daemon)")
     ev.add_argument("what", choices=["extraction"])
     ev.add_argument("--dataset", type=Path, help="JSONL dataset (default: the one shipped with rem)")
@@ -189,6 +192,10 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
     except SystemExit as e:
         return int(e.code or 0)
+    if args.cmd == "hook":  # before any config/daemon code: the hook must never fail or block
+        from rem.adapters.claude_code import main as hook_main
+
+        return hook_main()
     try:
         cfg = load_config()
     except ValueError as e:
