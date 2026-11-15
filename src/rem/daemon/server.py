@@ -66,19 +66,11 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         except RemError as e:
             log.error("%s", e)
             return EXIT_CONFIG
-        recovered = service.store.call(service.ingest_store.recover)
-        if recovered:
-            log.info("recovered %d interrupted job(s)", recovered)
-
-        def ingest(body: dict) -> None:
-            b = IngestBody.model_validate(body)  # same validation as POST /ingest; ValueError -> spool/bad/
-            service.store.call(service.ingest_store.ingest, b.source, b.session_id, b.cwd_path(),
-                               b.turns_for_ingest(), b.enqueue)
-
-        drained = drain_spool(cfg.data_dir, ingest)
-        if drained:
-            log.info("drained %d spooled ingest(s)", drained)
         try:
+            recovered = service.store.call(service.ingest_store.recover)
+            if recovered:
+                log.info("recovered %d interrupted job(s)", recovered)
+            _drain(service, cfg)
             asyncio.run(_serve(service, cfg, handler))
         finally:
             service.close()
@@ -87,6 +79,26 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         return EXIT_OK
     finally:
         lock.release()
+
+
+def _drain(service: RemService, cfg: RemConfig) -> None:
+    """Ingest turns that hooks spooled while the daemon was down (blocking; runs the ingest on the store thread)."""
+
+    def ingest(body: dict) -> None:
+        b = IngestBody.model_validate(body)  # same validation as POST /ingest; ValueError -> spool/bad/
+        service.store.call(service.ingest_store.ingest, b.source, b.session_id, b.cwd_path(),
+                           b.turns_for_ingest(), b.enqueue)
+
+    drained = drain_spool(cfg.data_dir, ingest)
+    if drained:
+        log.info("drained %d spooled ingest(s)", drained)
+
+
+async def _drain_when_serving(server: uvicorn.Server, service: RemService, cfg: RemConfig) -> None:
+    """Second drain, once hooks can reach us: catches turns spooled while we were starting up."""
+    while not server.started:
+        await asyncio.sleep(0.02)
+    await asyncio.get_running_loop().run_in_executor(None, _drain, service, cfg)
 
 
 async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler | None) -> None:
@@ -105,10 +117,12 @@ async def _serve(service: RemService, cfg: RemConfig, handler: JobHandler | None
         log.info("extraction disabled: no [llm] configured; jobs stay pending")
     else:
         worker = asyncio.create_task(Worker(service, handler).run(stop))
+    late_drain = asyncio.create_task(_drain_when_serving(server, service, cfg))
     log.info("listening on %s (pid %d)", sock, os.getpid())
     try:
         await server.serve(sockets=[listener])  # returns once a signal sets should_exit
     finally:
+        late_drain.cancel()
         stop.set()
         if worker is not None:
             await worker

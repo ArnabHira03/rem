@@ -62,7 +62,7 @@ def drain_spool(data_dir: Path, ingest: Callable[[dict], None]) -> int:
             _quarantine(path)
             continue
         except Exception as e:
-            log.error("spool drain stopped at %s: %s: %s", path.name, type(e).__name__, e)
+            log.error("spool drain stopped at %s: %s", path.name, type(e).__name__)
             break
         path.unlink(missing_ok=True)
         done += 1

@@ -60,3 +60,12 @@ def test_other_error_stops_drain_and_keeps_rest(tmp_path):
     assert drain_spool(tmp_path, ingest) == 1
     left = sorted((tmp_path / "spool").glob("*.json"))
     assert [json.loads(p.read_text())["session_id"] for p in left] == ["b", "c"]
+
+
+def test_valid_json_that_is_not_an_object_goes_to_bad(tmp_path):
+    p = write_spool(tmp_path, body("a"))
+    p.write_text("[1, 2]")
+    seen = []
+    assert drain_spool(tmp_path, seen.append) == 0
+    assert seen == []
+    assert [q.name for q in (tmp_path / "spool" / "bad").iterdir()] == [p.name]
