@@ -20,7 +20,7 @@ def rec(text, scope=Scope.GLOBAL):
 
 def test_prompt_numbers_related_and_orders_sections():
     s, u = build_prompt([Turn("user", "I use fish shell")], [Turn("assistant", "hi")], [rec("Prefers uv over pip")])
-    assert "[0] (global) Prefers uv over pip" in u
+    assert "[0] (global, verified) Prefers uv over pip" in u
     assert u.index("## Existing memories") < u.index("## Earlier conversation") < u.index("## New messages")
     assert "user: I use fish shell" in u
 
@@ -69,3 +69,10 @@ def test_extract_missing_facts_key_raises():
 def test_extract_propagates_llm_error():
     with pytest.raises(LLMError):
         extract(FakeLLM([LLMError("down")]), T, [], [], 20)
+
+
+def test_prompt_marks_status_and_explains_unverified():
+    unverified = rec("Uses Poetry").model_copy(update={"status": Status.UNVERIFIED})
+    s, u = build_prompt(T, [], [unverified])
+    assert "[0] (global, unverified) Uses Poetry" in u
+    assert "unverified" in s and "verified" in s

@@ -76,3 +76,15 @@ def test_shipped_dataset_is_well_formed():
 def test_cli_eval_without_llm_exits_3(rem_home, capsys):
     assert main(["eval", "extraction"]) == 3
     assert "no [llm] configured" in capsys.readouterr().err
+
+
+def test_cli_eval_bad_dataset_exits_2(tmp_path, monkeypatch, capsys):
+    cfgfile = tmp_path / "c.toml"
+    cfgfile.write_text('[llm]\nprovider = "ollama"\nmodel = "x"\n')
+    monkeypatch.setenv("REM_HOME", str(tmp_path))
+    monkeypatch.setenv("REM_CONFIG", str(cfgfile))
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{not json\n")
+    assert main(["eval", "extraction", "--dataset", str(bad)]) == 2
+    assert main(["eval", "extraction", "--dataset", str(tmp_path / "missing.jsonl")]) == 2
+    assert "cannot read dataset" in capsys.readouterr().err

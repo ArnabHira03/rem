@@ -75,7 +75,7 @@ async def test_prompt_includes_related_memories(svc):
     llm = FakeLLM([{"facts": []}])
     await svc.ingest("claude-code", "s1", None, [Turn("user", "I prefer uv over pip")])
     await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
-    assert "[0] (global) Prefers uv over pip" in llm.calls[0][1]
+    assert "[0] (global, verified) Prefers uv over pip" in llm.calls[0][1]
 
 
 async def test_replay_after_crash_reuses_cached_extraction(svc, clock, monkeypatch):

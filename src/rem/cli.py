@@ -120,7 +120,11 @@ def _eval(args, cfg) -> int:
     if llm is None:
         print("rem: no [llm] configured; set [llm] provider/model", file=sys.stderr)
         return 3
-    cases = load_cases(args.dataset or DEFAULT_DATASET)
+    try:
+        cases = load_cases(args.dataset or DEFAULT_DATASET)
+    except (OSError, ValueError) as e:  # JSONDecodeError is a ValueError
+        print(f"rem: cannot read dataset: {e}", file=sys.stderr)
+        return 2
     if args.limit is not None:
         cases = cases[: args.limit]
     report = run_eval(llm, create_embedder(cfg.embedder), cases, cfg)

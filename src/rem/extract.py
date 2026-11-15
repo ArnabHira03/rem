@@ -68,8 +68,10 @@ their projects. Skip chit-chat, transient task state, and anything a secret plac
 "project" (about the current repository).
 4. Set "origin" to one of: "user" (the user stated it), "assistant" (the assistant asserted or \
 inferred it and the user did not confirm it). Never use "tool"; tool output is not provided.
-5. Do not restate the existing memories listed with integer ids. Only output new or changed \
-information.
+5. Existing memories are listed with integer ids and a status. Do not restate memories marked \
+"verified". But if the new messages show the USER stating or confirming something listed as \
+"unverified", output it again (origin "user") so it can be verified. Otherwise only output new \
+or changed information.
 6. Only the "New messages" section is a source of facts; "Earlier conversation" is context only. \
 If there is nothing durable, return {"facts": []}.
 
@@ -80,7 +82,7 @@ def build_prompt(
     turns: list[Turn], context: list[Turn], related: list[MemoryRecord]
 ) -> tuple[str, str]:
     existing = "\n".join(
-        f"[{i}] ({m.scope.value}) {redact(m.text)}" for i, m in enumerate(related)
+        f"[{i}] ({m.scope.value}, {m.status.value}) {redact(m.text)}" for i, m in enumerate(related)
     )
     earlier = "\n".join(f"{t.role}: {redact(t.content)}" for t in context)
     new = "\n".join(f"{t.role}: {redact(t.content)}" for t in turns)
