@@ -140,6 +140,9 @@ def build_app(service: RemService) -> Starlette:
         return _json({"session_pk": r.session_pk, "accepted": r.accepted,
                       "duplicates": r.duplicates, "job_id": r.job_id}, 202)
 
+    async def retry_failed(request: Request):
+        return _json({"requeued": await service.retry_failed()})
+
     async def on_not_found(request, exc: MemoryNotFound):
         return _error(404, "not_found", str(exc))
 
@@ -165,6 +168,7 @@ def build_app(service: RemService) -> Starlette:
             Route("/memories/{id}/history", history, methods=["GET"]),
             Route("/search", search, methods=["POST"]),
             Route("/ingest", ingest, methods=["POST"]),
+            Route("/jobs/retry", retry_failed, methods=["POST"]),
         ],
         exception_handlers={
             MemoryNotFound: on_not_found,

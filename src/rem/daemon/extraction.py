@@ -37,8 +37,11 @@ async def _in_daemon_thread[T](fn: Callable[..., T], *args) -> T:
     def target() -> None:
         try:
             ok, value = True, fn(*args)
-        except Exception as e:
+        except BaseException as e:  # anything, so the awaiting future always resolves
             ok, value = False, e
+            if not isinstance(e, Exception):  # e.g. SystemExit: fail the job, don't raise it in the loop
+                value = RuntimeError(f"LLM call aborted: {type(e).__name__}")
+                value.__cause__ = e
         try:
             loop.call_soon_threadsafe(deliver, ok, value)
         except RuntimeError:
@@ -76,7 +79,8 @@ class ExtractionHandler:
             project_id=job.project_id,
             session_id=job.session_id,
             source=job.source,
-            threshold=self.settings.dedup_threshold,
+            restate_min_similarity=self.settings.restate_min_similarity,
+            has_user_turn=any(t.role == "user" for t in turns),
         )
         log.info(
             "job %s (%s): %d candidate(s), added %d, corroborated %d, skipped %d, dropped %d",

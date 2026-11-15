@@ -9,7 +9,7 @@ from rem.llm.fake import FakeLLM
 
 def test_llm_defaults_off(cfg):
     assert cfg.llm.provider == "none" and cfg.llm.allow_remote is False
-    assert cfg.extraction.dedup_threshold == 0.90 and cfg.extraction.related_limit == 10
+    assert cfg.extraction.restate_min_similarity == 0.75 and cfg.extraction.related_limit == 10
     assert create_llm(cfg.llm) is None and describe_llm(cfg.llm) == {"provider": "none"}
 
 

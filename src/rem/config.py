@@ -50,7 +50,7 @@ class LLMConfig(BaseModel):
 
 
 class ExtractionConfig(BaseModel):
-    dedup_threshold: float = 0.90
+    restate_min_similarity: float = 0.75  # floor for an LLM "restates" link to count
     related_limit: int = 10
     max_candidates: int = 20
 

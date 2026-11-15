@@ -28,15 +28,15 @@ def assign_trust(c: Candidate) -> TrustInfo:
 
 def decide(
     trust: TrustInfo,
-    nearest: MemoryRecord | None,
+    target: MemoryRecord | None,
     similarity: float,
     threshold: float,
     job_key: str,
 ) -> Action:
-    if nearest is None or similarity < threshold:
+    if target is None or similarity < threshold:
         return Action.ADD
-    if nearest.status == Status.UNVERIFIED and trust.status == Status.VERIFIED:
+    if target.status == Status.UNVERIFIED and trust.status == Status.VERIFIED:
         return Action.CORROBORATE
-    if nearest.corroborated_by == job_key:
+    if target.corroborated_by == job_key:
         return Action.CORROBORATE  # replay of this job's own corroboration
     return Action.SKIP

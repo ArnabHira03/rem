@@ -19,8 +19,9 @@ Each milestone gets its own implementation plan before any code is written.
 - `uv run rem <add|search|list|get|update|delete|confirm|history> ...`: memory commands; they auto-start the daemon. `--json` works before or after the subcommand.
 - `uv run pytest -m llm`: tests that call a real LLM provider (cost money; need `ANTHROPIC_API_KEY`)
 - `uv run rem eval extraction [--dataset PATH] [--limit N] [--json]`: score the configured LLM on the extraction dataset (`src/rem/evals/data/extraction.jsonl`). It runs in-process against throwaway stores, never contacts the daemon, and calls the LLM for every case, so it costs money with a remote provider. Exits 3 with no `[llm]` or without `allow_remote`.
+- `uv run rem retry-failed`: requeue extraction jobs that used up their attempts (e.g. after fixing the LLM config or key). They go back to `pending` with attempts reset; they kept their turns and any cached extraction, so a retry only re-runs what failed.
 - `uv run rem start|stop|status|daemon|install-service [--enable]`: daemon lifecycle (`daemon` runs it in the foreground; `install-service` writes the systemd user unit)
-- Config for extraction: `[llm]` (`provider` = `none`|`anthropic`|`openai`|`ollama`, `model`, `base_url`, `api_key_env`, `timeout_seconds`, `effort`, `allow_remote`) and `[extraction]` (`dedup_threshold`, `related_limit`, `max_candidates`). A non-loopback endpoint (including the Anthropic API) needs `allow_remote = true`. API keys come only from environment variables, never from config.
+- Config for extraction: `[llm]` (`provider` = `none`|`anthropic`|`openai`|`ollama`, `model`, `base_url`, `api_key_env`, `timeout_seconds`, `effort`, `allow_remote`) and `[extraction]` (`restate_min_similarity`, `related_limit`, `max_candidates`). A non-loopback endpoint (including the Anthropic API) needs `allow_remote = true`. API keys come only from environment variables, never from config: the one named by `api_key_env`, else `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, with no fallback from a custom name to the default. Anthropic, and OpenAI at a non-loopback endpoint, without a key exit 3 at startup.
 - Set `REM_HOME=<dir>` (data), `REM_CONFIG=<file>` (config) **and `REM_SOCKET=<short path>`** to run against a throwaway store. Without `REM_SOCKET` you talk to the real daemon at `$XDG_RUNTIME_DIR/rem.sock`. The config can set `[embedder] provider = "hashing"` for an offline embedder, and `[vector_store] provider = "memory"`.
 
 There is no lint or format tooling configured.
@@ -36,7 +37,7 @@ Read the design spec for the details. These are the invariants that span modules
   - Every `Memory` and `RemDB` call goes through `StoreThread`, a single thread that is the single writer.
   - `/ingest` stores redacted turns and a debounced per-session job (`storage/queue.py`).
   - `Worker` runs jobs through a `JobHandler`. With an `[llm]` configured it is `ExtractionHandler`; with none the worker doesn't start and jobs stay `pending`.
-  - Extraction is cached per job (`extractions` table, schema v3) before anything is written, so replaying a job never makes a second LLM call. The LLM call runs in a daemon thread, off the store thread, so the API keeps being served and shutdown never waits on it.
+  - Extraction is cached per job (`extractions` table, schema v3) before anything is written, so replaying a job never makes a second LLM call. The LLM call runs in a daemon thread, off the store thread, so the API keeps being served. On shutdown the worker waits up to `lease_seconds / 2` for an in-flight job, then releases it back to `pending` and abandons the LLM thread; only process exit never waits on that thread.
   - The systemd unit needs `ANTHROPIC_API_KEY` through `systemctl --user edit rem` (`Environment=` or `EnvironmentFile=`), never a key in config.
   - Exit codes: 2 means already running, 3 means a config error. The systemd unit doesn't restart on either.
   - Socket paths must stay ≤ 100 bytes, so tests use `/tmp/rem-*` directories (the `short_dir` and `daemon_env` fixtures).
@@ -51,10 +52,10 @@ Read the design spec for the details. These are the invariants that span modules
   - replaying any job after a crash must never create duplicates
   - only the `Memory` façade writes to the stores
 - **Separate responsibilities.**
-  - `extract` (LLM) only proposes candidates `{text, scope, origin}`.
+  - `extract` (LLM) only proposes candidates `{text, scope, origin, restates}`. `restates` is the LLM's link to an existing memory saying the same thing; `extract` resolves its integer index to a memory id, and that resolved id is what the cached extraction replays.
   - `trust` applies deterministic rules (no LLM) to set `provenance` (`user_asserted`, `assistant_generated`, `tool_observed`, `user_confirmed`) and `status` (verified/unverified). Assistant-generated facts start unverified.
   - `retrieve` only reads. It never changes trust.
-- **The write path is ADD-only**, like current Mem0. A near-duplicate of an unverified memory from a verified origin upgrades that memory (`CORROBORATE` in history) rather than creating a duplicate.
+- **The write path is ADD-only**, like current Mem0. A candidate is compared with one existing memory, never chosen by cosine alone (real embeddings score contradictions like "tabs over spaces"/"spaces over tabs" at 0.99): the memory with the same normalized text, else the one its `restates` link names in the same scope and project, if cosine ≥ `restate_min_similarity` (a guard against a wrong link). A restatement of an unverified memory from a verified origin upgrades that memory (`CORROBORATE` in history) rather than creating a duplicate; a changed value or a contradiction is a new memory. A job with no `user` turn cannot produce user-asserted facts: `user` origins are downgraded to `assistant`.
 - **Scopes:** `global`, `system`, `project`. Search ranks the current project (its git root) highest and holds other projects' memories to a stricter similarity threshold. SessionStart injection includes only verified memories, capped at about 400 tokens.
 - **The embedder is configured separately from the LLM.** The default is local fastembed. Collection names include the embedding model and dimension; switching models means running `rem reembed`, and the daemon refuses to start on a mismatch.
 - **Extraction LLM:** use an API model during development (sending data to it requires `allow_remote = true` in config). Local models are the long-term default, chosen through `rem eval extraction`.

@@ -57,6 +57,9 @@ class RemService:
     async def ingest(self, source: str, session_id: str, cwd: Path | None, turns: list[Turn]):
         return await self.store.run(self.ingest_store.ingest, source, session_id, cwd, turns)
 
+    async def retry_failed(self) -> int:
+        return await self.store.run(self.ingest_store.retry_failed)
+
     async def recover_jobs(self) -> int:
         return await self.store.run(self.ingest_store.recover)
 

@@ -63,6 +63,17 @@ def test_remote_llm_without_allow_remote_exits_3(daemon_env):
     assert not daemon_env.sock.exists()
 
 
+def test_missing_api_key_exits_3(daemon_env):
+    daemon_env.config.write_text(
+        daemon_env.config.read_text()
+        + '[llm]\nprovider = "anthropic"\nmodel = "claude-haiku-5-5"\nallow_remote = true\napi_key_env = "REM_TEST_NO_SUCH_KEY"\n'
+    )
+    daemon_env.env.pop("REM_TEST_NO_SUCH_KEY", None)
+    assert spawn_daemon(daemon_env).wait(10) == 3
+    assert "set REM_TEST_NO_SUCH_KEY in the daemon's environment" in daemon_env.log.read_text()
+    assert InstanceLock.holder_pid(daemon_env.lock) is None
+
+
 def test_embedder_mismatch_exits_3(daemon_env):
     p = spawn_daemon(daemon_env)
     wait_for_socket(daemon_env.sock)

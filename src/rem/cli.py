@@ -48,6 +48,8 @@ def _parser() -> argparse.ArgumentParser:
     u.add_argument("id")
     u.add_argument("text")
 
+    cmd("retry-failed", "requeue extraction jobs that failed (e.g. after fixing the LLM config)")
+
     cmd("daemon", "run the rem daemon in the foreground")
     cmd("start", "start the rem daemon in the background")
     cmd("stop", "stop the rem daemon")
@@ -108,13 +110,13 @@ def _memory_command(args, cfg):
 
 def _eval(args, cfg) -> int:
     from rem.embed.factory import create_embedder
-    from rem.errors import RemoteLLMNotAllowed
+    from rem.errors import LLMError, RemoteLLMNotAllowed
     from rem.evals.extraction import DEFAULT_DATASET, load_cases, run_eval
     from rem.llm.factory import create_llm
 
     try:
         llm = create_llm(cfg.llm)
-    except RemoteLLMNotAllowed as e:
+    except (RemoteLLMNotAllowed, LLMError) as e:  # remote not allowed, or no API key
         print(f"rem: {e}", file=sys.stderr)
         return 3
     if llm is None:
@@ -137,7 +139,7 @@ def _eval(args, cfg) -> int:
         ("origin accuracy", report.origin_acc), ("JSON validity", report.json_valid_rate),
         ("dedup accuracy", report.dedup_acc),
     ]:
-        print(f"  {label:<16}{value:6.2f}")
+        print(f"  {label:<16}" + (f"{value:6.2f}" if value is not None else f"{'n/a':>6}"))
     print(f"  {'latency p50':<16}{report.latency_p50:5.2f}s")
     print(f"  {'latency p95':<16}{report.latency_p95:5.2f}s")
     if report.failures:
@@ -210,6 +212,12 @@ def main(argv: list[str] | None = None) -> int:
 
                 print(f"wrote {install_unit(enable=args.enable)}")
                 print("rem.service enabled and started" if args.enable else f"next: {ENABLE_HINT}")
+                return 0
+            case "retry-failed":
+                from rem.client import ensure_daemon
+
+                n = ensure_daemon(cfg).retry_failed()
+                print(json.dumps({"requeued": n}) if args.json else f"requeued {n} job(s)")
                 return 0
             case "start":
                 from rem.client import ensure_daemon

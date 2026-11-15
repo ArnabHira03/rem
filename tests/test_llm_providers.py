@@ -133,9 +133,60 @@ def test_create_llm_refuses_remote_without_allow_remote():
 
 def test_create_llm_maps_providers(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", "y")
     assert isinstance(create_llm(LLMConfig(provider="anthropic", model="m", allow_remote=True)), AnthropicLLM)
     assert isinstance(create_llm(LLMConfig(provider="openai", model="m", allow_remote=True)), OpenAICompatLLM)
     assert isinstance(create_llm(LLMConfig(provider="ollama", model="m")), OpenAICompatLLM)
+
+
+def test_create_llm_requires_api_key(monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "MY_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(LLMError, match="needs an API key: set ANTHROPIC_API_KEY"):
+        create_llm(LLMConfig(provider="anthropic", model="m", allow_remote=True))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    with pytest.raises(LLMError, match="set ANTHROPIC_API_KEY"):
+        create_llm(LLMConfig(provider="anthropic", model="m", allow_remote=True))
+    with pytest.raises(LLMError, match="set OPENAI_API_KEY"):
+        create_llm(LLMConfig(provider="openai", model="m", allow_remote=True))
+    # A loopback OpenAI-compatible server and Ollama need no key.
+    assert create_llm(LLMConfig(provider="openai", model="m", base_url="http://localhost:1/v1")) is not None
+    assert create_llm(LLMConfig(provider="ollama", model="m")) is not None
+
+
+def test_custom_key_env_never_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "default-key")
+    monkeypatch.delenv("MY_KEY", raising=False)
+    cfg = LLMConfig(provider="anthropic", model="m", allow_remote=True, api_key_env="MY_KEY")
+    with pytest.raises(LLMError, match="set MY_KEY"):
+        create_llm(cfg)
+    monkeypatch.setenv("MY_KEY", "custom-key")
+    assert create_llm(cfg).client.api_key == "custom-key"
+
+
+def test_anthropic_unexpected_error_becomes_llm_error():
+    llm = AnthropicLLM(ANTH_CFG, client=StubAnthropic(raises=TypeError("Could not resolve authentication method")))
+    with pytest.raises(LLMError, match="anthropic request failed") as e:
+        llm.complete_json("s", "u", SCHEMA)
+    assert isinstance(e.value.__cause__, TypeError)
+
+
+def test_openai_compat_unexpected_error_becomes_llm_error():
+    def handler(req):
+        raise RuntimeError("transport blew up")
+
+    with pytest.raises(LLMError, match="transport blew up") as e:
+        _ollama(handler).complete_json("s", "u", SCHEMA)
+    assert isinstance(e.value.__cause__, RuntimeError)
+
+
+def test_openai_compat_http_error_includes_truncated_provider_message():
+    body = {"error": {"message": "model 'x' not found " + "z" * 500}}
+    with pytest.raises(LLMError) as e:
+        _ollama(lambda req: httpx.Response(404, json=body)).complete_json("s", "u", SCHEMA)
+    msg = str(e.value)
+    assert msg.startswith("ollama request failed: HTTP 404: ") and "model 'x' not found" in msg
+    assert len(msg) <= len("ollama request failed: HTTP 404: ") + 200
 
 
 def test_describe_llm_remote_flag():

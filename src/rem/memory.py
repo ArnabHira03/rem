@@ -121,10 +121,11 @@ class Memory:
         candidates = [(MemoryRecord.from_payload(h.payload), h.score) for h in hits]
         return [r.record for r in rank(candidates, project_id, limit, datetime.now(UTC))]
 
-    def nearest(self, text: str, scope: Scope, project_id: int | None) -> tuple[MemoryRecord, float] | None:
-        """The closest memory by raw cosine in the same scope and project, with its similarity."""
+    def similarity(self, text: str, id: str, scope: Scope, project_id: int | None) -> tuple[MemoryRecord, float] | None:
+        """Memory `id` with its cosine similarity to text, if it is live in the given scope and project."""
         hits = self.vectors.search(
-            self.col, self.embedder.embed_query(text), 1, {"scope": str(scope), "project_id": project_id}
+            self.col, self.embedder.embed_query(text), 1,
+            {"id": id, "scope": str(scope), "project_id": project_id},
         )
         return (MemoryRecord.from_payload(hits[0].payload), hits[0].score) if hits else None
 
@@ -246,19 +247,31 @@ class Memory:
         project_id: int | None,
         session_id: str | None,
         source: str,
-        threshold: float,
+        restate_min_similarity: float,
+        has_user_turn: bool,
     ) -> ApplyResult:
         """Write a job's extracted candidates, in order, so later ones see earlier writes.
+
+        A candidate is compared with one existing memory only, never by cosine alone: the memory
+        with the same normalized text, else the memory the LLM said it restates (same scope and
+        project, and at least restate_min_similarity as a guard against a wrong link). A changed
+        value or a contradiction has no such memory, so it is added rather than corroborating.
+
+        Without a user turn in the job, nothing can be user-asserted: "user" origins are
+        downgraded to "assistant" (unverified).
 
         Replaying the same job_key is idempotent: memory ids are deterministic, its own ADDs are
         re-taken (repairing a missing ADD row) and its own corroborations only complete history.
         """
         result = ApplyResult()
+        if not has_user_turn:
+            candidates = [c.model_copy(update={"origin": "assistant"}) if c.origin == "user" else c
+                          for c in candidates]
         kept, collapsed = _collapse_duplicates(candidates)
         result.skipped += collapsed
         for c in kept:
             if c.scope == Scope.PROJECT and project_id is None:
-                log.info("dropping project-scope candidate without a project (job %s): %r", job_key, c.text)
+                log.info("dropping project-scope candidate without a project (job %s)", job_key)
                 result.dropped += 1
                 continue
             pid = project_id if c.scope == Scope.PROJECT else None
@@ -268,9 +281,8 @@ class Memory:
             if own is not None and own.job_id == job_key:
                 action = Action.ADD  # replay of this job's own add: add() returns it and repairs history
             else:
-                near = self.nearest(c.text, c.scope, pid)
-                record, similarity = near if near else (None, 0.0)
-                action = decide(trust, record, similarity, threshold, job_key)
+                record, similarity = self._comparison_target(c, pid, own, restate_min_similarity)
+                action = decide(trust, record, similarity, restate_min_similarity, job_key)
             if action == Action.ADD:
                 added = self.add(
                     c.text, scope=c.scope, project_id=pid, provenance=trust.provenance, status=trust.status,
@@ -284,6 +296,17 @@ class Memory:
             else:
                 result.skipped += 1
         return result
+
+    def _comparison_target(
+        self, c: Candidate, pid: int | None, same_text: MemoryRecord | None, min_similarity: float
+    ) -> tuple[MemoryRecord | None, float]:
+        if same_text is not None:
+            return same_text, 1.0
+        if c.restates:
+            found = self.similarity(c.text, c.restates, c.scope, pid)
+            if found is not None and found[1] >= min_similarity:
+                return found
+        return None, 0.0
 
     def delete(self, id: str, *, actor: str) -> None:
         old = self._require(id)

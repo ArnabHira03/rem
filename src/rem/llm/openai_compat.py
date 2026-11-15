@@ -1,22 +1,21 @@
 import json
-import os
 
 import httpx
 
 from rem.config import LLMConfig
 from rem.errors import LLMError
 from rem.llm.base import LLM
-from rem.llm.factory import resolved_base_url
+from rem.llm.factory import api_key, resolved_base_url
 
 OPENAI_DEFAULT_URL = "https://api.openai.com/v1"
+MAX_ERROR_DETAIL = 200  # chars of the provider's error body kept in the message
 
 
 class OpenAICompatLLM(LLM):
     def __init__(self, cfg: LLMConfig, transport: httpx.BaseTransport | None = None):
         self.cfg = cfg
         headers = {}
-        key_env = cfg.api_key_env or ("OPENAI_API_KEY" if cfg.provider == "openai" else None)
-        if key_env and (key := os.environ.get(key_env)):
+        if key := api_key(cfg):
             headers["Authorization"] = f"Bearer {key}"
         self.client = httpx.Client(
             base_url=resolved_base_url(cfg) or OPENAI_DEFAULT_URL,
@@ -40,10 +39,11 @@ class OpenAICompatLLM(LLM):
         }
         try:
             resp = self.client.post("chat/completions", json=body)
-        except httpx.HTTPError as e:
+        except Exception as e:  # httpx errors and anything else on the request path
             raise LLMError(f"{self.cfg.provider} request failed: {e}") from e
         if resp.status_code != 200:
-            raise LLMError(f"{self.cfg.provider} request failed: HTTP {resp.status_code}")
+            detail = " ".join(resp.text.split())[:MAX_ERROR_DETAIL]
+            raise LLMError(f"{self.cfg.provider} request failed: HTTP {resp.status_code}" + (f": {detail}" if detail else ""))
         try:
             choice = resp.json()["choices"][0]
             finish, content = choice.get("finish_reason"), choice["message"]["content"]

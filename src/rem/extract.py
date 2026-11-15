@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from typing import Literal
 
@@ -5,7 +6,7 @@ from pydantic import BaseModel, ValidationError, field_validator
 
 from rem.errors import LLMError
 from rem.llm.base import LLM
-from rem.models import MemoryRecord, Scope, normalize_text
+from rem.models import MemoryRecord, Scope
 from rem.redact import redact
 from rem.storage.queue import Turn
 
@@ -19,6 +20,9 @@ class Candidate(BaseModel):
     scope: Scope
     origin: Origin
     evidence_source: str | None = None
+    # Id of an existing memory the LLM says this fact restates (resolved from its integer index at
+    # extraction time, so a cached extraction replays against the same memory).
+    restates: str | None = None
 
     @field_validator("text")
     @classmethod
@@ -45,8 +49,9 @@ EXTRACTION_SCHEMA: dict = {
                     "text": {"type": "string"},
                     "scope": {"type": "string", "enum": ["global", "system", "project"]},
                     "origin": {"type": "string", "enum": ["user", "assistant", "tool"]},
+                    "restates": {"type": ["integer", "null"]},
                 },
-                "required": ["text", "scope", "origin"],
+                "required": ["text", "scope", "origin", "restates"],
                 "additionalProperties": False,
             },
         }
@@ -72,10 +77,13 @@ inferred it and the user did not confirm it). Never use "tool"; tool output is n
 "verified". But if the new messages show the USER stating or confirming something listed as \
 "unverified", output it again (origin "user") so it can be verified. Otherwise only output new \
 or changed information.
-6. Only the "New messages" section is a source of facts; "Earlier conversation" is context only. \
+6. Set "restates" to the integer id of an existing memory ONLY when the fact states the same \
+thing as that memory (same meaning). A changed value or the opposite is NOT a restatement: \
+output it as a new fact with "restates": null. Every other fact has "restates": null.
+7. Only the "New messages" section is a source of facts; "Earlier conversation" is context only. \
 If there is nothing durable, return {"facts": []}.
 
-Respond with JSON: {"facts": [{"text": ..., "scope": ..., "origin": ...}]}"""
+Respond with JSON: {"facts": [{"text": ..., "scope": ..., "origin": ..., "restates": ...}]}"""
 
 
 def build_prompt(
@@ -107,21 +115,39 @@ def extract(
     if not isinstance(facts, list):
         raise LLMError("extraction response has no 'facts' list")
     candidates: list[Candidate] = []
-    seen: set[str] = set()
-    for item in facts:
+    for n, item in enumerate(facts):
+        if not isinstance(item, dict) or "restates" not in item:
+            log.warning("dropping extracted fact #%d: not an object with a 'restates' field", n)
+            continue
         try:
-            cand = Candidate.model_validate(item)
+            cand = Candidate.model_validate({k: v for k, v in item.items() if k != "restates"})
         except ValidationError as e:
-            log.warning("dropping invalid extracted fact %r: %s", item, e.errors()[0]["msg"])
+            err = e.errors()[0]
+            log.warning("dropping invalid extracted fact #%d (%s): %s: %s", n, _fingerprint(item.get("text")),
+                        ".".join(str(p) for p in err["loc"]), err["msg"])
             continue
-        key = normalize_text(cand.text)
-        if key in seen:
-            continue
-        seen.add(key)
-        candidates.append(cand)
+        candidates.append(cand.model_copy(update={"restates": _resolve(item["restates"], related, n)}))
     if len(candidates) > max_candidates:
         log.warning(
             "dropping %d candidates over the cap of %d", len(candidates) - max_candidates, max_candidates
         )
         candidates = candidates[:max_candidates]
     return Extraction(candidates=candidates, model=llm.name)
+
+
+def _resolve(index, related: list[MemoryRecord], n: int) -> str | None:
+    """Map the LLM's integer memory index to that memory's id; anything invalid becomes None."""
+    if index is None:
+        return None
+    if type(index) is int and 0 <= index < len(related):
+        return related[index].id
+    shown = index if type(index) is int else type(index).__name__
+    log.warning("fact #%d: ignoring invalid restates index %s (%d related memories)", n, shown, len(related))
+    return None
+
+
+def _fingerprint(text) -> str:
+    """Identify a fact in logs without its text: length and a short hash."""
+    if not isinstance(text, str):
+        return f"text: {type(text).__name__}"
+    return f"{len(text)} chars, sha256 {hashlib.sha256(text.encode()).hexdigest()[:12]}"

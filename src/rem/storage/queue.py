@@ -217,6 +217,19 @@ class IngestStore:
             "UPDATE jobs SET status = 'pending', lease_until = NULL, updated_at = ? WHERE id = ?", (utcnow(), job_id)
         )
 
+    def retry_failed(self) -> int:
+        """Put every failed job back in the queue, due now, with a fresh attempt budget.
+
+        The job keeps its messages and any cached extraction, so a retry re-runs only what
+        failed; last_error is kept until the next attempt overwrites it.
+        """
+        cur = self.conn.execute(
+            "UPDATE jobs SET status = 'pending', attempts = 0, lease_until = NULL, not_before = ?, "
+            "updated_at = ? WHERE status = 'failed'",
+            (self.clock(), utcnow()),
+        )
+        return cur.rowcount
+
     def recover(self) -> int:
         """Startup only: the instance lock proves no other worker exists, so every
         'processing' job is orphaned by a crash and goes back to pending now."""

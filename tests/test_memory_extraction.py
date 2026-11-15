@@ -5,11 +5,12 @@ from rem.extract import Candidate
 from rem.models import HistoryEvent, MemoryRecord, Provenance as P, Scope, Status as S
 from tests.conftest import add
 
-KW = dict(project_id=None, session_id="s", source="claude-code", threshold=0.9)
+KW = dict(project_id=None, session_id="s", source="claude-code", restate_min_similarity=0.75, has_user_turn=True)
 
 
-def cand(text, origin, scope="global", evidence_source=None):
-    return Candidate(text=text, scope=Scope(scope), origin=origin, evidence_source=evidence_source)
+def cand(text, origin, scope="global", evidence_source=None, restates=None):
+    return Candidate(text=text, scope=Scope(scope), origin=origin, evidence_source=evidence_source,
+                     restates=restates)
 
 
 # ---- add(project_id=..., evidence_source=...) --------------------------------
@@ -153,21 +154,115 @@ def test_apply_replay_repairs_missing_add_history(mem, monkeypatch):
     assert [(h.event, h.job_id) for h in mem.history(res.added[0])] == [(HistoryEvent.ADD, "job:3")]
 
 
-def test_later_candidates_see_earlier_writes(mem):
-    # Different normalized text (punctuation) but the same tokens, so cosine 1.0: the user one corroborates.
-    res = mem.apply_candidates([cand("Project uses Postgres 16", "assistant"), cand("project uses postgres 16!", "user")],
-                               job_key="job:1", **KW)
-    assert len(res.added) == 1 and res.corroborated == res.added
-    assert mem.get(res.added[0]).corroborated_by == "job:1"
-    assert len(mem.list()) == 1
+def test_near_duplicate_without_restates_is_added(mem):
+    # Same tokens, so cosine 1.0 with the hashing embedder; without a restates link it is a new fact.
+    a = mem.apply_candidates([cand("Project uses Postgres 16", "assistant")], job_key="job:1", **KW).added[0]
+    res = mem.apply_candidates([cand("project uses postgres 16!", "user")], job_key="job:2", **KW)
+    assert len(res.added) == 1 and res.corroborated == []
+    assert mem.get(a).status == S.UNVERIFIED and len(mem.list()) == 2
+
+
+def test_restates_link_corroborates_paraphrase(mem):
+    a = mem.apply_candidates([cand("Project uses Postgres 16", "assistant")], job_key="job:1", **KW).added[0]
+    res = mem.apply_candidates([cand("project uses postgres 16!", "user", restates=a)], job_key="job:2", **KW)
+    assert res.corroborated == [a] and res.added == []
+    rec = mem.get(a)
+    assert rec.status == S.VERIFIED and rec.provenance == P.USER_ASSERTED and rec.text == "Project uses Postgres 16"
+    assert [h.event for h in mem.history(a)] == [HistoryEvent.ADD, HistoryEvent.CORROBORATE]
+
+
+def test_contradiction_is_added_and_does_not_verify(mem):
+    # "spaces over tabs" has the same bag of words as "tabs over spaces" (cosine 1.0 here, 0.99 with
+    # the real embedder): it contradicts the memory, so the LLM leaves restates null.
+    a = mem.apply_candidates([cand("Prefers tabs over spaces", "assistant")], job_key="job:1", **KW).added[0]
+    res = mem.apply_candidates([cand("Prefers spaces over tabs", "user")], job_key="job:2", **KW)
+    assert len(res.added) == 1 and res.corroborated == [] and res.skipped == 0
+    assert mem.get(a).status == S.UNVERIFIED and mem.get(a).corroborated_by is None
+    assert mem.get(res.added[0]).status == S.VERIFIED
+    assert [h.event for h in mem.history(a)] == [HistoryEvent.ADD]
+
+
+def test_changed_value_restating_a_verified_memory_is_added(mem):
+    a = mem.apply_candidates([cand("The API listens on port 8080", "user", scope="system")], job_key="job:1", **KW).added[0]
+    res = mem.apply_candidates([cand("The API listens on port 8081", "user", scope="system")], job_key="job:2", **KW)
+    assert len(res.added) == 1 and res.skipped == 0
+    assert {m.text for m in mem.list()} == {"The API listens on port 8080", "The API listens on port 8081"}
+    assert mem.get(a).text == "The API listens on port 8080"
+
+
+def test_restates_in_another_scope_is_added(mem):
+    a = mem.apply_candidates([cand("Project uses Postgres 16", "assistant", scope="system")], job_key="job:1", **KW).added[0]
+    res = mem.apply_candidates([cand("Project uses Postgres 16", "user", restates=a)], job_key="job:2", **KW)
+    assert len(res.added) == 1 and res.corroborated == []
+    assert mem.get(a).status == S.UNVERIFIED
+
+
+def test_restates_in_another_project_is_added(mem, tmp_path):
+    p1 = mem.db.upsert_project(str(tmp_path / "a"), "a", None)
+    p2 = mem.db.upsert_project(str(tmp_path / "b"), "b", None)
+    a = mem.apply_candidates([cand("Uses Django 5", "assistant", scope="project")], job_key="job:1",
+                             **{**KW, "project_id": p1}).added[0]
+    res = mem.apply_candidates([cand("Uses Django 5", "user", scope="project", restates=a)], job_key="job:2",
+                               **{**KW, "project_id": p2})
+    assert len(res.added) == 1 and res.corroborated == [] and mem.get(a).status == S.UNVERIFIED
+
+
+def test_restates_below_similarity_floor_is_added(mem):
+    a = mem.apply_candidates([cand("Runs Fedora 44", "assistant", scope="system")], job_key="job:1", **KW).added[0]
+    res = mem.apply_candidates([cand("Uses fish shell", "user", scope="system", restates=a)], job_key="job:2", **KW)
+    assert len(res.added) == 1 and res.corroborated == [] and mem.get(a).status == S.UNVERIFIED
+
+
+def test_restates_deleted_memory_is_added(mem):
+    a = mem.apply_candidates([cand("Runs Fedora 44", "assistant", scope="system")], job_key="job:1", **KW).added[0]
+    mem.delete(a, actor="cli")
+    res = mem.apply_candidates([cand("Runs Fedora 44", "user", scope="system", restates=a)], job_key="job:2", **KW)
+    assert len(res.added) == 1 and res.corroborated == []
+
+
+def test_restatement_of_verified_memory_is_skipped(mem):
+    a = mem.apply_candidates([cand("Prefers uv over pip", "user")], job_key="job:1", **KW).added[0]
+    res = mem.apply_candidates([cand("prefers uv over pip!", "user", restates=a)], job_key="job:2", **KW)
+    assert res.added == [] and res.corroborated == [] and res.skipped == 1 and len(mem.list()) == 1
 
 
 def test_two_restatements_in_one_job_corroborate_once(mem):
     a = mem.apply_candidates([cand("Project uses Postgres 16", "assistant")], job_key="job:1", **KW).added[0]
-    res = mem.apply_candidates([cand("Project uses Postgres 16", "user"), cand("project uses postgres 16!", "user")],
+    res = mem.apply_candidates([cand("Project uses Postgres 16", "user"), cand("project uses postgres 16!", "user", restates=a)],
                                job_key="job:2", **KW)
     assert res.corroborated == [a] and res.skipped == 1 and res.added == []
     assert [h.event for h in mem.history(a)] == [HistoryEvent.ADD, HistoryEvent.CORROBORATE]
+
+
+def test_restates_corroboration_replay_is_idempotent(mem):
+    a = mem.apply_candidates([cand("Project uses Postgres 16", "assistant")], job_key="job:1", **KW).added[0]
+    cs = [cand("project uses postgres 16!", "user", restates=a)]
+    first = mem.apply_candidates(cs, job_key="job:2", **KW)
+    again = mem.apply_candidates(cs, job_key="job:2", **KW)
+    assert first.corroborated == again.corroborated == [a] and again.added == []
+    assert [h.event for h in mem.history(a)] == [HistoryEvent.ADD, HistoryEvent.CORROBORATE]
+    assert len(mem.list()) == 1
+
+
+def test_user_origin_without_user_turn_is_downgraded(mem):
+    res = mem.apply_candidates([cand("Prefers uv over pip", "user"), cand("Kernel is 7.2", "tool", scope="system",
+                                                                          evidence_source="uname -r")],
+                               job_key="job:1", **{**KW, "has_user_turn": False})
+    user, tool = (mem.get(i) for i in res.added)
+    assert user.provenance == P.ASSISTANT_GENERATED and user.status == S.UNVERIFIED
+    assert tool.provenance == P.TOOL_OBSERVED and tool.status == S.VERIFIED
+
+
+def test_assistant_only_job_cannot_corroborate(mem):
+    a = mem.apply_candidates([cand("Runs Fedora 44", "assistant")], job_key="job:1", **KW).added[0]
+    res = mem.apply_candidates([cand("Runs Fedora 44", "user")], job_key="job:2", **{**KW, "has_user_turn": False})
+    assert res.corroborated == [] and res.skipped == 1 and mem.get(a).status == S.UNVERIFIED
+
+
+def test_dropped_candidate_log_has_no_fact_text(mem, caplog):
+    caplog.set_level("DEBUG")
+    mem.apply_candidates([cand("Uses Django secretproject", "user", scope="project")], job_key="job:1", **KW)
+    assert "dropping project-scope candidate" in caplog.text and "secretproject" not in caplog.text
 
 
 def test_corroborate_replay_after_crash_completes_history(mem, monkeypatch):
@@ -197,7 +292,7 @@ def test_corroborate_replay_after_crash_completes_history(mem, monkeypatch):
     assert [h.event for h in mem.history(a)] == [HistoryEvent.ADD, HistoryEvent.CORROBORATE]
 
 
-# ---- corroborate / nearest / related ---------------------------------------------
+# ---- corroborate / similarity / related -------------------------------------------
 
 
 def test_corroborate_never_downgrades_user_confirmed(mem):
@@ -213,23 +308,21 @@ def test_corroborate_unknown_id_raises(mem):
         mem.corroborate("nope", provenance=P.USER_ASSERTED, job_id="job:1", actor="extractor")
 
 
-def test_nearest_respects_scope_and_project(mem, tmp_path):
+def test_similarity_respects_id_scope_and_project(mem, tmp_path):
     p1 = mem.db.upsert_project(str(tmp_path / "a"), "a", None)
     p2 = mem.db.upsert_project(str(tmp_path / "b"), "b", None)
     g = add(mem, "Uses Postgres 16")
-    s = add(mem, "Uses Postgres 16", scope=Scope.SYSTEM)
+    other = add(mem, "Uses Postgres 16 too")
     a = add(mem, "Uses Postgres 16", scope=Scope.PROJECT, project_id=p1)
 
-    rec, sim = mem.nearest("uses postgres 16", Scope.GLOBAL, None)
+    rec, sim = mem.similarity("uses postgres 16", g.id, Scope.GLOBAL, None)
     assert rec.id == g.id and sim == pytest.approx(1.0)
-    assert mem.nearest("Uses Postgres 16", Scope.SYSTEM, None)[0].id == s.id
-    assert mem.nearest("Uses Postgres 16", Scope.PROJECT, p1)[0].id == a.id
-    assert mem.nearest("Uses Postgres 16", Scope.PROJECT, p2) is None
-    assert mem.nearest("Uses Postgres 16", Scope.PROJECT, None) is None
-
-
-def test_nearest_on_empty_store_is_none(mem):
-    assert mem.nearest("anything", Scope.GLOBAL, None) is None
+    rec, sim = mem.similarity("uses postgres 16", other.id, Scope.GLOBAL, None)
+    assert rec.id == other.id and sim < 1.0
+    assert mem.similarity("Uses Postgres 16", g.id, Scope.SYSTEM, None) is None
+    assert mem.similarity("Uses Postgres 16", a.id, Scope.PROJECT, p1)[0].id == a.id
+    assert mem.similarity("Uses Postgres 16", a.id, Scope.PROJECT, p2) is None
+    assert mem.similarity("Uses Postgres 16", "00000000-0000-0000-0000-000000000000", Scope.GLOBAL, None) is None
 
 
 def test_related_ranks_current_project_first(mem, tmp_path):
@@ -246,3 +339,35 @@ def test_related_ranks_current_project_first(mem, tmp_path):
     assert set(ids) == {cur.id, glob.id, other.id}
     assert ids.index(other.id) > ids.index(glob.id)
     assert len(mem.related("Database is Postgres 16", p1, 1)) == 1
+
+
+# ---- real embedder ----------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_contradictions_are_added_with_real_embedder(tmp_path):
+    """bge-small scores these contradictions 0.98-0.99 cosine: only the restates link may merge facts."""
+    from rem.config import DEFAULT_CACHE_DIR, EmbedderConfig, RemConfig, VectorStoreConfig
+    from rem.memory import Memory
+
+    cfg = RemConfig(data_dir=tmp_path, vector_store=VectorStoreConfig(provider="memory"),
+                    embedder=EmbedderConfig(cache_dir=DEFAULT_CACHE_DIR))
+    m = Memory(cfg)
+    try:
+        kw = {**KW, "restate_min_similarity": cfg.extraction.restate_min_similarity}
+        tabs, port = m.apply_candidates(
+            [cand("Prefers tabs over spaces", "assistant"), cand("The API listens on port 8080", "user", scope="system")],
+            job_key="job:1", **kw).added
+        assert m.similarity("Prefers spaces over tabs", tabs, Scope.GLOBAL, None)[1] > 0.9  # the C1 trap
+        res = m.apply_candidates(
+            [cand("Prefers spaces over tabs", "user"), cand("The API listens on port 8081", "user", scope="system")],
+            job_key="job:2", **kw)
+        assert len(res.added) == 2 and res.corroborated == [] and res.skipped == 0
+        assert m.get(tabs).status == S.UNVERIFIED and m.get(tabs).corroborated_by is None
+        assert len(m.list()) == 4
+        # A genuine restatement with the LLM's link still corroborates.
+        res = m.apply_candidates([cand("The user prefers tabs over spaces", "user", restates=tabs)],
+                                 job_key="job:3", **kw)
+        assert res.corroborated == [tabs] and m.get(tabs).status == S.VERIFIED
+    finally:
+        m.close()

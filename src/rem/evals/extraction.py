@@ -31,13 +31,14 @@ _SEED_TRUST = {
 
 @dataclass
 class EvalReport:
+    # A rate is None when there was nothing to measure it on (e.g. no dedup cases).
     cases: int
-    precision: float
-    recall: float
-    scope_acc: float
-    origin_acc: float
-    json_valid_rate: float
-    dedup_acc: float
+    precision: float | None
+    recall: float | None
+    scope_acc: float | None
+    origin_acc: float | None
+    json_valid_rate: float | None
+    dedup_acc: float | None
     latency_p50: float
     latency_p95: float
     failures: list[dict] = field(default_factory=list)
@@ -86,8 +87,8 @@ def _percentile(values: list[float], q: float) -> float:
     return ordered[min(len(ordered) - 1, math.ceil(q * len(ordered)) - 1)]
 
 
-def _ratio(num: int, den: int) -> float:
-    return num / den if den else 1.0
+def _ratio(num: int, den: int) -> float | None:
+    return num / den if den else None
 
 
 def run_eval(llm: LLM, embedder: Embedder, cases: list[dict], cfg: RemConfig) -> EvalReport:
@@ -167,7 +168,8 @@ def run_eval(llm: LLM, embedder: Embedder, cases: list[dict], cfg: RemConfig) ->
 
                 result = mem.apply_candidates(
                     candidates, job_key=f"job:eval:{case['id']}", project_id=project_id,
-                    session_id=None, source="eval", threshold=settings.dedup_threshold,
+                    session_id=None, source="eval", restate_min_similarity=settings.restate_min_similarity,
+                    has_user_turn=any(t.role == "user" for t in turns),
                 )
                 if case.get("expect_corroborate"):
                     dedup_cases += 1
