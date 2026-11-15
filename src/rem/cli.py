@@ -167,6 +167,12 @@ def _install(args) -> int:
         print(ic.uninstall(path, dry_run=args.dry_run))
     else:
         print(ic.install(path, ic.hook_command(), dry_run=args.dry_run))
+        if not args.dry_run:
+            from rem.systemd import unit_path
+
+            if not unit_path().exists():
+                print("tip: run 'rem install-service --enable' so the daemon is up before your first "
+                      "Claude Code session")
     return 0
 
 

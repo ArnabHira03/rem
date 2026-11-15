@@ -263,6 +263,25 @@ def test_uninstall_without_backup_says_nothing_about_it(path):
     assert ic.uninstall(path) == f"nothing to remove in {path}"
 
 
+TIP = "tip: run 'rem install-service --enable' so the daemon is up before your first Claude Code session"
+
+
+def test_cli_install_tips_systemd_unit_only_when_missing(path, tmp_path, monkeypatch, capsys):
+    from rem.systemd import unit_path
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+    assert main(["install", "claude-code"]) == 0
+    assert capsys.readouterr().out.splitlines() == [f"installed rem hooks in {path}", TIP]
+    for extra in (["--dry-run"], ["--uninstall"], ["--uninstall", "--dry-run"]):
+        assert main(["install", "claude-code", *extra]) == 0
+        assert TIP not in capsys.readouterr().out
+    unit_path().parent.mkdir(parents=True)
+    unit_path().write_text("[Unit]\n")
+    assert main(["install", "claude-code"]) == 0
+    assert capsys.readouterr().out.splitlines() == [f"installed rem hooks in {path}"]
+
+
 @pytest.mark.parametrize("extra", [[], ["--uninstall"]])
 def test_cli_install_ignores_broken_rem_config(path, tmp_path, monkeypatch, capsys, extra):
     bad = tmp_path / "bad.toml"
