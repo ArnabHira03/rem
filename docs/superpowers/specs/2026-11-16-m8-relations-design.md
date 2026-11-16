@@ -47,7 +47,7 @@ The user picked **1**, and **A** for search scope (listing + semantic search onl
 ### Storage: `rem_relations__<slug>`
 - Dense-only collection; meta key `active_relation_collection` (default `rem_relations__<slug>`); created on open if missing (an M7 store just gets it), as M7 does for entities.
 - Vector = embedding of the sentence `"<source name> <type with _ → space> <target name>"` using the entity's canonical `name`. The sentence is stored in the payload so reembed is lossless.
-- **Payload:** `{id, source_entity_id, target_entity_id, type, sentence, memory_ids[] (evidence, sorted, de-duplicated), provenance, status, scope, project_id, created_at, updated_at}`. Indexed fields as for entities (`scope`, `project_id`) plus `status`.
+- **Payload:** `{id, source_entity_id, target_entity_id, type, sentence, memory_ids[] (evidence, sorted, de-duplicated), provenance, status, scope, project_id, created_at, updated_at}`. No payload indexes are created (local Qdrant mode creates none), like the other collections.
 - **Id:** `uuid5(RELATION_NS, f"{source_entity_id}|{type}|{target_entity_id}")`. Entity ids already encode the (scope, project) bucket, so the relation is bucketed too. Directed: `A uses B` ≠ `B uses A`.
 - Both ends are always in the fact's bucket (a fact's entities are resolved in one bucket), so a relation never crosses projects.
 - No `relation_ids` field on memories or entities: relations point at their evidence memories and endpoint entities; finding a memory's relations is a scan of the bucket (personal scale). _Builder's call:_ add a reverse index only if a test shows it's needed.
