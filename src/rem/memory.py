@@ -8,17 +8,19 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from rem.config import RemConfig
 from rem.embed.base import Embedder, collection_slug
 from rem.embed.factory import create_embedder, create_sparse_embedder
 from rem.embed.sparse import SparseEmbedder
-from rem.entities import bucket, entity_id, normalize_name
+from rem.entities import ENTITY_MERGE_MIN, bucket, entity_id, normalize_name
 from rem.errors import EmbedderMismatchError, MemoryNotFound
 from rem.models import (
     Candidate,
     Confirmation,
+    EntityMention,
     EntityRecord,
     HistoryEvent,
     REM_NAMESPACE,
@@ -58,6 +60,13 @@ class ApplyResult:
     confirmed: list[str] = field(default_factory=list)
     skipped: int = 0
     dropped: int = 0
+    entities: int = 0  # entity ADD and MERGE events performed (0 on a pure replay)
+
+
+class EntityAction(StrEnum):
+    ADD = "ADD"  # a new entity
+    MERGE = "MERGE"  # a new spelling joined an existing entity as an alias
+    NONE = "NONE"  # the entity already knows this spelling
 
 
 @dataclass
@@ -489,6 +498,7 @@ class Memory:
                     # an agent wrote it (or asked to confirm it): the extractor's word that the user
                     # said it is not enough; only the user's quoted words or `rem confirm` verify it
                     action = Action.SKIP
+            linked: str | None = None  # the memory this candidate's entities link to
             if action == Action.ADD:
                 added = self.add(
                     c.text, scope=c.scope, project_id=pid, provenance=trust.provenance, status=trust.status,
@@ -496,12 +506,101 @@ class Memory:
                     job_id=job_key, session_id=session_id,
                 )
                 result.added.append(added.id)
+                linked = added.id
             elif action == Action.CORROBORATE and record is not None and record.id not in result.corroborated:
                 self.corroborate(record.id, provenance=trust.provenance, job_id=job_key, actor="extractor")
                 result.corroborated.append(record.id)
+                linked = record.id
             else:
                 result.skipped += 1
+                if own is not None:  # the same fact is already stored: it still gets the mentions
+                    linked = own.id
+                elif action == Action.CORROBORATE and record is not None:  # corroborated earlier in this job
+                    linked = record.id
+            if linked is not None and c.entities:
+                result.entities += self._link_mentions(linked, c.entities, c.scope, pid, job_key, "extractor")
         return result
+
+    def _link_mentions(
+        self, memory_id: str, mentions: list[EntityMention], scope: Scope, project_id: int | None,
+        job_key: str, actor: str,
+    ) -> int:
+        """Resolve a candidate's mentions in its bucket and link them to memory_id; returns ADD+MERGE count.
+
+        Order: entity upsert (in _resolve_entity) -> entity history (INSERT OR IGNORE) -> _link. Each
+        step is a set union, so replaying the job only completes what a crash left undone.
+        """
+        seen: set[str] = set()
+        ids: list[str] = []
+        events = 0
+        now = utcnow()
+        for m in mentions:
+            norm = normalize_name(m.name)
+            if norm in seen:  # first spelling wins
+                continue
+            seen.add(norm)
+            ent, action = self._resolve_entity(m, scope, project_id, now)
+            if action == EntityAction.ADD:
+                self.db.add_history(TargetKind.ENTITY, ent.id, HistoryEvent.ADD, None, ent.name, actor, job_key)
+                events += 1
+            elif action == EntityAction.MERGE:
+                self.db.add_history(TargetKind.ENTITY, ent.id, HistoryEvent.MERGE, ent.name, m.name, actor, job_key)
+                events += 1
+            elif not any(h.event == HistoryEvent.ADD for h in self.db.get_history(ent.id)):
+                # a crash between the entity upsert and its ADD row: repair the row on replay
+                self.db.add_history(TargetKind.ENTITY, ent.id, HistoryEvent.ADD, None, ent.name, actor, job_key)
+            ids.append(ent.id)
+        self._link(memory_id, ids)
+        return events
+
+    def _resolve_entity(
+        self, mention: EntityMention, scope: Scope, project_id: int | None, now: str
+    ) -> tuple[EntityRecord, EntityAction]:
+        """The entity `mention` names in (scope, project_id)'s bucket, created or merged into as needed.
+
+        Same normalized name or alias: that entity (a new spelling becomes an alias). Else the nearest
+        entity in the bucket if its name embeds at cosine >= ENTITY_MERGE_MIN (the spelling becomes an
+        alias). Else a new entity with a deterministic id.
+        """
+        scope, project_id = bucket(scope, project_id)
+        normalized = normalize_name(mention.name)
+        found = self.find_entity(normalized, scope, project_id)
+        if found is not None:
+            if mention.name == found.name or mention.name in found.aliases:
+                return found, EntityAction.NONE
+            return self._add_alias(found, mention.name, now), EntityAction.MERGE
+        vector = self.embedder.embed([normalized])[0]
+        hits = self.vectors.search(self.entity_col, vector, 1, {"scope": str(scope), "project_id": project_id})
+        if hits and hits[0].score >= ENTITY_MERGE_MIN:
+            return self._add_alias(EntityRecord.from_payload(hits[0].payload), mention.name, now), EntityAction.MERGE
+        rec = EntityRecord(
+            id=entity_id(scope, project_id, normalized), name=mention.name, normalized=normalized,
+            type=mention.type, aliases=[], scope=scope, project_id=project_id, memory_ids=[],
+            created_at=now, updated_at=now,
+        )
+        self.vectors.upsert(self.entity_col, [VectorPoint(rec.id, vector, rec.to_payload())])
+        return rec, EntityAction.ADD
+
+    def _add_alias(self, ent: EntityRecord, alias: str, now: str) -> EntityRecord:
+        ent = ent.model_copy(update={"aliases": [*ent.aliases, alias], "updated_at": now})
+        self.vectors.update_payload(self.entity_col, ent.id, {"aliases": ent.aliases, "updated_at": now})
+        return ent
+
+    def _link(self, memory_id: str, entity_ids: list[str]) -> None:
+        """Link a memory and entities on both sides: each entity's memory_ids, then the memory's
+        sorted entity_ids. Set unions only; nothing is written where the link already exists, and a
+        link is no history event (the entity's ADD/MERGE row and the memory's row already exist)."""
+        now = utcnow()
+        for eid in entity_ids:
+            ent = self.get_entity(eid)
+            if ent is not None and memory_id not in ent.memory_ids:
+                self.vectors.update_payload(self.entity_col, eid, {
+                    "memory_ids": sorted({*ent.memory_ids, memory_id}), "updated_at": now})
+        rec = self.get(memory_id)
+        if rec is not None:
+            merged = sorted({*rec.entity_ids, *entity_ids})
+            if merged != rec.entity_ids:
+                self.vectors.update_payload(self.col, memory_id, {"entity_ids": merged})
 
     def _comparison_target(
         self, c: Candidate, pid: int | None, same_text: MemoryRecord | None, min_similarity: float
