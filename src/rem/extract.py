@@ -6,7 +6,7 @@ from pydantic import BaseModel, ValidationError
 
 from rem.errors import LLMError
 from rem.llm.base import LLM
-from rem.models import Candidate, Confirmation, MemoryRecord, Origin, Scope  # noqa: F401  (re-exported)
+from rem.models import ENTITY_TYPES, Candidate, Confirmation, EntityMention, MemoryRecord, Origin, Scope  # noqa: F401  (re-exported)
 from rem.redact import redact
 from rem.storage.queue import Turn
 
@@ -29,8 +29,17 @@ EXTRACTION_SCHEMA: dict = {
                     "scope": {"type": "string", "enum": ["global", "system", "project"]},
                     "origin": {"type": "string", "enum": ["user", "assistant", "tool"]},
                     "restates": {"type": ["integer", "null"]},
+                    "entities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}, "type": {"type": "string"}},
+                            "required": ["name", "type"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
-                "required": ["text", "scope", "origin", "restates"],
+                "required": ["text", "scope", "origin", "restates", "entities"],
                 "additionalProperties": False,
             },
         }
@@ -68,8 +77,12 @@ thing as that memory (same meaning). A changed value or the opposite is NOT a re
 output it as a new fact with "restates": null. Every other fact has "restates": null.
 7. Only the "New messages" section is a source of facts; "Earlier conversation" is context only. \
 If there is nothing durable, return {"facts": []}.
+8. Set "entities" to the named people, tools, projects, languages, organizations, places or \
+concepts a fact is about, each with a short "type" (""" + ", ".join(ENTITY_TYPES) + """); use the \
+name as written in the conversation. A fact about nothing in particular has "entities": [].
 
-Respond with JSON: {"facts": [{"text": ..., "scope": ..., "origin": ..., "restates": ...}]}"""
+Respond with JSON: {"facts": [{"text": ..., "scope": ..., "origin": ..., "restates": ..., \
+"entities": [{"name": ..., "type": ...}]}]}"""
 
 
 MAX_TURN_CHARS = 4000  # per turn sent to the LLM: a pasted log or file must not blow up the prompt
@@ -126,20 +139,38 @@ def extract(
             log.warning("dropping extracted fact #%d: not an object", n)
             continue
         try:
-            cand = Candidate.model_validate({k: v for k, v in item.items() if k != "restates"})
+            cand = Candidate.model_validate({k: v for k, v in item.items() if k not in ("restates", "entities")})
         except ValidationError as e:
             err = e.errors()[0]
             log.warning("dropping invalid extracted fact #%d (%s): %s: %s", n, _fingerprint(item.get("text")),
                         ".".join(str(p) for p in err["loc"]), err["msg"])
             continue
         # The schema requires "restates", but a lenient provider may omit it: missing means null.
-        candidates.append(cand.model_copy(update={"restates": _resolve(item.get("restates"), related, n)}))
+        candidates.append(cand.model_copy(update={
+            "restates": _resolve(item.get("restates"), related, n),
+            "entities": _mentions(item.get("entities"), n),
+        }))
     if len(candidates) > max_candidates:
         log.warning(
             "dropping %d candidates over the cap of %d", len(candidates) - max_candidates, max_candidates
         )
         candidates = candidates[:max_candidates]
     return Extraction(candidates=candidates, model=llm.name)
+
+
+def _mentions(raw, n: int) -> list[EntityMention]:
+    """Valid entity mentions of fact #n; a missing key means none, and a bad mention is dropped alone."""
+    if not isinstance(raw, list):
+        return []
+    out: list[EntityMention] = []
+    for m in raw:
+        try:
+            if not isinstance(m, dict):
+                raise ValueError("not an object")
+            out.append(EntityMention.model_validate(m))
+        except (ValidationError, ValueError) as e:
+            log.warning("fact #%d: dropping invalid entity mention: %s", n, str(e).splitlines()[0])
+    return out
 
 
 def _resolve(index, related: list[MemoryRecord], n: int) -> str | None:

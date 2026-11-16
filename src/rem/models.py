@@ -121,6 +121,50 @@ class HistoryRow(BaseModel):
 
 Origin = Literal["user", "assistant", "tool"]
 
+ENTITY_TYPES = ("person", "tool", "project", "language", "org", "place", "concept")
+
+
+class EntityMention(BaseModel):
+    """An entity a fact mentions, as proposed by the extraction LLM."""
+
+    name: str
+    type: str = "concept"
+
+    @field_validator("name")
+    @classmethod
+    def _name_valid(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 80:
+            raise ValueError("name must be 1..80 characters")
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def _type_lower(cls, v: str) -> str:
+        return v.strip().lower() or "concept"
+
+
+class EntityRecord(BaseModel):
+    """An entity as stored in the vector store payload."""
+
+    id: str
+    name: str
+    normalized: str
+    type: str
+    aliases: list[str] = []
+    scope: Scope
+    project_id: int | None
+    memory_ids: list[str] = []
+    created_at: str
+    updated_at: str
+
+    def to_payload(self) -> dict:
+        return self.model_dump(mode="json")
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "EntityRecord":
+        return cls.model_validate(payload)
+
 
 class Candidate(BaseModel):
     text: str
@@ -130,6 +174,7 @@ class Candidate(BaseModel):
     # Id of an existing memory the LLM says this fact restates (resolved from its integer index at
     # extraction time, so a cached extraction replays against the same memory).
     restates: str | None = None
+    entities: list[EntityMention] = []
 
     @field_validator("text")
     @classmethod

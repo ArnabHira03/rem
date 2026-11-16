@@ -198,3 +198,25 @@ async def test_reembed_endpoints(api):
     assert r.status_code == 200 and r.json()["collection"].endswith("hash-32_32")
     assert (await api.get("/reembed")).json() is None
     assert (await api.post("/reembed/finalize")).status_code == 409
+
+
+async def test_entities_endpoint(api):
+    assert (await api.get("/entities")).json() == []
+
+
+async def test_entities_endpoint_lists_entities_sorted(cfg):
+    from rem.models import Scope
+    from tests.test_memory_entities import insert_entity
+
+    svc = RemService(cfg)
+    try:
+        insert_entity(svc.memory, name="uv", scope=Scope.GLOBAL, project_id=None)
+        insert_entity(svc.memory, name="Alpha", scope=Scope.GLOBAL, project_id=None)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(svc)), base_url="http://rem") as c:
+            r = await c.get("/entities")
+    finally:
+        svc.close()
+    assert r.status_code == 200
+    got = r.json()
+    assert [e["name"] for e in got] == ["Alpha", "uv"]
+    assert {"id", "name", "normalized", "type", "aliases", "scope", "project_id", "memory_ids"} <= got[0].keys()

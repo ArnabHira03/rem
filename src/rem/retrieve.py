@@ -3,6 +3,7 @@
 import math
 from datetime import datetime
 
+from rem.entities import ENTITY_BOOST
 from rem.models import MemoryRecord, Scope, SearchResult, Status
 
 T_BASE = 0.30  # global, system and current-project memories
@@ -29,8 +30,12 @@ def cosine(a: list[float], b: list[float]) -> float:
 def fuse(
     dense: list[tuple[MemoryRecord, float]],
     keyword: dict[str, float],
+    entity_memory_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[tuple[MemoryRecord, float, float]]:
     """Hybrid score per candidate: dense cosine plus KEYWORD_BOOST times its BM25 score / the best BM25 score.
+
+    A candidate in entity_memory_ids (linked to an entity the query matched) also gets ENTITY_BOOST;
+    that is a ranking boost only and never changes its dense score.
 
     Returns (record, hybrid, dense). Dense scores are unchanged when no candidate has a keyword hit.
     The threshold in score_and_rank still gates on dense only, so a keyword-only match with an
@@ -40,7 +45,8 @@ def fuse(
     out = []
     for record, semantic in dense:
         kw = keyword.get(record.id, 0.0) / top if top > 0 else 0.0
-        out.append((record, semantic + KEYWORD_BOOST * kw, semantic))
+        boost = ENTITY_BOOST if record.id in entity_memory_ids else 0.0
+        out.append((record, semantic + KEYWORD_BOOST * kw + boost, semantic))
     return out
 
 

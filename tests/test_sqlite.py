@@ -34,3 +34,21 @@ def test_upsert_project_is_stable(tmp_path):
 def test_reopen_keeps_data(tmp_path):
     RemDB(tmp_path / "rem.db").set_meta("k", "v")
     assert RemDB(tmp_path / "rem.db").get_meta("k") == "v"
+
+
+def test_transaction_commits_together_or_rolls_back(tmp_path):
+    import pytest
+
+    db = RemDB(tmp_path / "rem.db")
+    with db.transaction():
+        db.set_meta("a", "1")
+        db.set_meta("b", "2")
+    assert (db.get_meta("a"), db.get_meta("b")) == ("1", "2")
+    with pytest.raises(RuntimeError):
+        with db.transaction():
+            db.set_meta("a", "changed")
+            db.delete_meta("b")
+            raise RuntimeError("crash")
+    assert (db.get_meta("a"), db.get_meta("b")) == ("1", "2")
+    assert not db.conn.in_transaction
+    db.close()

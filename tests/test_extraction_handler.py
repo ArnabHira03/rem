@@ -5,12 +5,12 @@ import threading
 import pytest
 
 from rem.config import DaemonConfig, ExtractionConfig
-from rem.daemon.extraction import ExtractionHandler, _in_daemon_thread
+from rem.daemon.extraction import ExtractionHandler, _in_daemon_thread, _load_cached
 from rem.daemon.service import RemService
 from rem.daemon.worker import Worker
 from rem.errors import LLMError
 from rem.llm.fake import FakeLLM
-from rem.models import HistoryEvent, Provenance as P, Scope, Status as S
+from rem.models import Candidate, EntityMention, HistoryEvent, Provenance as P, Scope, Status as S
 from rem.storage.queue import Turn
 from tests.conftest import wait_until, wait_until_async
 from tests.test_queue import FakeClock
@@ -347,3 +347,51 @@ async def test_job_window_is_fixed_once_enqueued(svc, clock):
     w2 = await svc.store.run(store.job_window, second)
     assert w1[1] == w2[0]  # consecutive exchanges meet, never overlap
     assert w1[0] < w1[1] < w2[1]
+
+
+def test_cached_extraction_round_trips_candidate_entities():
+    c = Candidate(text="Uses uv", scope="global", origin="user", entities=[EntityMention(name="uv", type="tool")])
+    [back], [] = _load_cached(json.dumps({"candidates": [c.model_dump(mode="json")], "confirmations": []}))
+    assert back == c and Candidate.model_validate(c.model_dump(mode="json")) == c
+    # an extraction cached before M7 has no "entities" key
+    [old], _ = _load_cached(json.dumps({"candidates": [{"text": "Uses uv", "scope": "global", "origin": "user"}]}))
+    assert old.entities == []
+
+
+async def test_replay_through_the_cache_links_entities_once(svc, clock, monkeypatch):
+    llm = FakeLLM([{"facts": [
+        {"text": "Prefers uv over pip", "scope": "global", "origin": "user", "restates": None,
+         "entities": [{"name": "uv", "type": "tool"}, {"name": "pip", "type": "tool"}]},
+        {"text": "Runs Fedora 44", "scope": "system", "origin": "user", "restates": None,
+         "entities": [{"name": "Fedora", "type": "tool"}]}]}])
+    real_add = svc.memory.add
+    adds = {"n": 0}
+
+    def crashing_add(*a, **kw):
+        adds["n"] += 1
+        if adds["n"] == 2:
+            raise RuntimeError("crash mid-apply")
+        return real_add(*a, **kw)
+
+    monkeypatch.setattr(svc.memory, "add", crashing_add)
+    await svc.ingest("claude-code", "s1", None, [Turn("user", "I prefer uv over pip; I run Fedora 44")])
+    stop = asyncio.Event()
+    task = asyncio.create_task(Worker(svc, ExtractionHandler(llm, ExtractionConfig()), 0.01).run(stop))
+    try:
+        await wait_until(lambda: job_row(svc)["attempts"] == 1)
+        assert {e.name for e in await svc.store.run(svc.memory.list_entities)} == {"uv", "pip"}
+        clock.t += 60  # past the retry backoff
+        await wait_until_async(svc.status, lambda s: s["jobs"]["done"] == 1)
+    finally:
+        stop.set()
+        await task
+    assert len(llm.calls) == 1
+    mems = {m.text: m for m in await svc.list(scope=None, status=None, project_id=None)}
+    ents = {e.name: e for e in await svc.store.run(svc.memory.list_entities)}
+    assert set(ents) == {"uv", "pip", "Fedora"}
+    assert ents["Fedora"].scope == Scope.SYSTEM
+    assert ents["uv"].memory_ids == ents["pip"].memory_ids == [mems["Prefers uv over pip"].id]
+    assert ents["Fedora"].memory_ids == [mems["Runs Fedora 44"].id]
+    assert mems["Prefers uv over pip"].entity_ids == sorted([ents["uv"].id, ents["pip"].id])
+    for e in ents.values():
+        assert [h.event for h in svc.memory.db.get_history(e.id)] == [HistoryEvent.ADD]

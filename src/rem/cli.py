@@ -41,6 +41,8 @@ def _parser() -> argparse.ArgumentParser:
     ls.add_argument("--scope", choices=SCOPES)
     ls.add_argument("--status", choices=STATUSES)
 
+    cmd("entities", "list entities")
+
     for name, help_ in [("get", "show one memory"), ("delete", "delete a memory"),
                         ("confirm", "mark a memory as confirmed by you"), ("history", "show a memory's history")]:
         cmd(name, help_).add_argument("id")
@@ -89,7 +91,9 @@ def _emit(args, value) -> None:
     if value is None:
         return
     for v in value if isinstance(value, list) else [value]:
-        if "event" in v:
+        if "memory_ids" in v:
+            print(f"{v['id']}  {v['name']}  {v['type']}  {len(v['memory_ids'])} memories")
+        elif "event" in v:
             print(history_line(v))
         elif "score" in v:
             print(search_line(v))
@@ -109,6 +113,8 @@ def _memory_command(args, cfg):
             return c.search(args.query, cwd, args.limit, args.scope)
         case "list":
             return c.list(args.scope, args.status)
+        case "entities":
+            return c.list_entities()
         case "get":
             return c.get(args.id)
         case "update":
@@ -303,7 +309,9 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     out = client.reembed_status()
                     text = "no reembed pending" if out is None else (
-                        f"pending: {out['model']} in {out['collection']}; run `rem reembed --finalize`")
+                        f"pending: {out['model']} in {out['collection']}"
+                        + (f" (entities in {out['entity_collection']})" if out.get("entity_collection") else "")
+                        + "; run `rem reembed --finalize`")
                 print(json.dumps(out) if args.json else text)
                 return 0
             case "start":
