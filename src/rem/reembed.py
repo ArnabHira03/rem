@@ -163,7 +163,8 @@ def finalize(mem: Memory) -> str:
     if pending.get("entity_collection") != entity_col:
         # a target recorded before M7 has no entity collection: record the one picked here (so a rerun after a
         # failure resumes it, not orphans it), then the sync below creates it and copies every entity
-        mem.db.set_meta(TARGET_KEY, json.dumps({**pending, "entity_collection": entity_col}))
+        pending = {**pending, "entity_collection": entity_col}
+        mem.db.set_meta(TARGET_KEY, json.dumps(pending))
     mem.vectors.create_col(entity_col, target.dims, sparse=False)
     _sync(mem, old_entity, entity_col, lambda pts: _embed_entities_into(mem, target, entity_col, pts))
     if pending.get("relation_collection") != relation_col:

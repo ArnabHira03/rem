@@ -330,3 +330,30 @@ def test_finalize_syncs_relations_written_after_the_copy(mem):
     reembed.finalize(mem)
     assert points(mem, mem.relation_col) == expected
     assert all(len(v) == 32 for v in vectors(mem, mem.relation_col).values())
+
+
+def test_pre_m7_pending_target_keeps_both_recorded_collections_when_finalize_fails(mem, monkeypatch):
+    with_relation(mem, "uv is preferred over pip", "uv", "pip")
+    reembed.run(mem, "hash-32")
+    pending = json.loads(mem.db.get_meta(reembed.TARGET_KEY))
+    mem.vectors.delete_col(pending.pop("entity_collection"))
+    mem.vectors.delete_col(pending.pop("relation_collection"))
+    mem.db.set_meta(reembed.TARGET_KEY, json.dumps(pending))
+    real = reembed._sync
+    calls = []
+
+    def flaky(m, src, dst, write):
+        calls.append(dst)
+        if len(calls) == 3:  # memories, entities, then the relation sync fails
+            raise RuntimeError("crash")
+        return real(m, src, dst, write)
+
+    monkeypatch.setattr(reembed, "_sync", flaky)
+    with pytest.raises(RuntimeError):
+        reembed.finalize(mem)
+    recorded = json.loads(mem.db.get_meta(reembed.TARGET_KEY))
+    assert recorded["entity_collection"] and recorded["relation_collection"]
+    monkeypatch.setattr(reembed, "_sync", real)
+    reembed.finalize(mem)
+    assert mem.entity_col == recorded["entity_collection"]
+    assert mem.relation_col == recorded["relation_collection"]
