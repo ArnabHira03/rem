@@ -372,3 +372,78 @@ def test_unlink_crash_never_leaves_relation_over_verified(mem, monkeypatch, how)
     act()
     rec = mem.get_relation(r.id)
     assert rec.memory_ids == [other.id] and rec.status == Status.UNVERIFIED
+
+
+# ---- searching relations by meaning ----
+
+def embedded_relation(mem, src, type, dst, **kw):
+    """insert_relation, but with the real vector of its sentence."""
+    rec = insert_relation(mem, src, type, dst, **kw)
+    mem.vectors.upsert(mem.relation_col, [VectorPoint(rec.id, mem.embedder.embed([rec.sentence])[0], rec.to_payload())])
+    return rec
+
+
+def test_search_relations_finds_by_sentence(mem):
+    uv = insert_entity(mem, name="uv", scope=Scope.GLOBAL, project_id=None)
+    pip = insert_entity(mem, name="pip", scope=Scope.GLOBAL, project_id=None)
+    qd = insert_entity(mem, name="Qdrant", scope=Scope.GLOBAL, project_id=None)
+    rem = insert_entity(mem, name="rem", scope=Scope.GLOBAL, project_id=None)
+    a = embedded_relation(mem, uv, "preferred_over", pip)
+    embedded_relation(mem, rem, "uses", qd)
+    got = mem.search_relations("uv preferred over pip")
+    assert got[0].id == a.id
+    assert got[0].score == pytest.approx(1.0, abs=1e-4)
+    assert (got[0].source, got[0].target) == ("uv", "pip")
+    with pytest.raises(Exception):
+        mem.search_relations("   ")
+
+
+def test_search_relations_other_project_needs_t_other(mem, monkeypatch, tmp_path):
+    from rem.storage.vector.base import ScoredPoint
+
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    pid = mem.db.upsert_project(str(root), "repo", None)
+    a = insert_entity(mem, name="rem", scope=Scope.PROJECT, project_id=pid)
+    b = insert_entity(mem, name="qdrant", scope=Scope.PROJECT, project_id=pid)
+    c = insert_entity(mem, name="foo", scope=Scope.PROJECT, project_id=pid + 1)
+    d = insert_entity(mem, name="bar", scope=Scope.PROJECT, project_id=pid + 1)
+    mine = insert_relation(mem, a, "uses", b)
+    theirs = insert_relation(mem, c, "uses", d)
+    pts = {r.id: ScoredPoint(r.id, 0.4, r.to_payload()) for r in (mine, theirs)}
+    monkeypatch.setattr(mem.vectors, "search", lambda col, vec, limit, filters=None: list(pts.values()))
+    assert [r.id for r in mem.search_relations("anything", cwd=root)] == [mine.id]
+    assert [r.id for r in mem.search_relations("anything")] == []  # no cwd: every project is "other"
+    pts[theirs.id] = ScoredPoint(theirs.id, 0.6, theirs.to_payload())
+    assert {r.id for r in mem.search_relations("anything", cwd=root)} == {mine.id, theirs.id}
+
+
+def test_search_relations_entity_filter_and_limit(mem):
+    uv = insert_entity(mem, name="uv", scope=Scope.GLOBAL, project_id=None)
+    pip = insert_entity(mem, name="pip", scope=Scope.GLOBAL, project_id=None)
+    poe = insert_entity(mem, name="poetry", scope=Scope.GLOBAL, project_id=None)
+    a = embedded_relation(mem, uv, "preferred_over", pip)
+    b = embedded_relation(mem, uv, "preferred_over", poe)
+    embedded_relation(mem, pip, "related_to", poe)
+    q = "uv preferred over pip"
+    assert len(mem.search_relations(q, limit=1)) == 1
+    got = mem.search_relations(q, entity="UV")
+    assert {r.id for r in got} == {a.id, b.id}
+    assert got[0].id == a.id
+    assert [r.id for r in mem.search_relations(q, entity="poetry", scope=Scope.GLOBAL)][0:1] in ([a.id], [b.id])
+    assert mem.search_relations(q, entity="nothing") == []
+
+
+def test_search_relations_does_not_change_memory_search(mem):
+    from tests.conftest import add
+
+    add(mem, "Prefers uv over pip")
+    add(mem, "Uses Qdrant for storage")
+    before = [(r.record.id, r.score) for r in mem.search("uv pip")]
+    uv = insert_entity(mem, name="uv", scope=Scope.GLOBAL, project_id=None)
+    pip = insert_entity(mem, name="pip", scope=Scope.GLOBAL, project_id=None)
+    embedded_relation(mem, uv, "preferred_over", pip)
+    mem.search_relations("uv pip")
+    after = [(r.record.id, r.score) for r in mem.search("uv pip")]  # scores drift by recency only
+    assert [i for i, _ in after] == [i for i, _ in before]
+    assert [s for _, s in after] == pytest.approx([s for _, s in before], abs=1e-6)

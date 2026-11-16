@@ -41,7 +41,7 @@ from rem.models import (
 )
 from rem.relations import derive_trust, normalize_type, relation_id, relation_sentence
 from rem.projects import ProjectInfo, project_root, resolve_project
-from rem.retrieve import cosine, fuse, overfetch, score_and_rank
+from rem.retrieve import T_BASE, T_OTHER, cosine, fuse, overfetch, score_and_rank
 from rem.storage.sqlite import RemDB
 from rem.storage.vector.base import VectorPoint, VectorStore
 from rem.storage.vector.factory import create_vector_store
@@ -179,16 +179,46 @@ class Memory:
                    {"scope": scope, "project_id": project_id}.items() if v is not None}
         records = [RelationRecord.from_payload(p.payload) for p in self.vectors.list_points(self.relation_col, filters)]
         if entity is not None:
-            wanted = normalize_name(entity)
-            kept = []
-            for r in records:
-                ends = (self.get_entity(r.source_entity_id), self.get_entity(r.target_entity_id))
-                if any(e is not None and (e.normalized == wanted or any(normalize_name(a) == wanted for a in e.aliases))
-                       for e in ends):
-                    kept.append(r)
-            records = kept
+            records = self._relations_naming(records, entity)
         results = [self._relation_result(r) for r in records]
         return sorted(results, key=lambda r: (r.source.casefold(), r.type, r.target.casefold(), r.id))
+
+    def _relations_naming(self, records: list[RelationRecord], entity: str) -> list[RelationRecord]:
+        """The relations with an end whose name or an alias normalizes to `entity`."""
+        wanted = normalize_name(entity)
+        kept = []
+        for r in records:
+            ends = (self.get_entity(r.source_entity_id), self.get_entity(r.target_entity_id))
+            if any(e is not None and (e.normalized == wanted or any(normalize_name(a) == wanted for a in e.aliases))
+                   for e in ends):
+                kept.append(r)
+        return kept
+
+    def search_relations(
+        self,
+        query: str,
+        *,
+        cwd: Path | None = None,
+        limit: int = 10,
+        scope: Scope | None = None,
+        entity: str | None = None,
+    ) -> list[RelationResult]:
+        """Relations whose sentence is close in meaning to the query: dense cosine only, no boost. Read-only."""
+        normalize_text(query)  # rejects empty queries
+        current = self.db.find_project(str(project_root(cwd))) if cwd is not None else None
+        filters = {"scope": str(scope)} if scope else None
+        hits = self.vectors.search(self.relation_col, self.embedder.embed_query(query), overfetch(limit), filters)
+        kept: list[tuple[RelationRecord, float]] = []
+        for h in hits:
+            rec = RelationRecord.from_payload(h.payload)
+            other = rec.scope == Scope.PROJECT and rec.project_id != current
+            if h.score >= (T_OTHER if other else T_BASE):
+                kept.append((rec, h.score))
+        if entity is not None:
+            ok = {r.id for r in self._relations_naming([r for r, _ in kept], entity)}
+            kept = [(r, s) for r, s in kept if r.id in ok]
+        kept.sort(key=lambda rs: -rs[1])
+        return [self._relation_result(r, score) for r, score in kept[:limit]]
 
     def _relation_result(self, rec: RelationRecord, score: float | None = None) -> RelationResult:
         src = self.get_entity(rec.source_entity_id)
