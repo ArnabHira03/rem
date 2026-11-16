@@ -143,3 +143,26 @@ def test_prompt_defines_scopes_by_subject():
     assert '"system": facts true of this machine regardless of who asks' in s
     assert '"project": only the current repository' in s
     assert "If unsure between global and system for a preference, use global." in s
+
+
+def test_extract_drops_invalid_mentions_and_keeps_the_fact():
+    out = {"facts": [{"text": "Uses uv", "scope": "global", "origin": "user", "restates": None,
+                      "entities": [{"name": "", "type": "tool"}, {"name": "uv", "type": "Tool"},
+                                   {"name": "x" * 81, "type": "tool"}, "bare"]}]}
+    [c] = extract(FakeLLM([out]), T, [], [], 20).candidates
+    assert c.text == "Uses uv" and [(m.name, m.type) for m in c.entities] == [("uv", "tool")]
+
+
+def test_extract_missing_entities_key_means_no_mentions():
+    out = {"facts": [{"text": "Uses uv", "scope": "global", "origin": "user", "restates": None}]}
+    [c] = extract(FakeLLM([out]), T, [], [], 20).candidates
+    assert c.entities == []
+
+
+def test_schema_requires_entities_and_prompt_lists_types():
+    item = EXTRACTION_SCHEMA["properties"]["facts"]["items"]
+    assert "entities" in item["required"]
+    assert set(item["properties"]["entities"]["items"]["required"]) == {"name", "type"}
+    system, _ = build_prompt(T, [], [])
+    for t in ("person", "tool", "project", "language", "org", "place", "concept"):
+        assert t in system

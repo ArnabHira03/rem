@@ -1,8 +1,12 @@
 import uuid
 
 import pytest
+from pydantic import ValidationError
 
 from rem.models import (
+    Candidate,
+    EntityMention,
+    EntityRecord,
     MemoryRecord,
     Provenance,
     Scope,
@@ -81,3 +85,24 @@ def test_memory_does_not_import_extract():
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert out == "False"
+
+
+def test_candidate_entities_default_empty_and_parse():
+    c = Candidate(text="Uses uv", scope="global", origin="user")
+    assert c.entities == []
+    c2 = Candidate(text="Uses uv", scope="global", origin="user", entities=[{"name": " uv ", "type": "Tool"}])
+    assert c2.entities == [EntityMention(name="uv", type="tool")]
+    assert EntityMention(name="uv").type == "concept"
+
+
+def test_mention_rejects_empty_and_overlong_names():
+    with pytest.raises(ValidationError):
+        EntityMention(name="   ", type="tool")
+    with pytest.raises(ValidationError):
+        EntityMention(name="x" * 81, type="tool")
+
+
+def test_entity_record_payload_roundtrip():
+    e = EntityRecord(id="e1", name="uv", normalized="uv", type="tool", aliases=["UV"], scope=Scope.GLOBAL,
+                     project_id=None, memory_ids=["m1"], created_at=utcnow(), updated_at=utcnow())
+    assert EntityRecord.from_payload(e.to_payload()) == e
