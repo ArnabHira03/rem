@@ -85,3 +85,12 @@ def test_search_filters_on_payload_id(store):
     [hit] = store.search("c", [1, 0, 0], 1, {"id": ID2, "scope": "global"})
     assert hit.id == ID2 and hit.score == pytest.approx(0.6, abs=1e-6)
     assert store.search("c", [1, 0, 0], 1, {"id": ID2, "scope": "system"}) == []
+
+
+def test_list_points_returns_all_beyond_a_page(store, monkeypatch):
+    monkeypatch.setattr("rem.storage.vector.qdrant.SCROLL_PAGE", 7)
+    store.upsert("c", [
+        VectorPoint(f"00000000-0000-0000-0000-{i:012d}", [1, 0, 0], {"scope": "global"}) for i in range(1, 26)
+    ])
+    assert len(store.list_points("c")) == 25
+    assert len(store.list_points("c", limit=3)) == 3

@@ -6,6 +6,8 @@ from qdrant_client import models as qm
 from rem.errors import StoreLockedError
 from rem.storage.vector.base import Filters, ScoredPoint, VectorPoint, VectorStore
 
+SCROLL_PAGE = 1000  # points per scroll request; list_points pages until exhausted
+
 
 def _to_filter(filters: Filters | None) -> qm.Filter | None:
     if not filters:
@@ -79,9 +81,19 @@ class QdrantVectorStore(VectorStore):
     def delete(self, col, ids):
         self._client.delete(col, points_selector=qm.PointIdsList(points=ids))
 
-    def list_points(self, col, filters=None, limit=10_000):
-        points, _ = self._client.scroll(col, scroll_filter=_to_filter(filters), limit=limit, with_payload=True)
-        return [VectorPoint(str(p.id), None, dict(p.payload or {})) for p in points]
+    def list_points(self, col, filters=None, limit=None):
+        flt = _to_filter(filters)
+        out: list[VectorPoint] = []
+        offset = None
+        while limit is None or len(out) < limit:
+            page = SCROLL_PAGE if limit is None else min(SCROLL_PAGE, limit - len(out))
+            points, offset = self._client.scroll(
+                col, scroll_filter=flt, limit=page, offset=offset, with_payload=True
+            )
+            out.extend(VectorPoint(str(p.id), None, dict(p.payload or {})) for p in points)
+            if offset is None:
+                break
+        return out
 
     def close(self) -> None:
         self._client.close()
