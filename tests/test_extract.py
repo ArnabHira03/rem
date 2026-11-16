@@ -133,3 +133,13 @@ def test_prompt_marks_status_and_explains_unverified():
     s, u = build_prompt(T, [], [unverified])
     assert "[0] (global, unverified) Uses Poetry" in u
     assert "unverified" in s and "verified" in s
+
+
+def test_prompt_defines_scopes_by_subject():
+    s, _ = build_prompt([Turn("user", "x")], [], [])
+    assert '"global": the person.' in s
+    assert 'even when the tool is software' in s
+    assert 'only a fact the user ties to this repository' in s
+    assert '"system": facts true of this machine regardless of who asks' in s
+    assert '"project": only the current repository' in s
+    assert "If unsure between global and system for a preference, use global." in s

@@ -47,8 +47,15 @@ their projects. Skip chit-chat, transient task state, and anything a secret plac
 [REDACTED:...] stands for.
 2. Write each fact as one standalone sentence in the third person, for example \
 "Prefers uv over pip".
-3. Set "scope" to one of: "global" (about the person), "system" (about this machine or OS), \
-"project" (about the current repository).
+3. Set "scope" by what the fact is ABOUT, not by what it mentions:
+   - "global": the person. Their preferences, habits and the tools they choose to use anywhere, \
+even when the tool is software (e.g. "Uses fish shell", "Prefers uv over pip"). A preference stays global even \
+when it is voiced while working in a repository: only a fact the user ties to this repository \
+is "project". If unsure between \
+global and system for a preference, use global.
+   - "system": facts true of this machine regardless of who asks: OS, hardware, installed \
+versions, paths, running services.
+   - "project": only the current repository: its stack, layout, commands and conventions.
 4. Set "origin" to one of: "user" (the user stated it), "assistant" (the assistant asserted or \
 inferred it and the user did not confirm it). Never use "tool"; tool output is not provided.
 5. Existing memories are listed with integer ids and a status. Do not restate memories marked \
