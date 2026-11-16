@@ -13,7 +13,7 @@ from pathlib import Path
 
 from rem.config import DaemonConfig
 from rem.models import utcnow
-from rem.projects import resolve_project
+from rem.projects import ProjectInfo, resolve_project
 from rem.redact import redact
 from rem.storage.sqlite import RemDB
 
@@ -61,9 +61,10 @@ class IngestStore:
     # ---- ingest -------------------------------------------------------------
 
     def ingest(self, source: str, session_id: str, cwd: Path | None, turns: list[Turn],
-               enqueue: bool = True) -> IngestResult:
+               enqueue: bool = True, project: ProjectInfo | None = None) -> IngestResult:
         project_id = None
-        if cwd is not None:
+        info = project
+        if cwd is not None and info is None:
             info = resolve_project(cwd)
         now, stamp = self.clock(), utcnow()
         self.conn.execute("BEGIN IMMEDIATE")

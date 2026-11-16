@@ -30,7 +30,7 @@ from rem.models import (
     text_hash,
     utcnow,
 )
-from rem.projects import resolve_project
+from rem.projects import ProjectInfo, project_root, resolve_project
 from rem.retrieve import overfetch, rank
 from rem.storage.sqlite import RemDB
 from rem.storage.vector.base import VectorPoint, VectorStore
@@ -114,7 +114,7 @@ class Memory:
         normalize_text(query)  # rejects empty queries
         current = None
         if cwd is not None:  # search never registers new projects
-            current = self.db.find_project(resolve_project(cwd).root_path)
+            current = self.db.find_project(str(project_root(cwd)))
         hits = self.vectors.search(
             self.col,
             self.embedder.embed_query(query),
@@ -126,7 +126,7 @@ class Memory:
 
     def context(self, cwd: Path | None, max_chars: int) -> ContextResult:
         """Verified memories for SessionStart: current project, then system, then global; read-only."""
-        current = self.db.find_project(resolve_project(cwd).root_path) if cwd is not None else None
+        current = self.db.find_project(str(project_root(cwd))) if cwd is not None else None
         verified = self.list(status=Status.VERIFIED)
         sections: list[tuple[str, list[MemoryRecord]]] = []
         if current is not None:
@@ -185,6 +185,7 @@ class Memory:
         *,
         scope: Scope,
         cwd: Path | None = None,
+        project: ProjectInfo | None = None,
         provenance: Provenance,
         status: Status,
         source: str,
@@ -204,8 +205,8 @@ class Memory:
             if project is None:
                 raise ValueError(f"unknown project id {project_id}")
             project_name = project[1]
-        elif cwd is not None:
-            info = resolve_project(cwd)
+        elif project is not None or cwd is not None:
+            info = project if project is not None else resolve_project(cwd)
             project_id = self.db.upsert_project(info.root_path, info.name, info.git_remote)
             project_name = info.name
         else:

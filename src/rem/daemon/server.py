@@ -22,6 +22,7 @@ from rem.daemon.extraction import ExtractionHandler
 from rem.daemon.worker import JobHandler, Worker
 from rem.errors import RemError
 from rem.llm.factory import create_llm
+from rem.projects import resolve_project
 from rem.spool import drain_spool, spool_count
 
 EXIT_OK, EXIT_ALREADY_RUNNING, EXIT_CONFIG = 0, 2, 3
@@ -90,8 +91,10 @@ def _drain(service: RemService, cfg: RemConfig) -> None:
 
     def ingest(body: dict) -> None:
         b = IngestBody.model_validate(body)  # same validation as POST /ingest; ValueError -> spool/bad/
-        service.store.call(service.ingest_store.ingest, b.source, b.session_id, b.cwd_path(),
-                           b.turns_for_ingest(), b.enqueue)
+        cwd = b.cwd_path()
+        project = resolve_project(cwd) if cwd is not None else None  # git runs here, not on the store thread
+        service.store.call(service.ingest_store.ingest, b.source, b.session_id, cwd,
+                           b.turns_for_ingest(), b.enqueue, project)
 
     drained = drain_spool(cfg.data_dir, ingest)
     if drained:

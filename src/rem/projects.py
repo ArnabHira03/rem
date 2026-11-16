@@ -10,10 +10,15 @@ class ProjectInfo:
     git_remote: str | None
 
 
-def resolve_project(cwd: Path) -> ProjectInfo:
-    """The project a directory belongs to: its git root, or the directory itself outside git."""
+def project_root(cwd: Path) -> Path:
+    """The git root containing cwd, or cwd itself outside git. Filesystem only, no subprocess."""
     start = cwd.resolve()
-    root = next((d for d in (start, *start.parents) if (d / ".git").exists()), start)
+    return next((d for d in (start, *start.parents) if (d / ".git").exists()), start)
+
+
+def resolve_project(cwd: Path) -> ProjectInfo:
+    """The project a directory belongs to, with its origin remote (runs git: never call on the store thread)."""
+    root = project_root(cwd)
     remote = None
     if (root / ".git").exists():
         try:

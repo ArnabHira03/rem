@@ -101,3 +101,34 @@ def test_store_calls_run_on_one_thread(cfg):
     asyncio.run(go())
     svc.close()
     assert len(names) == 1 and next(iter(names)).startswith("rem-store")
+
+
+async def test_store_thread_never_runs_git(cfg, tmp_path, monkeypatch):
+    import subprocess as sp
+
+    import rem.projects as projects
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", str(repo)], check=True)
+    sp.run(["git", "-C", str(repo), "remote", "add", "origin", "https://example.com/r.git"], check=True)
+    real_run, names = sp.run, []
+
+    def recorder(*a, **k):
+        names.append(threading.current_thread().name)
+        return real_run(*a, **k)
+
+    monkeypatch.setattr(projects.subprocess, "run", recorder)
+    svc = RemService(cfg)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(svc)), base_url="http://rem") as c:
+            r = await c.post("/memories", json={"text": "Uses ruff here", "scope": "project", "cwd": str(repo)})
+            assert r.status_code == 201
+            assert (await c.post("/search", json={"query": "ruff", "cwd": str(repo)})).status_code == 200
+            assert (await c.post("/context", json={"cwd": str(repo)})).status_code == 200
+            body = {"source": "claude-code", "session_id": "s1", "cwd": str(repo),
+                    "turns": [{"role": "user", "content": "hi", "message_id": "m1"}]}
+            assert (await c.post("/ingest", json=body)).status_code == 202
+    finally:
+        svc.close()
+    assert names and not any(n.startswith("rem-store") for n in names)

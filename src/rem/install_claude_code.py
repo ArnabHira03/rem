@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from rem.errors import RemError
-from rem.projects import resolve_project
+from rem.projects import project_root
 
 MARKER = " -m rem hook claude-code"
 EVENTS = {"SessionStart": 10, "UserPromptSubmit": 10, "Stop": 10, "SessionEnd": 5}
@@ -15,7 +15,7 @@ EVENTS = {"SessionStart": 10, "UserPromptSubmit": 10, "Stop": 10, "SessionEnd": 
 
 def settings_path(project: bool, cwd: Path) -> Path:
     if project:
-        return Path(resolve_project(cwd).root_path) / ".claude" / "settings.local.json"
+        return project_root(cwd) / ".claude" / "settings.local.json"
     return Path((os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")).expanduser() / "settings.json"
 
 
