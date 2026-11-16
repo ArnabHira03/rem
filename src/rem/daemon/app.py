@@ -117,6 +117,8 @@ def build_app(service: RemService) -> Starlette:
             limit = int(q.get("limit", 10))
         except ValueError:
             raise ValueError("limit must be an integer") from None
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
         return _json(await service.relations(
             query=q.get("query"), entity=q.get("entity") or None,
             scope=Scope(q["scope"]) if q.get("scope") else None, limit=limit, cwd=_path(q.get("cwd")),

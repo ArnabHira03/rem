@@ -248,3 +248,9 @@ async def test_relations_endpoint_lists_and_searches(cfg):
 async def test_relations_endpoint_bad_scope_and_limit_are_400(api):
     assert (await api.get("/relations", params={"scope": "nope"})).status_code == 400
     assert (await api.get("/relations", params={"query": "x", "limit": "abc"})).status_code == 400
+
+
+async def test_relations_endpoint_limit_is_bounded(api):
+    for bad in ("0", "-1", "101"):
+        assert (await api.get("/relations", params={"query": "x", "limit": bad})).status_code == 400
+    assert (await api.get("/relations", params={"query": "x", "limit": "100"})).status_code == 200

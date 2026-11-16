@@ -447,3 +447,109 @@ def test_search_relations_does_not_change_memory_search(mem):
     after = [(r.record.id, r.score) for r in mem.search("uv pip")]  # scores drift by recency only
     assert [i for i, _ in after] == [i for i, _ in before]
     assert [s for _, s in after] == pytest.approx([s for _, s in before], abs=1e-6)
+
+
+# ---- final-review fixes ----
+
+def test_unverifying_update_crash_never_leaves_relation_over_verified(mem, monkeypatch):
+    r = one_relation(mem, origin="user")
+    assert r.status == "verified"
+    (m,) = mem.list()
+    real = mem.vectors.upsert
+    state = {"boom": True}
+
+    def flaky(col, points):
+        if col == mem.col and state["boom"]:
+            state["boom"] = False
+            raise RuntimeError("crash")
+        return real(col, points)
+
+    monkeypatch.setattr(mem.vectors, "upsert", flaky)
+    with pytest.raises(RuntimeError):
+        mem.update(m.id, m.text, actor="mcp", unverify=True)
+    # the memory write never landed; the relation must not be verified on an unverified-only claim
+    assert mem.get_relation(r.id).status != Status.VERIFIED or mem.get(m.id).status == Status.VERIFIED
+    mem.update(m.id, m.text, actor="mcp", unverify=True)
+    assert mem.get(m.id).status == Status.UNVERIFIED
+    assert mem.get_relation(r.id).status == Status.UNVERIFIED
+
+
+def test_unverifying_update_crash_after_memory_write_is_safe(mem, monkeypatch):
+    r = one_relation(mem, origin="user")
+    (m,) = mem.list()
+
+    real = mem.db.add_history
+
+    def boom(kind, *a, **kw):
+        if kind == TargetKind.MEMORY:
+            raise RuntimeError("crash")
+        return real(kind, *a, **kw)
+
+    monkeypatch.setattr(mem.db, "add_history", boom)
+    with pytest.raises(RuntimeError):
+        mem.update(m.id, m.text, actor="mcp", unverify=True)
+    assert mem.get(m.id).status == Status.UNVERIFIED
+    assert mem.get_relation(r.id).status == Status.UNVERIFIED
+
+
+def test_confirm_on_already_confirmed_memory_repairs_relation(mem):
+    r = one_relation(mem)
+    assert r.status == "unverified"
+    (m,) = mem.list()
+    # simulate a crash after the confirm payload write, before the relation refresh
+    mem.vectors.update_payload(mem.col, m.id, {"provenance": "user_confirmed", "status": "verified"})
+    assert mem.get_relation(r.id).status == Status.UNVERIFIED
+    mem.confirm(m.id, actor="cli")
+    assert mem.get_relation(r.id).status == Status.VERIFIED
+
+
+def test_search_relations_entity_filter_not_crowded_out(mem, monkeypatch):
+    from rem.retrieve import overfetch
+    from rem.storage.vector.base import ScoredPoint
+
+    uv = insert_entity(mem, name="uv", scope=Scope.GLOBAL, project_id=None)
+    pip = insert_entity(mem, name="pip", scope=Scope.GLOBAL, project_id=None)
+    mine = insert_relation(mem, uv, "uses", pip)
+    others = []
+    for i in range(overfetch(5) + 10):
+        a = insert_entity(mem, name=f"a{i}", scope=Scope.GLOBAL, project_id=None)
+        b = insert_entity(mem, name=f"b{i}", scope=Scope.GLOBAL, project_id=None)
+        others.append(insert_relation(mem, a, "uses", b))
+    ranked = [ScoredPoint(r.id, 0.9, r.to_payload()) for r in others] + [ScoredPoint(mine.id, 0.5, mine.to_payload())]
+    monkeypatch.setattr(mem.vectors, "search", lambda col, vec, limit, filters=None: ranked[:limit])
+    assert [r.id for r in mem.search_relations("anything", entity="uv", limit=5)] == [mine.id]
+
+
+def test_add_row_repaired_after_delete_and_recreate_in_later_job(mem, monkeypatch):
+    r = one_relation(mem, job_key="job:1")
+    (m,) = mem.list()
+    mem.delete(m.id, actor="cli")
+    assert mem.get_relation(r.id) is None
+    c = [rcand("uv runs Python scripts", ["uv", "Python"], REL, origin="assistant")]
+    real = mem.db.add_history
+    state = {"boom": True}
+
+    def flaky(kind, *a, **kw):
+        if kind == TargetKind.RELATION and state["boom"]:
+            state["boom"] = False
+            raise RuntimeError("crash")
+        return real(kind, *a, **kw)
+
+    monkeypatch.setattr(mem.db, "add_history", flaky)
+    with pytest.raises(RuntimeError):
+        apply(mem, c, job_key="job:3")
+    apply(mem, c, job_key="job:3")
+    assert (TargetKind.RELATION, HistoryEvent.ADD, "job:3") in rhist(mem, r.id)
+
+
+def test_context_is_unchanged_by_relations(mem):
+    base = [rcand("Prefers uv over pip", ["uv", "pip"], []), rcand("Uses Python", ["Python"], [], scope="system")]
+    apply(mem, base, job_key="job:1")
+    before = mem.context(None, 1600)
+    withrel = [rcand("Prefers uv over pip", ["uv", "pip"], [("uv", "preferred_over", "pip")]),
+               rcand("Uses Python", ["Python"], [], scope="system")]
+    apply(mem, withrel, job_key="job:2")
+    assert mem.list_relations() == [] or len(mem.list_relations()) == 1
+    assert len(mem.list_relations()) == 1
+    assert mem.context(None, 1600) == before
+    assert before.count == 2

@@ -56,6 +56,7 @@ ACTIVE_ENTITY_COLLECTION_KEY = "active_entity_collection"  # set by reembed; def
 ACTIVE_MODEL_KEY = "active_model"  # the model string the active embedder was built from
 TARGET_KEY = "reembed_target"  # JSON {"collection", "slug", "model", "entity_collection"} while a reembed is pending
 MAX_PENDING_CONFIRMATIONS = 10  # requests one job checks, newest first
+ENTITY_SEARCH_FETCH = 10_000  # relation search with an entity filter looks at (nearly) the whole bucket
 
 
 @dataclass
@@ -207,7 +208,9 @@ class Memory:
         normalize_text(query)  # rejects empty queries
         current = self.db.find_project(str(project_root(cwd))) if cwd is not None else None
         filters = {"scope": str(scope)} if scope else None
-        hits = self.vectors.search(self.relation_col, self.embedder.embed_query(query), overfetch(limit), filters)
+        # with an entity named, look at the whole bucket: its relations must not be crowded out by closer ones
+        fetch = ENTITY_SEARCH_FETCH if entity is not None else overfetch(limit)
+        hits = self.vectors.search(self.relation_col, self.embedder.embed_query(query), fetch, filters)
         kept: list[tuple[RelationRecord, float]] = []
         for h in hits:
             rec = RelationRecord.from_payload(h.payload)
@@ -446,15 +449,19 @@ class Memory:
         if unverify:
             changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED, "agent_claim": True}
         record = old.model_copy(update=changes)
+        if unverify and "entity_ids" not in changes:
+            # relations first, with the new (unverified) record standing in for this memory: a crash
+            # before the upsert leaves them under-verified, never verified on an unverified-only claim
+            self._refresh_relations(id, record.scope, record.project_id, actor, override=record)
         self.vectors.upsert(self.col, [self._point(id, text, record)])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)
-        if unverify and "entity_ids" not in changes:
-            self._refresh_relations(id, record.scope, record.project_id, actor)
         return record
 
     def confirm(self, id: str, *, actor: str) -> MemoryRecord:
         old = self._require(id)
         if old.provenance == Provenance.USER_CONFIRMED and old.status == Status.VERIFIED:
+            # idempotent: a crash after the payload write left the relations stale; repair them
+            self._refresh_relations(id, old.scope, old.project_id, actor)
             return old
         confirmed = old.model_copy(
             update={"provenance": Provenance.USER_CONFIRMED, "status": Status.VERIFIED, "updated_at": utcnow(),
@@ -708,26 +715,44 @@ class Memory:
                 now = utcnow()
                 self.vectors.update_payload(self.relation_col, rid, {"memory_ids": ids, "updated_at": now})
                 existing = existing.model_copy(update={"memory_ids": ids, "updated_at": now})
-            if not any(h.event == HistoryEvent.ADD for h in self.db.get_history(rid)):
-                # a crash between the relation upsert and its ADD row: repair the row on replay
+            if self._lacks_add_row(rid):
+                # a crash between the relation upsert and its ADD row (also after a delete and a re-create
+                # in a later job): the current life of the relation has no ADD row, so repair it on replay
                 self.db.add_history(
                     TargetKind.RELATION, rid, HistoryEvent.ADD, None, existing.sentence, actor, job_key)
             self._apply_trust(existing, actor, job_key)
         return added
 
-    def _evidence(self, rec: RelationRecord, exclude: str | None = None) -> list[MemoryRecord]:
-        """The evidence memories of a relation that still exist (never `exclude`, a memory about to go)."""
+    def _lacks_add_row(self, rid: str) -> bool:
+        """True when the relation's current life (the rows after its last DELETE) has no ADD row."""
+        life: list[HistoryEvent] = []
+        for h in self.db.get_history(rid):
+            if h.event == HistoryEvent.DELETE:
+                life = []
+            else:
+                life.append(h.event)
+        return HistoryEvent.ADD not in life
+
+    def _evidence(
+        self, rec: RelationRecord, exclude: str | None = None, override: MemoryRecord | None = None
+    ) -> list[MemoryRecord]:
+        """The evidence memories of a relation that still exist (never `exclude`, a memory about to go).
+        `override` stands in for the stored copy of its memory (a write that has not landed yet)."""
         ids = [m for m in rec.memory_ids if m != exclude]
         found = self.vectors.get(self.col, ids) if ids else []
-        return [MemoryRecord.from_payload(p.payload) for p in found]
+        recs = [MemoryRecord.from_payload(p.payload) for p in found]
+        if override is not None:
+            recs = [override if m.id == override.id else m for m in recs]
+        return recs
 
     def _apply_trust(
-        self, rec: RelationRecord, actor: str, job_id: str | None, exclude: str | None = None
+        self, rec: RelationRecord, actor: str, job_id: str | None, exclude: str | None = None,
+        override: MemoryRecord | None = None,
     ) -> RelationRecord | None:
         """Recompute a relation's status and provenance from its evidence. With no evidence left the
         point is deleted (DELETE row) and None returned. A status change writes the payload first, then
         its CORROBORATE or UPDATE row; otherwise the payload is written only if it differs."""
-        evidence = self._evidence(rec, exclude)
+        evidence = self._evidence(rec, exclude, override)
         if not evidence:
             self.vectors.delete(self.relation_col, [rec.id])
             self.db.add_history(TargetKind.RELATION, rec.id, HistoryEvent.DELETE, rec.sentence, None, actor, job_id)
@@ -748,11 +773,13 @@ class Memory:
         return new
 
     def _refresh_relations(
-        self, memory_id: str, scope: Scope, project_id: int | None, actor: str, job_id: str | None = None
+        self, memory_id: str, scope: Scope, project_id: int | None, actor: str, job_id: str | None = None,
+        override: MemoryRecord | None = None,
     ) -> None:
-        """Recompute the trust of every relation this memory evidences (after its own payload changed)."""
+        """Recompute the trust of every relation this memory evidences (after its own payload changed,
+        or before it does, with `override` as the new record)."""
         for rel in self.relations_for(memory_id, scope, project_id):
-            self._apply_trust(rel, actor, job_id)
+            self._apply_trust(rel, actor, job_id, override=override)
 
     def _unlink_relations(self, memory_id: str, scope: Scope, project_id: int | None, actor: str) -> None:
         """Remove a memory from the evidence of its relations; one left with none is deleted.
