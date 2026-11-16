@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-rem is a local-first personal memory layer for AI agents, modelled on Mem0. Python 3.14, uv, `uv_build` backend, code in `src/rem/`. **M1 (core storage + Memory façade), M2 (daemon), M3 (LLM extraction) and M4 (Claude Code adapter) are implemented.** The CLI is a thin client of the daemon and starts it automatically. Later milestones (MCP, BM25, entities, …) are not built yet.
+rem is a local-first personal memory layer for AI agents, modelled on Mem0. Python 3.14, uv, `uv_build` backend, code in `src/rem/`. **M1 (core storage + Memory façade), M2 (daemon), M3 (LLM extraction), M4 (Claude Code adapter) and M5 (MCP shim) are implemented.** The CLI is a thin client of the daemon and starts it automatically. Later milestones (BM25, entities, …) are not built yet.
 
 The **approved design (rev 2)** is `docs/superpowers/specs/2026-11-15-rem-design.md`, with diagrams in `docs/superpowers/specs/2026-11-15-rem-architecture.html`. It is implemented milestone by milestone (M1 → M9). Background notes are in `plans/initial_plan.md` and `plans/Mem0 Memory Pipeline - Claude.pdf`; `plans/` is **gitignored** and local only.
 
@@ -21,7 +21,8 @@ Each milestone gets its own implementation plan before any code is written.
 - `uv run rem eval extraction [--dataset PATH] [--limit N] [--json]`: score the configured LLM on the extraction dataset (`src/rem/evals/data/extraction.jsonl`). It runs in-process against throwaway stores, never contacts the daemon, and calls the LLM for every case, so it costs money with a remote provider. Exits 3 with no `[llm]` or without `allow_remote`.
 - `uv run rem retry-failed`: requeue extraction jobs that used up their attempts (e.g. after fixing the LLM config or key). They go back to `pending` with attempts reset; they kept their turns and any cached extraction, so a retry only re-runs what failed.
 - `uv run rem start|stop|status|daemon|install-service [--enable]`: daemon lifecycle (`daemon` runs it in the foreground; `install-service` writes the systemd user unit). `rem status` also prints `claude_code_hooks:` (where the hooks are installed, or `none`) and `spooled: N` (hook turns waiting in the spool), even with the daemon down.
-- `uv run rem install claude-code [--project] [--uninstall] [--dry-run]`: add (or remove) rem's hooks in Claude Code settings (user settings by default, `--project` for `<git root>/.claude/settings.local.json`). `rem hook claude-code` is the internal command those hooks run; don't call it by hand. It doesn't need a valid rem config. When the systemd unit isn't installed it prints a tip to run `rem install-service --enable`: without the unit the first session after boot gets no SessionStart context (the hook only starts the daemon, it never waits for it).
+- `uv run rem mcp`: the stdio MCP server. Claude Code runs it; don't call it by hand. It is a thin client of the daemon (auto-starts it) and writes only JSON-RPC lines to stdout.
+- `uv run rem install claude-code [--project] [--uninstall] [--dry-run]`: add (or remove) rem's hooks in Claude Code settings (user settings by default, `--project` for `<git root>/.claude/settings.local.json`). It also registers the `rem` MCP server through `claude mcp add` (user scope, or local scope with `--project`), or prints the command to run when `claude` isn't on PATH; `--uninstall` removes it. `rem hook claude-code` is the internal command those hooks run; don't call it by hand. It doesn't need a valid rem config. When the systemd unit isn't installed it prints a tip to run `rem install-service --enable`: without the unit the first session after boot gets no SessionStart context (the hook only starts the daemon, it never waits for it).
 - Config for extraction: `[llm]` (`provider` = `none`|`anthropic`|`openai`|`ollama`, `model`, `base_url`, `api_key_env`, `timeout_seconds`, `effort`, `think`, `allow_remote`; `think = false` turns off model thinking on openai/ollama by sending `reasoning_effort: "none"`, e.g. for `qwen3.5:4b`) and `[extraction]` (`restate_min_similarity`, `related_limit`, `max_candidates`). A non-loopback endpoint (including the Anthropic API) needs `allow_remote = true`. API keys come only from environment variables, never from config: the one named by `api_key_env`, else `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, with no fallback from a custom name to the default. Anthropic, and OpenAI at a non-loopback endpoint, without a key exit 3 at startup.
 - Set `REM_HOME=<dir>` (data), `REM_CONFIG=<file>` (config) **and `REM_SOCKET=<short path>`** to run against a throwaway store. Without `REM_SOCKET` you talk to the real daemon at `$XDG_RUNTIME_DIR/rem.sock`. The config can set `[embedder] provider = "hashing"` for an offline embedder, and `[vector_store] provider = "memory"`.
 
@@ -33,7 +34,7 @@ There is no lint or format tooling configured.
 
 Read the design spec for the details. These are the invariants that span modules:
 
-- **What exists (M1–M4):**
+- **What exists (M1–M5):**
   - `rem.daemon.server.run_daemon` runs uvicorn on a socket rem binds itself, never uvicorn's `uds=`, because uvicorn chmods that to 0666.
   - Every `Memory` and `RemDB` call goes through `StoreThread`, a single thread that is the single writer.
   - `/ingest` stores redacted turns and a debounced per-session job (`storage/queue.py`).
@@ -47,6 +48,15 @@ Read the design spec for the details. These are the invariants that span modules
     - If the daemon is down (or the ingest fails other than as invalid), the hook writes the `/ingest` body to `<data_dir>/spool/` (dir 0700, files 0600, at most 1000 files, then `SpoolFull`). On a connection failure (not a timeout) it also starts the daemon in the background, at most once a minute (`<data_dir>/daemon-start.stamp`; the CLI's auto-start ignores this). The daemon drains the spool at startup (right after interrupted jobs are recovered), when it begins serving and then every 30 s (`SPOOL_POLL_SECONDS`) while files are waiting; unparseable or invalid files go to `spool/bad/`.
     - rem creates its data dir 0700 and `daemon.log`/`hook.log` 0600 whatever the umask (`rem.config.ensure_private_dir`).
     - `SessionStart` prints `POST /context` output: verified memories only, no other projects', ordered project, then system, then global (newest first), whole lines only, within `context_max_chars`. No memories means no output. The other events print nothing.
+  - **MCP shim (M5):** `rem mcp` is a hand-rolled stdio JSON-RPC server with no MCP SDK (`rem/mcp/protocol.py` is the protocol layer, `rem/mcp/tools.py` the tools). The 7 tools (`search_memory`, `list_memories`, `add_memory`, `confirm_memory`, `update_memory`, `delete_memory`, `memory_history`) are thin `RemClient` calls.
+    - `add_memory` is always stored `assistant_generated`/`unverified` with source `mcp`. An MCP `update_memory` makes the memory unverified too (`Memory.update(unverify=True)`); the CLI's update stays trusted. Every MCP write uses actor `mcp`.
+    - `add_memory` with scope `project` needs a git repo (`project_root(cwd)`, no subprocess); otherwise it returns an error and stores nothing.
+    - Claude Code starts stdio servers in the session dir with `CLAUDE_PROJECT_DIR` set to it.
+  - **M5 backlog invariants:**
+    - Projects are resolved off the store thread (`project_root` has no subprocess).
+    - `list_points(limit=None)` returns every match.
+    - A spool file that fails to drain 3 times is quarantined in `spool/bad/`, which keeps 100 files.
+    - `hook.log` rotates at 1 MB to `hook.log.1`.
   - Exit codes: 2 means already running, 3 means a config error. The systemd unit doesn't restart on either.
   - Socket paths must stay ≤ 100 bytes, so tests use `/tmp/rem-*` directories (the `short_dir` and `daemon_env` fixtures).
 

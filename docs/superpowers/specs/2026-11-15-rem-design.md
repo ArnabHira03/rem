@@ -141,7 +141,7 @@ Deletes are **hard deletes in Qdrant + a DELETE history row holding the old text
 | M2 | Daemon: socket API, durable job queue + leases, single owner of both stores, flock, start/stop/status, systemd, auto-start. CLI switches to talking to the daemon | concurrency, crash safety |
 | M3 | LLM providers; `extract`, `trust`, dedup/corroboration; redaction; `allow_remote`; eval harness + dataset | Mem0's write path |
 | M4 | Claude Code adapter: ingest hooks, cursor, project detection, SessionStart context, `rem install claude-code`. *Deviation:* M4 captures from hook payloads only — no transcript cursor or backfill (decided 2026-11-15; the transcript format is internal and unstable). | incremental sync |
-| M5 | MCP shim + tools; end-to-end in Claude Code | MCP |
+| M5 | MCP shim + tools; end-to-end in Claude Code. *Deviation:* hand-rolled stdio JSON-RPC (no MCP SDK; its dependency tree is far heavier than rem's), registered via `claude mcp add`; an MCP update makes the memory unverified (decided 2026-11-16). | MCP |
 | M6 | Hybrid retrieval: BM25 sparse vectors in Qdrant (as in Mem0) + `score_and_rank`; `rem reembed` | Mem0's read path |
 | M7 | Entities: extraction (spaCy or LLM), alias resolution, `rem_entities` collection, memory ↔ entity links, entity boost in search | Mem0 entity store |
 | M8 | Typed relationships: `rem_relations`, provenance/trust on relations, relation search | graph-shaped memory, no graph DB |
