@@ -49,7 +49,7 @@ ACTIVE_EMBEDDER_KEY = "active_embedder"
 ACTIVE_COLLECTION_KEY = "active_collection"  # set once a reembed is finalized; default is rem_memories__<slug>
 ACTIVE_ENTITY_COLLECTION_KEY = "active_entity_collection"  # set by reembed; default is rem_entities__<slug>
 ACTIVE_MODEL_KEY = "active_model"  # the model string the active embedder was built from
-TARGET_KEY = "reembed_target"  # JSON {"collection", "slug", "model"} while a reembed is pending
+TARGET_KEY = "reembed_target"  # JSON {"collection", "slug", "model", "entity_collection"} while a reembed is pending
 MAX_PENDING_CONFIRMATIONS = 10  # requests one job checks, newest first
 
 
@@ -644,6 +644,10 @@ class Memory:
         """Switch this process to a finalized reembed target (the store records the switch in the same call)."""
         self.col = col
         self.embedder = embedder
+
+    def set_entity_col(self, col: str) -> None:
+        """Switch this process to a finalized reembed's entity collection."""
+        self.entity_col = col
 
     def _point(self, id: str, text: str, record: MemoryRecord) -> VectorPoint:
         """The point for a memory: dense vector, BM25 sparse vector and the payload that is the record."""

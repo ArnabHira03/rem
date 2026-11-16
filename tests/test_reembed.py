@@ -119,3 +119,115 @@ def test_pending_target_is_recorded_before_the_copy_and_a_crash_resumes(mem, mon
     assert res.collection == pending["collection"]               # resumed, no orphan
     assert reembed.finalize(mem) == res.collection
     assert set(points(mem, mem.col)) == set(ids)
+
+
+# ---- entities (M7) ----------------------------------------------------------------
+
+
+def with_entities(mem, text, *names, job_key="job:1"):
+    """Write a memory through the extraction path, so its entities are created and linked."""
+    from rem.models import Candidate
+
+    cand = Candidate(text=text, scope="global", origin="user", entities=[{"name": n, "type": "tool"} for n in names])
+    mem.apply_candidates([cand], job_key=job_key, project_id=None, session_id=None, source="cli",
+                         restate_min_similarity=0.9, has_user_turn=True, user_texts=[text])
+    return next(r for r in mem.list() if r.text == text)
+
+
+def vectors(mem, col):
+    return {p.id: p.vector for p in mem.vectors.get(col, list(points(mem, col)), with_vectors=True)}
+
+
+def test_reembed_copies_entities_with_same_ids_and_payloads(mem):
+    with_entities(mem, "Uses uv", "uv")
+    with_entities(mem, "Uses Qdrant", "Qdrant", job_key="job:2")
+    before = points(mem, mem.entity_col)
+    assert len(before) == 2
+    reembed.run(mem, "hash-32")
+    target = json.loads(mem.db.get_meta(reembed.TARGET_KEY))["entity_collection"]
+    assert target == f"rem_entities__{collection_slug('hash-32', 32)}" and target != mem.entity_col
+    assert points(mem, target) == before
+    vecs = vectors(mem, target)
+    assert all(len(v) == 32 for v in vecs.values())
+    expected = reembed._target_embedder(mem, "hash-32")
+    assert all(vecs[i] == expected.embed([p["normalized"]])[0] for i, p in before.items())
+    assert not mem.vectors.col_has_sparse(target)
+
+
+def test_same_model_reembed_puts_entities_in_a_new_generation(mem):
+    with_entities(mem, "Uses uv", "uv")
+    reembed.run(mem, "hash-64")
+    target = json.loads(mem.db.get_meta(reembed.TARGET_KEY))["entity_collection"]
+    assert target != mem.entity_col and target.endswith("__g1")
+
+
+def test_finalize_switches_the_entity_collection_and_drops_the_old_one(mem, cfg):
+    from rem.config import EmbedderConfig
+    from rem.memory import ACTIVE_ENTITY_COLLECTION_KEY, Memory
+
+    with_entities(mem, "Uses uv", "uv")
+    before = points(mem, mem.entity_col)
+    old = mem.entity_col
+    reembed.run(mem, "hash-32")
+    target = json.loads(mem.db.get_meta(reembed.TARGET_KEY))["entity_collection"]
+    reembed.finalize(mem)
+    assert mem.entity_col == target
+    assert mem.db.get_meta(ACTIVE_ENTITY_COLLECTION_KEY) == target
+    assert not mem.vectors.col_exists(old)
+    assert points(mem, target) == before
+    fresh = Memory(cfg.model_copy(update={"embedder": EmbedderConfig(provider="hashing", model="hash-32")}),
+                   vector_store=mem.vectors)
+    try:
+        assert fresh.entity_col == target
+        assert [e.id for e in fresh.list_entities()] == list(before)
+    finally:
+        fresh.db.close()
+
+
+def test_finalize_syncs_entities_changed_after_the_copy(mem):
+    a = with_entities(mem, "Uses uv", "uv")
+    b = with_entities(mem, "Uses Qdrant", "Qdrant", job_key="job:2")
+    reembed.run(mem, "hash-32")
+    with_entities(mem, "Uses ruff", "ruff", job_key="job:3")      # new entity
+    with_entities(mem, "Uses UV everywhere", "UV", job_key="job:4")  # alias + memory_ids change on uv
+    mem.delete(b.id, actor="cli")                                  # drops the Qdrant entity
+    expected = points(mem, mem.entity_col)
+    assert len(expected) == 2
+    reembed.finalize(mem)
+    assert points(mem, mem.entity_col) == expected
+    assert all(len(v) == 32 for v in vectors(mem, mem.entity_col).values())
+    (uv,) = [e for e in mem.list_entities() if e.normalized == "uv"]
+    assert uv.aliases == ["UV"] and a.id in uv.memory_ids and len(uv.memory_ids) == 2
+
+
+def test_finalize_of_a_reembed_pending_from_before_m7_copies_entities(mem):
+    """A pending target without `entity_collection` (recorded by a pre-M7 rem): finalize picks one and copies all."""
+    with_entities(mem, "Uses uv", "uv")
+    before = points(mem, mem.entity_col)
+    old = mem.entity_col
+    reembed.run(mem, "hash-32")
+    pending = json.loads(mem.db.get_meta(reembed.TARGET_KEY))
+    entity_target = pending.pop("entity_collection")
+    mem.vectors.delete_col(entity_target)
+    mem.db.set_meta(reembed.TARGET_KEY, json.dumps(pending))
+    reembed.finalize(mem)
+    assert mem.entity_col == entity_target and mem.entity_col != old
+    assert not mem.vectors.col_exists(old)
+    assert points(mem, mem.entity_col) == before
+    assert all(len(v) == 32 for v in vectors(mem, mem.entity_col).values())
+
+
+def test_entity_boost_still_works_after_finalize(mem):
+    from rem.entities import ENTITY_BOOST
+
+    a = with_entities(mem, "the build uses tabs for indentation", "tabs")
+    b = add(mem, "the build uses spaces for indentation")
+    reembed.run(mem, "hash-32")
+    reembed.finalize(mem)
+    scores = {r.record.id: r.score for r in mem.search("tabs")}
+    assert a.id in scores
+    # same query against the memories alone: the gap is exactly the entity boost
+    mem.vectors.delete_col(mem.entity_col)
+    plain = {r.record.id: r.score for r in mem.search("tabs")}
+    assert scores[a.id] == pytest.approx(plain[a.id] + ENTITY_BOOST)
+    assert scores.get(b.id) == plain.get(b.id)
