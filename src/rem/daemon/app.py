@@ -12,7 +12,7 @@ from starlette.routing import Route
 from rem.daemon.schemas import IngestBody, ReembedBody
 from rem.daemon.service import RemService
 from rem.errors import MemoryNotFound, RemError
-from rem.models import HistoryRow, MemoryRecord, Provenance, Scope, SearchResult, Status
+from rem.models import EntityRecord, HistoryRow, MemoryRecord, Provenance, Scope, SearchResult, Status
 
 
 class AddBody(BaseModel):
@@ -62,7 +62,7 @@ def _json(value, status: int = 200) -> JSONResponse:
             return [conv(x) for x in v]
         if isinstance(v, SearchResult):
             return {**v.record.to_payload(), "score": v.score, "semantic": v.semantic}
-        if isinstance(v, MemoryRecord):
+        if isinstance(v, (MemoryRecord, EntityRecord)):
             return v.to_payload()
         if isinstance(v, HistoryRow):
             return v.model_dump(mode="json")
@@ -105,6 +105,9 @@ def build_app(service: RemService) -> Starlette:
             cwd=_path(q.get("cwd")),
         )
         return _json(rec)
+
+    async def list_entities(request: Request):
+        return _json(await service.list_entities())
 
     async def get(request: Request):
         mid = request.path_params["id"]
@@ -178,6 +181,7 @@ def build_app(service: RemService) -> Starlette:
             Route("/status", status, methods=["GET"]),
             Route("/memories", add, methods=["POST"]),
             Route("/memories", list_memories, methods=["GET"]),
+            Route("/entities", list_entities, methods=["GET"]),
             Route("/memories/{id}", get, methods=["GET"]),
             Route("/memories/{id}", update, methods=["PATCH"]),
             Route("/memories/{id}", delete, methods=["DELETE"]),

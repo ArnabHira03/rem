@@ -49,6 +49,10 @@ class RemService:
             return await self.store.run(self.memory.list_for, cwd, scope=scope, status=status)
         return await self.store.run(self.memory.list, scope=scope, status=status, project_id=project_id)
 
+    async def list_entities(self):
+        records = await self.store.run(self.memory.list_entities)
+        return sorted(records, key=lambda r: (r.name.casefold(), r.id))
+
     async def get(self, id: str):
         return await self.store.run(self.memory.get, id)
 

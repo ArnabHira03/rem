@@ -66,6 +66,9 @@ class RemClient:
         params = {k: v for k, v in {"scope": scope, "status": status, "cwd": str(cwd) if cwd else None}.items() if v}
         return self._call("GET", "/memories", params=params)
 
+    def list_entities(self) -> list[dict]:
+        return self._call("GET", "/entities")
+
     def get(self, id) -> dict:
         return self._call("GET", f"/memories/{id}", ref=id)
 

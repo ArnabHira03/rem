@@ -157,3 +157,20 @@ def test_cli_reembed_and_finalize(daemon_env, capsys):
     assert json.loads(capsys.readouterr().out)["model"] == "hash-32"
     assert main(["reembed", "--finalize"]) == 0
     assert "switched" in capsys.readouterr().out
+
+
+def test_cli_entities_empty(daemon_env, capsys):
+    assert main(["entities", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert main(["entities"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_cli_entities_lists_lines_and_json(daemon_env, capsys, monkeypatch):
+    ents = [{"id": "e1", "name": "uv", "type": "tool", "memory_ids": ["a", "b"]},
+            {"id": "e2", "name": "Rem", "type": "project", "memory_ids": ["c"]}]
+    monkeypatch.setattr(RemClient, "list_entities", lambda self: ents)
+    assert main(["entities"]) == 0
+    assert capsys.readouterr().out.splitlines() == ["e1  uv  tool  2 memories", "e2  Rem  project  1 memories"]
+    assert main(["--json", "entities"]) == 0
+    assert json.loads(capsys.readouterr().out) == ents
