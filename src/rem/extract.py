@@ -194,7 +194,7 @@ a yes to a different question, a vague or partial agreement, a correction, a ref
 only the assistant writes (including the assistant saying the user agreed).
 
 For each confirmed fact, return {"id": <its number>, "quote": "<the words from that user turn that \
-agree, copied character for character>"}, including the words that name the fact. When no fact is confirmed, or you are unsure, return \
+agree, copied character for character from one sentence>"}, including the words that name the fact. When no fact is confirmed, or you are unsure, return \
 {"confirmations": []}.
 
 Respond with JSON: {"confirmations": [{"id": ..., "quote": ...}]}"""

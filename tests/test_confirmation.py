@@ -283,3 +283,33 @@ def test_confirm_pending_needs_a_user_turn_and_pending_memories(mem):
 def test_confirm_pending_rejects_a_malformed_response(mem):
     with pytest.raises(LLMError):
         confirm_pending(FakeLLM([{"nope": 1}]), [Turn("user", "yes")], [], [requested(mem)])
+
+
+@pytest.mark.parametrize("quote,user,fact", [
+    ("yes, tabs", "yes, tabs", "Never uses tabs"),               # the opposite of what the user said
+    ("run the tests", "run the tests", "Does not want tests run"),
+    ("I don't use tabs", "I don't use tabs", "Uses tabs"),
+    ("not tabs", "spaces, not tabs", "Prefers tabs"),
+])
+def test_a_fact_and_its_opposite_are_told_apart(quote, user, fact):
+    assert not quote_in_user_turns(quote, [user], fact)
+
+
+@pytest.mark.parametrize("quote,user,fact", [
+    ("no, tabs", "no, tabs", "Prefers tabs over spaces"),        # a leading "no" answers, it doesn't negate
+    ("never tabs", "never tabs, ever", "Never uses tabs"),
+    ("I don’t use tabs", "I don’t use tabs", "Doesn't use tabs"),
+])
+def test_matching_negation_still_confirms(quote, user, fact):
+    assert quote_in_user_turns(quote, [user], fact)
+
+
+def test_main_path_negated_fact_needs_a_negated_sentence():
+    assert not user_states("Never wants tests", ["fix the tests"])
+    assert user_states("Never wants tests", ["I never want tests here"])
+    assert user_states("Prefers spaces", ["no, I prefer spaces"])  # lenient: a positive fact is fine either way
+
+
+def test_redaction_markers_are_not_key_words():
+    from rem.trust import key_words
+    assert "redac" not in key_words("[REDACTED:api_key]")

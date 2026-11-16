@@ -14,9 +14,9 @@ a an and are as at be been but by can do does for from got had has have he her h
 into is it its just me my no not of off ok okay on or our out she so than that the their them then there
 these they this to too up us was we were what when where which who why will with yes yeah yep sure you your
 about after again all also always any around because before being both could each even ever every few just
-like make many more most much must never only other over own same should some such very want wants would
+make many more most much must only other over own same should some such very want wants would
 use uses used using prefer prefers preferred like likes work works run runs need needs usually tends
-without within project projects repo repository codebase user users person machine system
+within project projects repo repository codebase user users person machine system redacted
 """.split())
 
 
@@ -79,6 +79,16 @@ def _sentences(text: str) -> list[str]:
     return [p for p in re.split(r"\n+|[.!?;]+(?=\s|$)", text) if p.strip()]
 
 
+# Negation flips a fact without changing its key words ("Never uses tabs" / "yes, tabs"), so the
+# check compares it separately. A leading "no" is an answer ("no, tabs"), not a negation.
+_NEGATION = re.compile(r"\b(?:not|never|without|nor|none|nothing|cannot|no longer)\b|n't\b|\b(?:dont|doesnt|isnt|wont|cant)\b"
+                       r"|(?<=\w)\W+no\b")
+
+
+def negated(text: str) -> bool:
+    return bool(_NEGATION.search(" ".join(text.casefold().replace("’", "'").split())))
+
+
 def sentence_supports(sentence: str, fact: str, *, strict: bool = True) -> bool:
     """Whether one sentence of the user's names the fact: shares at least one of its key words, and
     with strict most of them (one of two, two of three, three of four or five). Strict is for facts
@@ -86,7 +96,10 @@ def sentence_supports(sentence: str, fact: str, *, strict: bool = True) -> bool:
     want = key_words(fact)
     shared = len(key_words(sentence) & want)
     need = 1 if not strict or len(want) <= 2 else len(want) // 2 + 1
-    return bool(want) and shared >= need
+    if not want or shared < need:
+        return False
+    # strict: the sentence and the fact agree on negation; otherwise a negated fact needs a negated sentence
+    return negated(sentence) == negated(fact) if strict else negated(sentence) or not negated(fact)
 
 
 def user_states(fact: str, user_texts: list[str]) -> bool:
