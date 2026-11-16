@@ -4,7 +4,10 @@ from qdrant_client import QdrantClient
 from qdrant_client import models as qm
 
 from rem.errors import StoreLockedError
-from rem.storage.vector.base import Filters, ScoredPoint, VectorPoint, VectorStore
+from rem.storage.vector.base import Filters, ScoredPoint, SparseVector, VectorPoint, VectorStore
+
+DENSE = "dense"  # name of the dense vector in sparse-enabled collections
+BM25 = "bm25"  # name of the sparse slot
 
 SCROLL_PAGE = 1000  # points per scroll request; list_points pages until exhausted
 
@@ -45,11 +48,25 @@ class QdrantVectorStore(VectorStore):
                 ) from e
             raise
 
-    def create_col(self, name: str, vector_size: int) -> None:
-        if not self._client.collection_exists(name):
+    def create_col(self, name: str, vector_size: int, *, sparse: bool = False) -> None:
+        if self._client.collection_exists(name):
+            return
+        if sparse:
+            self._client.create_collection(
+                name,
+                vectors_config={DENSE: qm.VectorParams(size=vector_size, distance=qm.Distance.COSINE)},
+                sparse_vectors_config={BM25: qm.SparseVectorParams(modifier=qm.Modifier.IDF)},
+            )
+        else:
             self._client.create_collection(
                 name, vectors_config=qm.VectorParams(size=vector_size, distance=qm.Distance.COSINE)
             )
+
+    def col_has_sparse(self, name: str) -> bool:
+        if not self._client.collection_exists(name):
+            return False
+        info = self._client.get_collection(name)
+        return BM25 in (info.config.params.sparse_vectors or {})
 
     def col_exists(self, name: str) -> bool:
         return self._client.collection_exists(name)
@@ -59,21 +76,56 @@ class QdrantVectorStore(VectorStore):
             self._client.delete_collection(name)
 
     def upsert(self, col: str, points: list[VectorPoint]) -> None:
-        self._client.upsert(
-            col,
-            points=[qm.PointStruct(id=p.id, vector=list(p.vector or []), payload=p.payload) for p in points],
-        )
+        sparse_col = self.col_has_sparse(col)
+        structs = []
+        for p in points:
+            if sparse_col:
+                vec: dict = {DENSE: list(p.vector or [])}
+                if p.sparse is not None:
+                    vec[BM25] = qm.SparseVector(indices=p.sparse.indices, values=p.sparse.values)
+            else:
+                vec = list(p.vector or [])
+            structs.append(qm.PointStruct(id=p.id, vector=vec, payload=p.payload))
+        self._client.upsert(col, points=structs)
 
     def search(self, col, vector, limit, filters=None):
+        using = DENSE if self.col_has_sparse(col) else None
         res = self._client.query_points(
-            col, query=list(vector), limit=limit, query_filter=_to_filter(filters), with_payload=True
+            col, query=list(vector), using=using, limit=limit, query_filter=_to_filter(filters), with_payload=True
         )
         return [ScoredPoint(str(p.id), p.score, dict(p.payload or {})) for p in res.points]
 
-    def get(self, col, ids):
-        found = self._client.retrieve(col, ids=ids, with_payload=True)
+    def keyword_search(self, col, query_sparse: SparseVector, limit, filters=None):
+        if not self.col_has_sparse(col):
+            return None
+        res = self._client.query_points(
+            col,
+            query=qm.SparseVector(indices=query_sparse.indices, values=query_sparse.values),
+            using=BM25,
+            limit=limit,
+            query_filter=_to_filter(filters),
+            with_payload=True,
+        )
+        return [ScoredPoint(str(p.id), p.score, dict(p.payload or {})) for p in res.points]
+
+    def get(self, col, ids, with_vectors=False):
+        found = self._client.retrieve(col, ids=ids, with_payload=True, with_vectors=with_vectors)
         by_id = {str(p.id): p for p in found}
-        return [VectorPoint(i, None, dict(by_id[i].payload or {})) for i in ids if i in by_id]
+        out = []
+        for i in ids:
+            if i not in by_id:
+                continue
+            p = by_id[i]
+            if not with_vectors:
+                out.append(VectorPoint(i, None, dict(p.payload or {})))
+                continue
+            dense, sparse = p.vector, None
+            if isinstance(dense, dict):  # sparse-enabled collection: named vectors
+                sv = dense.get(BM25)
+                sparse = SparseVector(list(sv.indices), list(sv.values)) if sv is not None else None
+                dense = dense.get(DENSE)
+            out.append(VectorPoint(i, list(dense or []), dict(p.payload or {}), sparse))
+        return out
 
     def update_payload(self, col, id, payload):
         self._client.set_payload(col, payload=payload, points=[id])
