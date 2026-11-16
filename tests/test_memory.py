@@ -156,3 +156,16 @@ def test_update_unverify_downgrades_a_verified_memory(mem):
     assert stored.text == "Prefers pip"
     assert [(h.event, h.old_value, h.new_value) for h in mem.history(m.id)][1:] == [
         ("UPDATE", "Prefers uv over pip", "Prefers uv"), ("UPDATE", "Prefers uv", "Prefers pip")]
+
+
+def test_add_stores_bm25_slot(mem):
+    r = add(mem, "uses Qdrant for storage")
+    (p,) = mem.vectors.get(mem.col, [r.id], with_vectors=True)
+    assert p.sparse is not None and len(p.sparse.indices) > 0
+
+
+def test_update_refreshes_bm25_slot(mem):
+    r = add(mem, "uses Qdrant for storage")
+    mem.update(r.id, "uses Postgres for storage", actor="cli")
+    (p,) = mem.vectors.get(mem.col, [r.id], with_vectors=True)
+    assert p.sparse == mem.sparse_embedder.embed_docs(["uses Postgres for storage"])[0]

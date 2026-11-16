@@ -12,7 +12,8 @@ from pathlib import Path
 
 from rem.config import RemConfig
 from rem.embed.base import Embedder, collection_slug
-from rem.embed.factory import create_embedder
+from rem.embed.factory import create_embedder, create_sparse_embedder
+from rem.embed.sparse import SparseEmbedder
 from rem.errors import EmbedderMismatchError, MemoryNotFound
 from rem.models import (
     Candidate,
@@ -69,10 +70,12 @@ class Memory:
         *,
         vector_store: VectorStore | None = None,
         embedder: Embedder | None = None,
+        sparse_embedder: SparseEmbedder | None = None,
     ):
         self.db = RemDB(cfg.db_path)
         try:
             self.embedder = embedder or create_embedder(cfg.embedder)
+            self.sparse_embedder = sparse_embedder or create_sparse_embedder(cfg.embedder)
             slug = collection_slug(self.embedder.model_id, self.embedder.dims)
             stored = self.db.get_meta(ACTIVE_EMBEDDER_KEY)
             if stored and stored != slug:
@@ -86,7 +89,7 @@ class Memory:
             raise
         self.db.set_meta(ACTIVE_EMBEDDER_KEY, slug)
         self.col = f"rem_memories__{slug}"
-        self.vectors.create_col(self.col, self.embedder.dims)
+        self.vectors.create_col(self.col, self.embedder.dims, sparse=True)
 
     # ---- reads -------------------------------------------------------------
 
@@ -260,7 +263,7 @@ class Memory:
             observed_at=None, source=source, session_id=session_id, job_id=job_id, agent_claim=agent_claim,
             created_at=now, updated_at=now,
         )
-        self.vectors.upsert(self.col, [VectorPoint(mid, self.embedder.embed([text])[0], record.to_payload())])
+        self.vectors.upsert(self.col, [self._point(mid, text, record)])
         self.db.add_history(TargetKind.MEMORY, mid, HistoryEvent.ADD, None, text, actor, job_id)
         return record
 
@@ -278,7 +281,7 @@ class Memory:
         if unverify:
             changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED, "agent_claim": True}
         record = old.model_copy(update=changes)
-        self.vectors.upsert(self.col, [VectorPoint(id, self.embedder.embed([text])[0], record.to_payload())])
+        self.vectors.upsert(self.col, [self._point(id, text, record)])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)
         return record
 
@@ -456,6 +459,15 @@ class Memory:
         old = self._require(id)
         self.vectors.delete(self.col, [id])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.DELETE, old.text, None, actor)
+
+    def _point(self, id: str, text: str, record: MemoryRecord) -> VectorPoint:
+        """The point for a memory: dense vector, BM25 sparse vector and the payload that is the record."""
+        return VectorPoint(
+            id,
+            self.embedder.embed([text])[0],
+            record.to_payload(),
+            self.sparse_embedder.embed_docs([text])[0],
+        )
 
     def _find_by_text(self, text: str, scope: Scope, project_id: int | None) -> MemoryRecord | None:
         """A live memory with the same normalized text in the same scope and project, if any."""
