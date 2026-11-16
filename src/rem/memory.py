@@ -355,6 +355,12 @@ class Memory:
             raise ValueError(f"another memory already has this text: {other.id}")
         # an edit withdraws any confirmation request: the user never saw the new text
         changes = {"text": text, "hash": text_hash(text), "updated_at": utcnow(), "confirm_requested_at": None}
+        if changes["hash"] != old.hash:
+            # the entities were named by the old text: unlink them first (an orphan is deleted), then clear
+            # entity_ids in the upsert below. After a crash in between, a repeated update or a delete
+            # converges, since _unlink skips links that are already gone.
+            self._unlink(id, old.entity_ids, actor)
+            changes["entity_ids"] = []
         if unverify:
             changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED, "agent_claim": True}
         record = old.model_copy(update=changes)

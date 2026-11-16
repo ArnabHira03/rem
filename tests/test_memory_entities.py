@@ -309,3 +309,57 @@ def test_delete_is_safe_to_repeat_after_a_crash_following_the_unlink(mem, monkey
     assert mem.get(rec.id) is None and mem.list_entities() == []
     entity_deletes = [h for h in mem.db.get_history(ent.id) if h.event == HistoryEvent.DELETE]
     assert len(entity_deletes) == 1
+
+
+# ---- updating a memory's text unlinks its entities ----
+
+def test_text_update_unlinks_and_drops_the_orphan_entity(mem):
+    apply(mem, [cand("Uses uv", "uv")])
+    (ent,) = mem.list_entities()
+    (rec,) = mem.list()
+    updated = mem.update(rec.id, "Uses pip", actor="cli")
+    assert updated.entity_ids == [] and mem.get(rec.id).entity_ids == []
+    assert mem.get_entity(ent.id) is None and mem.list_entities() == []
+    rows = [h for h in mem.db.get_history(ent.id) if h.event == HistoryEvent.DELETE]
+    assert len(rows) == 1 and rows[0].target_kind == TargetKind.ENTITY and rows[0].actor == "cli"
+
+
+def test_text_update_keeps_an_entity_shared_with_another_memory(mem):
+    apply(mem, [cand("Uses uv", "uv"), cand("Installs tools with uv", "uv")])
+    (ent,) = mem.list_entities()
+    a, b = mem.list()
+    mem.update(a.id, "Installs tools with pipx", actor="mcp", unverify=True)
+    (kept,) = mem.list_entities()
+    assert kept.id == ent.id and kept.memory_ids == [b.id]
+    assert mem.get(a.id).entity_ids == [] and mem.get(b.id).entity_ids == [ent.id]
+
+
+def test_update_with_the_same_text_keeps_links(mem):
+    apply(mem, [cand("Uses uv", "uv")])
+    (ent,) = mem.list_entities()
+    (rec,) = mem.list()
+    mem.update(rec.id, "  uses UV ", actor="cli")  # same normalized text
+    assert mem.get(rec.id).entity_ids == [ent.id] and mem.get_entity(ent.id).memory_ids == [rec.id]
+
+
+def test_update_converges_after_a_crash_following_the_unlink(mem, monkeypatch):
+    apply(mem, [cand("Uses uv", "uv")])
+    (ent,) = mem.list_entities()
+    (rec,) = mem.list()
+    real = mem.vectors.upsert
+
+    def crash_on_memory_upsert(col, points):
+        if col == mem.col:
+            raise RuntimeError("crash")
+        return real(col, points)
+
+    monkeypatch.setattr(mem.vectors, "upsert", crash_on_memory_upsert)
+    with pytest.raises(RuntimeError):
+        mem.update(rec.id, "Uses pip", actor="cli")
+    monkeypatch.setattr(mem.vectors, "upsert", real)
+    assert mem.get_entity(ent.id) is None and mem.get(rec.id).entity_ids == [ent.id]  # stale, one-sided
+    mem.update(rec.id, "Uses pip", actor="cli")
+    assert mem.get(rec.id).entity_ids == []
+    assert len([h for h in mem.db.get_history(ent.id) if h.event == HistoryEvent.DELETE]) == 1
+    mem.delete(rec.id, actor="cli")  # a delete after the crash converges too
+    assert mem.get(rec.id) is None and mem.list_entities() == []
