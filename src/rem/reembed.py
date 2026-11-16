@@ -2,7 +2,8 @@
 
 The copy keeps each memory's id and payload and writes the dense vector from the target embedder and the
 BM25 vector from the same sparse embedder. Entities are copied the same way into their own target collection
-(dense only: the vector is the target embedder applied to the entity's normalized name). The active collections
+(dense only: the vector is the target embedder applied to the entity's normalized name); relations likewise
+(the vector is the embedded sentence). The active collections
 stay in use until finalize, which first brings the targets up to date with any writes made since the copy, then
 switches this process and the store.
 """
@@ -19,6 +20,7 @@ from rem.memory import (
     ACTIVE_EMBEDDER_KEY,
     ACTIVE_ENTITY_COLLECTION_KEY,
     ACTIVE_MODEL_KEY,
+    ACTIVE_RELATION_COLLECTION_KEY,
     TARGET_KEY,
     Memory,
 )
@@ -84,6 +86,22 @@ def _entity_target(mem: Memory, pending: dict | None, slug: str) -> str:
     return _choose_collection(mem, f"rem_entities__{slug}", mem.entity_col)
 
 
+def _embed_relations_into(mem: Memory, target: Embedder, col: str, points, batch: int = BATCH) -> None:
+    """Write relation points (payload kept as is) into col with a fresh dense vector of the sentence, the same
+    text the relation write path embeds. Relations have no BM25 vector."""
+    for i in range(0, len(points), batch):
+        chunk = points[i:i + batch]
+        dense = target.embed([p.payload["sentence"] for p in chunk])
+        mem.vectors.upsert(col, [VectorPoint(p.id, d, p.payload) for p, d in zip(chunk, dense)])
+
+
+def _relation_target(mem: Memory, pending: dict | None, slug: str) -> str:
+    """The pending relation target, or a new one (also for a target recorded before M8, which has none)."""
+    if pending and pending.get("relation_collection"):
+        return pending["relation_collection"]
+    return _choose_collection(mem, f"rem_relations__{slug}", mem.relation_col)
+
+
 def _sync(mem: Memory, src_col: str, dst_col: str, write) -> None:
     """Bring dst_col up to date with src_col: (re)write points whose payload differs, delete removed ids."""
     active = mem.vectors.list_points(src_col)
@@ -108,16 +126,20 @@ def run(mem: Memory, model: str, batch: int = BATCH) -> ReembedResult:
         )
     col = pending["collection"] if pending else _choose_collection(mem, f"rem_memories__{slug}")
     entity_col = _entity_target(mem, pending, slug)
+    relation_col = _relation_target(mem, pending, slug)
     # recorded before the copy, so a copy killed midway is resumed by the rerun (not orphaned), and
     # finalize completes whatever is missing
     mem.db.set_meta(TARGET_KEY, json.dumps(
-        {"collection": col, "slug": slug, "model": model, "entity_collection": entity_col}
+        {"collection": col, "slug": slug, "model": model, "entity_collection": entity_col,
+         "relation_collection": relation_col}
     ))
     mem.vectors.create_col(col, target.dims, sparse=True)
     mem.vectors.create_col(entity_col, target.dims, sparse=False)
+    mem.vectors.create_col(relation_col, target.dims, sparse=False)
     points = mem.vectors.list_points(mem.col)
     _embed_into(mem, target, col, points, batch)
     _embed_entities_into(mem, target, entity_col, mem.vectors.list_points(mem.entity_col), batch)
+    _embed_relations_into(mem, target, relation_col, mem.vectors.list_points(mem.relation_col), batch)
     mem.db.add_history(TargetKind.MEMORY, col, HistoryEvent.REEMBED, mem.col, col, "cli", f"reembed:{col}")
     return ReembedResult(col, len(points))
 
@@ -130,10 +152,13 @@ def finalize(mem: Memory) -> str:
     target = _target_embedder(mem, pending["model"])
     col, old = pending["collection"], mem.col
     entity_col, old_entity = _entity_target(mem, pending, pending["slug"]), mem.entity_col
+    relation_col, old_relation = _relation_target(mem, pending, pending["slug"]), mem.relation_col
     if col == old:
         raise ReembedError(f"the pending target {col} is the active collection; nothing was switched")
     if entity_col == old_entity:
         raise ReembedError(f"the pending target {entity_col} is the active entity collection; nothing was switched")
+    if relation_col == old_relation:
+        raise ReembedError(f"the pending target {relation_col} is the active relation collection; nothing was switched")
     _sync(mem, old, col, lambda pts: _embed_into(mem, target, col, pts))
     if pending.get("entity_collection") != entity_col:
         # a target recorded before M7 has no entity collection: record the one picked here (so a rerun after a
@@ -141,18 +166,27 @@ def finalize(mem: Memory) -> str:
         mem.db.set_meta(TARGET_KEY, json.dumps({**pending, "entity_collection": entity_col}))
     mem.vectors.create_col(entity_col, target.dims, sparse=False)
     _sync(mem, old_entity, entity_col, lambda pts: _embed_entities_into(mem, target, entity_col, pts))
+    if pending.get("relation_collection") != relation_col:
+        # a target recorded before M8 has no relation collection: same resume-safe recording as for entities
+        pending = {**pending, "relation_collection": relation_col}
+        mem.db.set_meta(TARGET_KEY, json.dumps(pending))
+    mem.vectors.create_col(relation_col, target.dims, sparse=False)
+    _sync(mem, old_relation, relation_col, lambda pts: _embed_relations_into(mem, target, relation_col, pts))
     # one transaction: a crash midway must not leave the store half switched (e.g. a new collection with
     # the old embedder) or the target dropped before the switch; until it commits, finalize can rerun
     with mem.db.transaction():
         mem.db.set_meta(ACTIVE_COLLECTION_KEY, col)
         mem.db.set_meta(ACTIVE_ENTITY_COLLECTION_KEY, entity_col)
+        mem.db.set_meta(ACTIVE_RELATION_COLLECTION_KEY, relation_col)
         mem.db.set_meta(ACTIVE_EMBEDDER_KEY, pending["slug"])
         mem.db.set_meta(ACTIVE_MODEL_KEY, pending["model"])
         mem.db.delete_meta(TARGET_KEY)
     mem.set_active(col, target)
     mem.set_entity_col(entity_col)
+    mem.set_relation_col(relation_col)
     mem.vectors.delete_col(old)
     mem.vectors.delete_col(old_entity)
+    mem.vectors.delete_col(old_relation)
     return col
 
 

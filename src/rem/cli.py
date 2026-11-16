@@ -322,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
                     text = "no reembed pending" if out is None else (
                         f"pending: {out['model']} in {out['collection']}"
                         + (f" (entities in {out['entity_collection']})" if out.get("entity_collection") else "")
+                        + (f" (relations in {out['relation_collection']})" if out.get("relation_collection") else "")
                         + "; run `rem reembed --finalize`")
                 print(json.dumps(out) if args.json else text)
                 return 0
