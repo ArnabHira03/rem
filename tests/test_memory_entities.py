@@ -392,3 +392,24 @@ def test_restating_an_agent_claim_links_the_entities_without_verifying_it(mem):
     assert res.corroborated == [] and mem.get(target.id).status == "unverified"
     (ent,) = mem.list_entities()
     assert ent.memory_ids == [target.id] and mem.get(target.id).entity_ids == [ent.id]
+
+
+def test_collapsed_duplicates_keep_every_copys_mentions(mem):
+    res = apply(mem, [cand("Uses uv and ruff", "uv", origin="assistant"),
+                      cand("uses uv and ruff", "ruff", "UV"),  # the verified copy is kept
+                      cand("Uses uv and ruff", "Ruff", "pip")])
+    assert res.skipped == 2
+    (rec,) = mem.list()
+    ents = {e.name: e for e in mem.list_entities()}
+    assert set(ents) == {"ruff", "UV", "pip"}  # de-duped by normalized name, the kept copy's spelling first
+    assert all(e.aliases == [] for e in ents.values())
+    assert rec.entity_ids == sorted(e.id for e in ents.values()) and rec.status == "verified"
+
+
+def test_collapse_merges_mentions_without_touching_the_input():
+    from rem.memory import _collapse_duplicates
+
+    a, b = cand("Uses uv", "uv"), cand("uses uv", "pip")
+    kept, dropped = _collapse_duplicates([a, b])
+    assert dropped == 1 and [m.name for m in kept[0].entities] == ["uv", "pip"]
+    assert [m.name for m in a.entities] == ["uv"] and [m.name for m in b.entities] == ["pip"]

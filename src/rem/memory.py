@@ -688,13 +688,28 @@ class Memory:
 
 
 def _collapse_duplicates(candidates: list[Candidate]) -> tuple[list[Candidate], int]:
-    """Keep one candidate per (normalized text, scope): the most trusted, at the group's first position."""
+    """Keep one candidate per (normalized text, scope): the most trusted, at the group's first position.
+
+    The kept candidate carries every copy's entity mentions: its own first, then the dropped copies' in
+    order, de-duped by normalized name (the first spelling wins)."""
     kept: dict[tuple[str, Scope], Candidate] = {}
+    groups: dict[tuple[str, Scope], list[Candidate]] = {}
     for c in candidates:
         key = (normalize_text(c.text), c.scope)
+        groups.setdefault(key, []).append(c)
         best = kept.get(key)
         if best is None or (
             assign_trust(c).status == Status.VERIFIED and assign_trust(best).status != Status.VERIFIED
         ):
             kept[key] = c  # replacing a value keeps the key's original insertion position
+    for key, best in kept.items():
+        if len(groups[key]) == 1:
+            continue
+        seen: set[str] = set()
+        mentions: list[EntityMention] = []
+        for m in [*best.entities, *(m for c in groups[key] if c is not best for m in c.entities)]:
+            if (norm := normalize_name(m.name)) not in seen:
+                seen.add(norm)
+                mentions.append(m)
+        kept[key] = best.model_copy(update={"entities": mentions})
     return list(kept.values()), len(candidates) - len(kept)
