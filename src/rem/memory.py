@@ -14,10 +14,12 @@ from rem.config import RemConfig
 from rem.embed.base import Embedder, collection_slug
 from rem.embed.factory import create_embedder, create_sparse_embedder
 from rem.embed.sparse import SparseEmbedder
+from rem.entities import bucket, entity_id, normalize_name
 from rem.errors import EmbedderMismatchError, MemoryNotFound
 from rem.models import (
     Candidate,
     Confirmation,
+    EntityRecord,
     HistoryEvent,
     REM_NAMESPACE,
     HistoryRow,
@@ -43,6 +45,7 @@ log = logging.getLogger(__name__)
 
 ACTIVE_EMBEDDER_KEY = "active_embedder"
 ACTIVE_COLLECTION_KEY = "active_collection"  # set once a reembed is finalized; default is rem_memories__<slug>
+ACTIVE_ENTITY_COLLECTION_KEY = "active_entity_collection"  # set by reembed; default is rem_entities__<slug>
 ACTIVE_MODEL_KEY = "active_model"  # the model string the active embedder was built from
 TARGET_KEY = "reembed_target"  # JSON {"collection", "slug", "model"} while a reembed is pending
 MAX_PENDING_CONFIRMATIONS = 10  # requests one job checks, newest first
@@ -102,6 +105,10 @@ class Memory:
                 self.keyword_enabled = True
             if not self.keyword_enabled:
                 log.warning("%s has no BM25 slot: keyword search is off until `rem reembed` rebuilds it", self.col)
+            # entities are dense-only; a store from before M7 simply gets the collection on first open
+            self.entity_col = self.db.get_meta(ACTIVE_ENTITY_COLLECTION_KEY) or f"rem_entities__{slug}"
+            if not self.vectors.col_exists(self.entity_col):
+                self.vectors.create_col(self.entity_col, self.embedder.dims, sparse=False)
         except BaseException:
             self.db.close()
             raise
@@ -125,6 +132,31 @@ class Memory:
                    {"scope": scope, "project_id": project_id, "status": status}.items() if v is not None}
         records = [MemoryRecord.from_payload(p.payload) for p in self.vectors.list_points(self.col, filters)]
         return sorted(records, key=lambda r: r.created_at, reverse=True)
+
+    def get_entity(self, id: str) -> EntityRecord | None:
+        found = self.vectors.get(self.entity_col, [id])
+        return EntityRecord.from_payload(found[0].payload) if found else None
+
+    def list_entities(self, *, scope: Scope | None = None, project_id: int | None = None) -> list[EntityRecord]:
+        filters = {k: str(v) if k != "project_id" else v for k, v in
+                   {"scope": scope, "project_id": project_id}.items() if v is not None}
+        records = [EntityRecord.from_payload(p.payload) for p in self.vectors.list_points(self.entity_col, filters)]
+        return sorted(records, key=lambda r: r.created_at, reverse=True)
+
+    def find_entity(self, normalized: str, scope: Scope, project_id: int | None) -> EntityRecord | None:
+        """The entity in (scope, project_id)'s bucket whose name or an alias normalizes to `normalized`."""
+        scope, project_id = bucket(scope, project_id)
+        normalized = normalize_name(normalized)
+        direct = self.get_entity(entity_id(scope, project_id, normalized))
+        if direct is not None:
+            return direct
+        # list_points treats a None filter value as "null or missing", so the bucket is exact
+        points = self.vectors.list_points(self.entity_col, {"scope": str(scope), "project_id": project_id})
+        for p in points:
+            rec = EntityRecord.from_payload(p.payload)
+            if rec.normalized == normalized or any(normalize_name(a) == normalized for a in rec.aliases):
+                return rec
+        return None
 
     def list_for(self, cwd: Path, *, scope: Scope | None = None, status: Status | None = None) -> list[MemoryRecord]:
         """Like list(), but project memories only from cwd's project (its git root), never another
