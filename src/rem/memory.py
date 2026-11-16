@@ -28,6 +28,8 @@ from rem.models import (
     MemoryRecord,
     Provenance,
     RelationMention,
+    RelationRecord,
+    RelationResult,
     SearchResult,
     Scope,
     Status,
@@ -48,6 +50,7 @@ log = logging.getLogger(__name__)
 
 ACTIVE_EMBEDDER_KEY = "active_embedder"
 ACTIVE_COLLECTION_KEY = "active_collection"  # set once a reembed is finalized; default is rem_memories__<slug>
+ACTIVE_RELATION_COLLECTION_KEY = "active_relation_collection"  # set by reembed; default is rem_relations__<slug>
 ACTIVE_ENTITY_COLLECTION_KEY = "active_entity_collection"  # set by reembed; default is rem_entities__<slug>
 ACTIVE_MODEL_KEY = "active_model"  # the model string the active embedder was built from
 TARGET_KEY = "reembed_target"  # JSON {"collection", "slug", "model", "entity_collection"} while a reembed is pending
@@ -119,6 +122,9 @@ class Memory:
             self.entity_col = self.db.get_meta(ACTIVE_ENTITY_COLLECTION_KEY) or f"rem_entities__{slug}"
             if not self.vectors.col_exists(self.entity_col):
                 self.vectors.create_col(self.entity_col, self.embedder.dims, sparse=False)
+            self.relation_col = self.db.get_meta(ACTIVE_RELATION_COLLECTION_KEY) or f"rem_relations__{slug}"
+            if not self.vectors.col_exists(self.relation_col):
+                self.vectors.create_col(self.relation_col, self.embedder.dims, sparse=False)
         except BaseException:
             self.db.close()
             raise
@@ -152,6 +158,48 @@ class Memory:
                    {"scope": scope, "project_id": project_id}.items() if v is not None}
         records = [EntityRecord.from_payload(p.payload) for p in self.vectors.list_points(self.entity_col, filters)]
         return sorted(records, key=lambda r: r.created_at, reverse=True)
+
+    def get_relation(self, id: str) -> RelationRecord | None:
+        found = self.vectors.get(self.relation_col, [id])
+        return RelationRecord.from_payload(found[0].payload) if found else None
+
+    def relations_for(self, memory_id: str, scope: Scope, project_id: int | None) -> list[RelationRecord]:
+        """The relations in (scope, project_id)'s bucket that cite `memory_id` as evidence."""
+        scope, project_id = bucket(scope, project_id)
+        points = self.vectors.list_points(self.relation_col, {"scope": str(scope), "project_id": project_id})
+        recs = [RelationRecord.from_payload(p.payload) for p in points]
+        return [r for r in recs if memory_id in r.memory_ids]
+
+    def list_relations(
+        self, *, scope: Scope | None = None, project_id: int | None = None, entity: str | None = None
+    ) -> list[RelationResult]:
+        filters = {k: str(v) if k != "project_id" else v for k, v in
+                   {"scope": scope, "project_id": project_id}.items() if v is not None}
+        records = [RelationRecord.from_payload(p.payload) for p in self.vectors.list_points(self.relation_col, filters)]
+        if entity is not None:
+            wanted = normalize_name(entity)
+            kept = []
+            for r in records:
+                ends = (self.get_entity(r.source_entity_id), self.get_entity(r.target_entity_id))
+                if any(e is not None and (e.normalized == wanted or any(normalize_name(a) == wanted for a in e.aliases))
+                       for e in ends):
+                    kept.append(r)
+            records = kept
+        results = [self._relation_result(r) for r in records]
+        return sorted(results, key=lambda r: (r.source.casefold(), r.type, r.target.casefold(), r.id))
+
+    def _relation_result(self, rec: RelationRecord, score: float | None = None) -> RelationResult:
+        src = self.get_entity(rec.source_entity_id)
+        dst = self.get_entity(rec.target_entity_id)
+        project = self.db.get_project(rec.project_id) if rec.project_id is not None else None
+        return RelationResult(
+            id=rec.id,
+            source=src.name if src else rec.source_entity_id,
+            target=dst.name if dst else rec.target_entity_id,
+            type=rec.type, status=rec.status, provenance=rec.provenance, scope=rec.scope,
+            project_id=rec.project_id, project_name=project[1] if project else None,
+            evidence=len(rec.memory_ids), created_at=rec.created_at, score=score,
+        )
 
     def find_entity(self, normalized: str, scope: Scope, project_id: int | None) -> EntityRecord | None:
         """The entity in (scope, project_id)'s bucket whose name or an alias normalizes to `normalized`."""
@@ -659,6 +707,10 @@ class Memory:
     def set_entity_col(self, col: str) -> None:
         """Switch this process to a finalized reembed's entity collection."""
         self.entity_col = col
+
+    def set_relation_col(self, col: str) -> None:
+        """Switch this process to a finalized reembed's relation collection."""
+        self.relation_col = col
 
     def _point(self, id: str, text: str, record: MemoryRecord) -> VectorPoint:
         """The point for a memory: dense vector, BM25 sparse vector and the payload that is the record."""
