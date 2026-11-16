@@ -2,9 +2,12 @@
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 from rem.errors import RemError
 from rem.projects import project_root
@@ -171,3 +174,61 @@ def installed_where(cwd: Path | None = None) -> list[str]:
     except OSError:  # e.g. the current directory was deleted: the project is unknown
         pass
     return where
+
+
+MCP_NAME = "rem"
+MCP_TIMEOUT = 30
+
+
+def mcp_command() -> list[str]:
+    return [sys.executable, "-m", "rem", "mcp"]
+
+
+def _remove_argv(claude: str, scope: str) -> list[str]:
+    return [claude, "mcp", "remove", "--scope", scope, MCP_NAME]
+
+
+def _add_argv(claude: str, scope: str) -> list[str]:
+    return [claude, "mcp", "add", "--scope", scope, MCP_NAME, "--", *mcp_command()]
+
+
+def _line(argv: list[str]) -> str:
+    return " ".join(argv)
+
+
+def register_mcp(scope: Literal["user", "local"], cwd: Path, *, dry_run=False,
+                 run=subprocess.run, which=shutil.which) -> str:
+    claude = which("claude")
+    if claude is None:
+        return "claude CLI not found; to add rem's MCP server run: " + _line(_add_argv("claude", scope))
+    if dry_run:
+        return "would run:\n" + _line(_remove_argv(claude, scope)) + "\n" + _line(_add_argv(claude, scope))
+    try:
+        run(_remove_argv(claude, scope), cwd=cwd, capture_output=True, text=True, timeout=MCP_TIMEOUT)  # may not exist yet
+        r = run(_add_argv(claude, scope), cwd=cwd, capture_output=True, text=True, timeout=MCP_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"could not add rem's MCP server: {e}"
+    if r.returncode != 0:
+        return f"could not add rem's MCP server: {_first_line(r.stderr)}"
+    return f"registered rem MCP server ({scope} scope)"
+
+
+def unregister_mcp(scope: Literal["user", "local"], cwd: Path, *, dry_run=False,
+                   run=subprocess.run, which=shutil.which) -> str:
+    claude = which("claude")
+    if claude is None:
+        return "claude CLI not found; to remove rem's MCP server run: " + _line(_remove_argv("claude", scope))
+    if dry_run:
+        return "would run: " + _line(_remove_argv(claude, scope))
+    try:
+        r = run(_remove_argv(claude, scope), cwd=cwd, capture_output=True, text=True, timeout=MCP_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"could not remove rem's MCP server: {e}"
+    if r.returncode != 0:
+        return f"could not remove rem's MCP server: {_first_line(r.stderr)}"
+    return f"removed rem's MCP server ({scope} scope)"
+
+
+def _first_line(text: str) -> str:
+    lines = (text or "").strip().splitlines()
+    return lines[0] if lines else "claude exited with an error"

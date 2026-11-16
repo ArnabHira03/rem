@@ -160,11 +160,19 @@ def _eval(args, cfg) -> int:
 def _install(args) -> int:
     from rem import install_claude_code as ic
 
+    from rem.projects import project_root
+
     path = ic.settings_path(args.project, Path.cwd())
+    scope = "local" if args.project else "user"
+    mcp_cwd = project_root(Path.cwd()) if args.project else Path.cwd()
+    # looked up here, at call time, so tests can fake both
+    mcp = {"which": ic.shutil.which, "run": ic.subprocess.run, "dry_run": args.dry_run}
     if args.uninstall:
         print(ic.uninstall(path, dry_run=args.dry_run))
+        print(ic.unregister_mcp(scope, mcp_cwd, **mcp))
     else:
         print(ic.install(path, ic.hook_command(), dry_run=args.dry_run))
+        print(ic.register_mcp(scope, mcp_cwd, **mcp))
         if not args.dry_run:
             from rem.systemd import unit_path
 
