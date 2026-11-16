@@ -188,3 +188,13 @@ async def test_list_by_cwd_keeps_only_that_projects_memories(api, tmp_path):
     assert len((await api.get("/memories")).json()) == 3
     r = await api.get("/memories", params={"cwd": str(a), "project_id": "1"})
     assert r.status_code == 400
+
+
+async def test_reembed_endpoints(api):
+    r = await api.post("/reembed", json={"model": "hash-32"})
+    assert r.status_code == 200 and r.json()["count"] == 0 and r.json()["collection"].endswith("hash-32_32")
+    assert (await api.get("/reembed")).json()["model"] == "hash-32"
+    r = await api.post("/reembed/finalize")
+    assert r.status_code == 200 and r.json()["collection"].endswith("hash-32_32")
+    assert (await api.get("/reembed")).json() is None
+    assert (await api.post("/reembed/finalize")).status_code == 409

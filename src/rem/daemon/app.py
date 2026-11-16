@@ -9,7 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from rem.daemon.schemas import IngestBody
+from rem.daemon.schemas import IngestBody, ReembedBody
 from rem.daemon.service import RemService
 from rem.errors import MemoryNotFound, RemError
 from rem.models import HistoryRow, MemoryRecord, Provenance, Scope, SearchResult, Status
@@ -150,6 +150,16 @@ def build_app(service: RemService) -> Starlette:
     async def retry_failed(request: Request):
         return _json({"requeued": await service.retry_failed()})
 
+    async def reembed(request: Request):
+        b = await _body(request, ReembedBody)
+        return _json(await service.reembed(b.model))
+
+    async def reembed_status(request: Request):
+        return _json(await service.reembed_status())
+
+    async def reembed_finalize(request: Request):
+        return _json(await service.reembed_finalize())
+
     async def on_not_found(request, exc: MemoryNotFound):
         return _error(404, "not_found", str(exc))
 
@@ -178,6 +188,9 @@ def build_app(service: RemService) -> Starlette:
             Route("/context", context, methods=["POST"]),
             Route("/ingest", ingest, methods=["POST"]),
             Route("/jobs/retry", retry_failed, methods=["POST"]),
+            Route("/reembed", reembed, methods=["POST"]),
+            Route("/reembed", reembed_status, methods=["GET"]),
+            Route("/reembed/finalize", reembed_finalize, methods=["POST"]),
         ],
         exception_handlers={
             MemoryNotFound: on_not_found,

@@ -3,7 +3,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from rem.models import MemoryRecord
-from rem.retrieve import overfetch, rank
+from rem.retrieve import KEYWORD_BOOST, fuse, overfetch, score_and_rank
+
+
+def rank(pairs, *args):
+    """Dense-only ranking: hybrid score equals the dense cosine."""
+    return score_and_rank([(r, s, s) for r, s in pairs], *args)
 
 NOW = datetime(2026, 11, 15, tzinfo=UTC)
 _n = 0
@@ -46,3 +51,32 @@ def test_unverified_penalized_and_recency_decays():
 def test_limit_and_overfetch():
     assert overfetch(5) == 40 and overfetch(20) == 80
     assert len(rank([(rec("global"), 0.9)] * 5, None, 2, NOW)) == 2
+
+
+def test_keyword_match_lifts_a_near_miss_above_a_closer_dense_hit():
+    a, b = rec("global"), rec("global")
+    fused = fuse([(a, 0.40), (b, 0.42)], {a.id: 1.0})
+    ranked = score_and_rank(fused, None, 10, NOW)
+    assert ranked[0].record.id == a.id
+    assert ranked[0].score == pytest.approx(0.40 + KEYWORD_BOOST + 0.02)
+    assert ranked[0].semantic == pytest.approx(0.40)
+
+
+def test_keyword_score_is_normalized_by_the_best_keyword_hit():
+    a, b = rec("global"), rec("global")
+    fused = fuse([(a, 0.40), (b, 0.40)], {a.id: 4.0, b.id: 2.0})
+    hybrid = {r.id: h for r, h, _ in fused}
+    assert hybrid[a.id] == pytest.approx(0.40 + KEYWORD_BOOST)
+    assert hybrid[b.id] == pytest.approx(0.40 + KEYWORD_BOOST / 2)
+
+
+def test_keyword_only_hit_below_floor_is_dropped():
+    # a shared common word lifts the hybrid score, but the dense cosine is below the floor
+    weak = rec("global")
+    fused = fuse([(weak, 0.05)], {weak.id: 1.0})
+    assert score_and_rank(fused, None, 10, NOW) == []
+
+
+def test_no_keyword_hits_leaves_dense_scores_unchanged():
+    a = rec("global")
+    assert fuse([(a, 0.60)], {}) == [(a, 0.60, 0.60)]

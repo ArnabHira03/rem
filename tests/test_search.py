@@ -29,3 +29,10 @@ def test_scope_filter_and_labels(mem):
 def test_empty_query_rejected(mem):
     with pytest.raises(ValueError, match="text must not be empty"):
         mem.search("  ")
+
+
+def test_keyword_search_finds_exact_term_in_hybrid_mode(mem):
+    add(mem, "the build uses tabs")
+    add(mem, "the build uses spaces")
+    out = mem.search("tabs")
+    assert out and out[0].record.text == "the build uses tabs"

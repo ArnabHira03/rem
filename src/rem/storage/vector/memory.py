@@ -1,6 +1,6 @@
 import math
 
-from rem.storage.vector.base import Filters, ScoredPoint, VectorPoint, VectorStore
+from rem.storage.vector.base import Filters, ScoredPoint, SparseVector, VectorPoint, VectorStore
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -27,9 +27,15 @@ class InMemoryVectorStore(VectorStore):
 
     def __init__(self) -> None:
         self._cols: dict[str, dict[str, VectorPoint]] = {}
+        self._sparse: set[str] = set()
 
-    def create_col(self, name: str, vector_size: int) -> None:
+    def create_col(self, name: str, vector_size: int, *, sparse: bool = False) -> None:
         self._cols.setdefault(name, {})
+        if sparse:
+            self._sparse.add(name)
+
+    def col_has_sparse(self, name: str) -> bool:
+        return name in self._sparse
 
     def col_exists(self, name: str) -> bool:
         return name in self._cols
@@ -39,7 +45,7 @@ class InMemoryVectorStore(VectorStore):
 
     def upsert(self, col: str, points: list[VectorPoint]) -> None:
         for p in points:
-            self._cols[col][p.id] = VectorPoint(p.id, list(p.vector or []), dict(p.payload))
+            self._cols[col][p.id] = VectorPoint(p.id, list(p.vector or []), dict(p.payload), p.sparse)
 
     def search(self, col, vector, limit, filters=None):
         hits = [
@@ -50,9 +56,42 @@ class InMemoryVectorStore(VectorStore):
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:limit]
 
-    def get(self, col, ids):
+    def keyword_search(self, col, query_sparse, limit, filters=None):
+        if col not in self._sparse:
+            return None
+        pts = [p for p in self._cols[col].values() if p.sparse and _matches(p.payload, filters)]
+        n = len(pts)
+        df: dict[int, int] = {}
+        for p in pts:
+            for t in set(p.sparse.indices):
+                df[t] = df.get(t, 0) + 1
+        query = dict(zip(query_sparse.indices, query_sparse.values))
+        hits = []
+        for p in pts:
+            weights = dict(zip(p.sparse.indices, p.sparse.values))
+            score = 0.0
+            for t, qv in query.items():
+                if t in weights:
+                    d = df[t]
+                    idf = math.log(1 + (n - d + 0.5) / (d + 0.5))
+                    score += qv * weights[t] * idf
+            if score > 0:
+                hits.append(ScoredPoint(p.id, score, dict(p.payload)))
+        hits.sort(key=lambda h: h.score, reverse=True)
+        return hits[:limit]
+
+    def get(self, col, ids, with_vectors=False):
         pts = self._cols[col]
-        return [VectorPoint(i, list(pts[i].vector or []), dict(pts[i].payload)) for i in ids if i in pts]
+        out = []
+        for i in ids:
+            if i not in pts:
+                continue
+            p = pts[i]
+            if with_vectors:
+                out.append(VectorPoint(i, list(p.vector or []), dict(p.payload), p.sparse))
+            else:
+                out.append(VectorPoint(i, None, dict(p.payload)))
+        return out
 
     def update_payload(self, col, id, payload):
         self._cols[col][id].payload.update(payload)
@@ -63,7 +102,7 @@ class InMemoryVectorStore(VectorStore):
 
     def list_points(self, col, filters=None, limit=None):
         return [
-            VectorPoint(p.id, list(p.vector or []), dict(p.payload))
+            VectorPoint(p.id, None, dict(p.payload))
             for p in self._cols[col].values()
             if _matches(p.payload, filters)
         ][:limit]

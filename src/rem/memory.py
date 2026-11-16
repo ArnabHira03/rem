@@ -12,7 +12,8 @@ from pathlib import Path
 
 from rem.config import RemConfig
 from rem.embed.base import Embedder, collection_slug
-from rem.embed.factory import create_embedder
+from rem.embed.factory import create_embedder, create_sparse_embedder
+from rem.embed.sparse import SparseEmbedder
 from rem.errors import EmbedderMismatchError, MemoryNotFound
 from rem.models import (
     Candidate,
@@ -32,7 +33,7 @@ from rem.models import (
     utcnow,
 )
 from rem.projects import ProjectInfo, project_root, resolve_project
-from rem.retrieve import overfetch, rank
+from rem.retrieve import cosine, fuse, overfetch, score_and_rank
 from rem.storage.sqlite import RemDB
 from rem.storage.vector.base import VectorPoint, VectorStore
 from rem.storage.vector.factory import create_vector_store
@@ -41,6 +42,9 @@ from rem.trust import Action, assign_trust, decide, quote_in_user_turns, user_st
 log = logging.getLogger(__name__)
 
 ACTIVE_EMBEDDER_KEY = "active_embedder"
+ACTIVE_COLLECTION_KEY = "active_collection"  # set once a reembed is finalized; default is rem_memories__<slug>
+ACTIVE_MODEL_KEY = "active_model"  # the model string the active embedder was built from
+TARGET_KEY = "reembed_target"  # JSON {"collection", "slug", "model"} while a reembed is pending
 MAX_PENDING_CONFIRMATIONS = 10  # requests one job checks, newest first
 
 
@@ -69,24 +73,40 @@ class Memory:
         *,
         vector_store: VectorStore | None = None,
         embedder: Embedder | None = None,
+        sparse_embedder: SparseEmbedder | None = None,
     ):
+        self.cfg = cfg
         self.db = RemDB(cfg.db_path)
         try:
             self.embedder = embedder or create_embedder(cfg.embedder)
+            self.sparse_embedder = sparse_embedder or create_sparse_embedder(cfg.embedder)
             slug = collection_slug(self.embedder.model_id, self.embedder.dims)
             stored = self.db.get_meta(ACTIVE_EMBEDDER_KEY)
             if stored and stored != slug:
+                stored_model = self.db.get_meta(ACTIVE_MODEL_KEY) or stored
+                model = self.embedder.model_id
                 raise EmbedderMismatchError(
-                    f"stored memories use {stored}; configured embedder is {slug}. "
-                    "Run `rem reembed` (coming in M6) or change the config back."
+                    f"stored memories use {stored_model} ({stored}); configured embedder is {model} ({slug}). "
+                    f'Set [embedder] model = "{stored_model}" to use them as they are, or move them to {model} '
+                    f"with `rem reembed --model {model}` run while the old config is in place, "
+                    "then `rem reembed --finalize`."
                 )
             self.vectors = vector_store or create_vector_store(cfg)
+            self.col = self.db.get_meta(ACTIVE_COLLECTION_KEY) or f"rem_memories__{slug}"
+            if self.vectors.col_exists(self.col):
+                # a collection from before M6 has no BM25 slot: it opens dense-only, keyword search is off
+                # until `rem reembed` copies it (writes and dense search keep working)
+                self.keyword_enabled = self.vectors.col_has_sparse(self.col)
+            else:
+                self.vectors.create_col(self.col, self.embedder.dims, sparse=True)
+                self.keyword_enabled = True
+            if not self.keyword_enabled:
+                log.warning("%s has no BM25 slot: keyword search is off until `rem reembed` rebuilds it", self.col)
         except BaseException:
             self.db.close()
             raise
         self.db.set_meta(ACTIVE_EMBEDDER_KEY, slug)
-        self.col = f"rem_memories__{slug}"
-        self.vectors.create_col(self.col, self.embedder.dims)
+        self.db.set_meta(ACTIVE_MODEL_KEY, self.embedder.model_id)
 
     # ---- reads -------------------------------------------------------------
 
@@ -141,14 +161,24 @@ class Memory:
         current = None
         if cwd is not None:  # search never registers new projects
             current = self.db.find_project(str(project_root(cwd)))
-        hits = self.vectors.search(
-            self.col,
-            self.embedder.embed_query(query),
-            overfetch(limit),
-            {"scope": str(scope)} if scope else None,
+        filters = {"scope": str(scope)} if scope else None
+        dense_vec = self.embedder.embed_query(query)
+        sparse_vec = self.sparse_embedder.embed_query(query)
+        hits = self.vectors.search(self.col, dense_vec, overfetch(limit), filters)
+        keyword_hits = (
+            self.vectors.keyword_search(self.col, sparse_vec, overfetch(limit), filters) or []
+            if sparse_vec.indices and self.keyword_enabled else []
         )
-        candidates = [(MemoryRecord.from_payload(h.payload), h.score) for h in hits]
-        return rank(candidates, current, limit, datetime.now(UTC))
+        keyword = {h.id: h.score for h in keyword_hits}
+        payloads = {h.id: (h.payload, h.score) for h in hits}
+        # keyword-only matches: fetch them and score their dense cosine, so the threshold applies to a real number
+        missing = [i for i in keyword if i not in payloads]
+        for p in self.vectors.get(self.col, missing, with_vectors=True) if missing else []:
+            if filters and any(p.payload.get(k) != v for k, v in filters.items()):
+                continue
+            payloads[p.id] = (p.payload, cosine(dense_vec, p.vector or []))
+        candidates = [(MemoryRecord.from_payload(payload), score) for payload, score in payloads.values()]
+        return score_and_rank(fuse(candidates, keyword), current, limit, datetime.now(UTC))
 
     def context(self, cwd: Path | None, max_chars: int) -> ContextResult:
         """Verified memories for SessionStart: current project, then system, then global; read-only."""
@@ -189,7 +219,7 @@ class Memory:
         candidates = [(r, h.score) for h in hits
                       # a memory awaiting the user's confirmation is only ever shown to confirm_pending
                       if not (r := MemoryRecord.from_payload(h.payload)).confirm_requested_at]
-        return [r.record for r in rank(candidates, project_id, limit, datetime.now(UTC))]
+        return [r.record for r in score_and_rank(fuse(candidates, {}), project_id, limit, datetime.now(UTC))]
 
     def similarity(self, text: str, id: str, scope: Scope, project_id: int | None) -> tuple[MemoryRecord, float] | None:
         """Memory `id` with its cosine similarity to text, if it is live in the given scope and project."""
@@ -260,7 +290,7 @@ class Memory:
             observed_at=None, source=source, session_id=session_id, job_id=job_id, agent_claim=agent_claim,
             created_at=now, updated_at=now,
         )
-        self.vectors.upsert(self.col, [VectorPoint(mid, self.embedder.embed([text])[0], record.to_payload())])
+        self.vectors.upsert(self.col, [self._point(mid, text, record)])
         self.db.add_history(TargetKind.MEMORY, mid, HistoryEvent.ADD, None, text, actor, job_id)
         return record
 
@@ -278,7 +308,7 @@ class Memory:
         if unverify:
             changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED, "agent_claim": True}
         record = old.model_copy(update=changes)
-        self.vectors.upsert(self.col, [VectorPoint(id, self.embedder.embed([text])[0], record.to_payload())])
+        self.vectors.upsert(self.col, [self._point(id, text, record)])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)
         return record
 
@@ -456,6 +486,20 @@ class Memory:
         old = self._require(id)
         self.vectors.delete(self.col, [id])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.DELETE, old.text, None, actor)
+
+    def set_active(self, col: str, embedder: Embedder) -> None:
+        """Switch this process to a finalized reembed target (the store records the switch in the same call)."""
+        self.col = col
+        self.embedder = embedder
+
+    def _point(self, id: str, text: str, record: MemoryRecord) -> VectorPoint:
+        """The point for a memory: dense vector, BM25 sparse vector and the payload that is the record."""
+        return VectorPoint(
+            id,
+            self.embedder.embed([text])[0],
+            record.to_payload(),
+            self.sparse_embedder.embed_docs([text])[0],
+        )
 
     def _find_by_text(self, text: str, scope: Scope, project_id: int | None) -> MemoryRecord | None:
         """A live memory with the same normalized text in the same scope and project, if any."""

@@ -156,3 +156,45 @@ def test_update_unverify_downgrades_a_verified_memory(mem):
     assert stored.text == "Prefers pip"
     assert [(h.event, h.old_value, h.new_value) for h in mem.history(m.id)][1:] == [
         ("UPDATE", "Prefers uv over pip", "Prefers uv"), ("UPDATE", "Prefers uv", "Prefers pip")]
+
+
+def test_add_stores_bm25_slot(mem):
+    r = add(mem, "uses Qdrant for storage")
+    (p,) = mem.vectors.get(mem.col, [r.id], with_vectors=True)
+    assert p.sparse is not None and len(p.sparse.indices) > 0
+
+
+def test_update_refreshes_bm25_slot(mem):
+    r = add(mem, "uses Qdrant for storage")
+    mem.update(r.id, "uses Postgres for storage", actor="cli")
+    (p,) = mem.vectors.get(mem.col, [r.id], with_vectors=True)
+    assert p.sparse == mem.sparse_embedder.embed_docs(["uses Postgres for storage"])[0]
+
+
+def test_dense_only_collection_opens_with_keyword_search_off(cfg):
+    from rem.embed.base import collection_slug
+    from rem.embed.hashing import HashingEmbedder
+
+    e = HashingEmbedder(64)
+    vs = InMemoryVectorStore()
+    vs.create_col(f"rem_memories__{collection_slug(e.model_id, e.dims)}", e.dims)  # M5 layout: no BM25 slot
+    mem = Memory(cfg, vector_store=vs, embedder=e)
+    try:
+        assert mem.keyword_enabled is False
+        r = add(mem, "uses tabs")  # writes still work, dense only
+        assert [h.record.id for h in mem.search("tabs")] == [r.id]
+    finally:
+        mem.close()
+
+
+def test_mismatch_after_finalize_names_the_stored_model(cfg):
+    """F4: after a switch, the message must name the model to set in config, not only slugs."""
+    from rem import reembed
+
+    m = Memory(cfg)
+    add(m, "uses tabs")
+    reembed.run(m, "hash-32")
+    reembed.finalize(m)
+    m.close()
+    with pytest.raises(EmbedderMismatchError, match='model = "hash-32"'):
+        Memory(cfg)

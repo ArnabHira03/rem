@@ -2,7 +2,7 @@
 
 import pytest
 
-from rem.storage.vector.base import VectorPoint
+from rem.storage.vector.base import SparseVector, VectorPoint
 from rem.storage.vector.memory import InMemoryVectorStore
 from rem.storage.vector.qdrant import QdrantVectorStore
 
@@ -94,3 +94,27 @@ def test_list_points_returns_all_beyond_a_page(store, monkeypatch):
     ])
     assert len(store.list_points("c")) == 25
     assert len(store.list_points("c", limit=3)) == 3
+
+
+def test_sparse_collection_reports_slot_and_keyword_search_ranks_exact_terms(store):
+    store.create_col("sparse", 2, sparse=True)
+    assert store.col_has_sparse("sparse")
+    store.upsert("sparse", [
+        VectorPoint(ID1, [1.0, 0.0], {"scope": "global"}, sparse=SparseVector([7], [1.0])),
+        VectorPoint(ID2, [0.0, 1.0], {"scope": "global"}, sparse=SparseVector([9], [1.0])),
+    ])
+    hits = store.keyword_search("sparse", SparseVector([9], [1.0]), 5)
+    assert [h.id for h in hits] == [ID2]  # ID1 shares no term with the query: not returned
+
+
+def test_dense_only_collection_has_no_keyword_slot(store):
+    store.create_col("dense2", 2)
+    assert not store.col_has_sparse("dense2")
+    assert store.keyword_search("dense2", SparseVector([1], [1.0]), 5) is None
+
+
+def test_get_with_vectors_returns_both_vectors(store):
+    store.create_col("sparse3", 2, sparse=True)
+    store.upsert("sparse3", [VectorPoint(ID1, [1.0, 0.0], {"k": 1}, sparse=SparseVector([3], [0.5]))])
+    (p,) = store.get("sparse3", [ID1], with_vectors=True)
+    assert p.vector == [1.0, 0.0] and p.sparse == SparseVector([3], [0.5])

@@ -41,3 +41,27 @@ def test_fastembed_unavailable_is_clear(monkeypatch, tmp_path):
 def test_fastembed_real_model(tmp_path):
     e = FastEmbedEmbedder("BAAI/bge-small-en-v1.5", tmp_path)
     assert e.dims == 384 and len(e.embed_query("which package manager?")) == 384
+
+
+def test_hashing_bm25_is_case_and_punctuation_insensitive():
+    from rem.embed.sparse import HashingBM25
+
+    e = HashingBM25()
+    assert e.embed_query("Tabs!") == e.embed_query("tabs")
+
+
+def test_hashing_bm25_empty_query_is_empty_vector():
+    from rem.embed.sparse import HashingBM25
+
+    v = HashingBM25().embed_query("?  ")
+    assert v.indices == [] and v.values == []
+
+
+@pytest.mark.slow
+def test_fastembed_bm25_real_model_matches_case_and_punctuation(tmp_path):
+    from rem.embed.sparse import FastEmbedBM25
+
+    e = FastEmbedBM25(tmp_path)
+    (a,) = e.embed_docs(["Tabs"])
+    (b,) = e.embed_docs(["tabs."])
+    assert a.indices and a == b

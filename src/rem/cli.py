@@ -51,6 +51,11 @@ def _parser() -> argparse.ArgumentParser:
 
     cmd("retry-failed", "requeue extraction jobs that failed (e.g. after fixing the LLM config)")
 
+    re_ = cmd("reembed", "copy every memory to another embedding model, then switch to it")
+    re_.add_argument("--model", help="embedding model to copy into (starts the copy)")
+    re_.add_argument("--finalize", action="store_true", help="bring the copy up to date and switch to it")
+    re_.add_argument("--status", action="store_true", help="show a pending copy")
+
     cmd("daemon", "run the rem daemon in the foreground")
     cmd("start", "start the rem daemon in the background")
     cmd("stop", "stop the rem daemon")
@@ -282,6 +287,24 @@ def main(argv: list[str] | None = None) -> int:
 
                 n = ensure_daemon(cfg).retry_failed()
                 print(json.dumps({"requeued": n}) if args.json else f"requeued {n} job(s)")
+                return 0
+            case "reembed":
+                from rem.client import ensure_daemon
+
+                client = ensure_daemon(cfg)
+                if args.finalize:
+                    out = client.reembed_finalize()
+                    text = (f"switched to {out['collection']}; set [embedder] model in the config to match, "
+                            "then restart the daemon")
+                elif args.model:
+                    out = client.reembed(args.model)
+                    text = (f"copied {out['count']} memories into {out['collection']}; "
+                            "run `rem reembed --finalize` to switch")
+                else:
+                    out = client.reembed_status()
+                    text = "no reembed pending" if out is None else (
+                        f"pending: {out['model']} in {out['collection']}; run `rem reembed --finalize`")
+                print(json.dumps(out) if args.json else text)
                 return 0
             case "start":
                 from rem.client import ensure_daemon
