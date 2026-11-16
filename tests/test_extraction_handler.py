@@ -243,17 +243,19 @@ NO_FACTS = {"facts": []}
 
 async def test_users_reply_confirms_a_requested_memory(svc):
     m = await _agent_fact(svc)
-    llm = FakeLLM([NO_FACTS, {"confirmations": [{"id": 0, "quote": "yes, remember that"}]}])
-    await _exchange(svc, "Yes, remember that.", "Saved.", [m.id])
+    llm = FakeLLM([NO_FACTS, {"confirmations": [{"id": 0, "quote": "yes, remember tabs"}]}])
+    await _exchange(svc, "Yes, remember tabs.", "Saved.", [m.id])
     await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
     assert m.text not in llm.calls[0][1]  # the extraction prompt never sees the agent's claim
-    assert "[0] Prefers tabs over spaces" in llm.calls[1][1] and "user: Yes, remember that." in llm.calls[1][1]
+    assert "[0] Prefers tabs over spaces" in llm.calls[1][1] and "user: Yes, remember tabs." in llm.calls[1][1]
     got = await svc.get(m.id)
     assert got.status == S.VERIFIED and got.provenance == P.USER_CONFIRMED and got.corroborated_by == "job:1"
     assert [(h.event, h.actor) for h in await svc.history(m.id)] == [
         (HistoryEvent.ADD, "mcp"), (HistoryEvent.CONFIRM_REQUEST, "mcp"), (HistoryEvent.CONFIRM, "extractor")]
     _, cached = svc.memory.db.get_extraction(1)
-    assert json.loads(cached)["confirmations"] == [{"memory_id": m.id, "hash": m.hash, "quote": "yes, remember that"}]
+    [c] = json.loads(cached)["confirmations"]
+    assert c["memory_id"] == m.id and c["hash"] == m.hash and c["quote"] == "yes, remember tabs"
+    assert c["requested_at"]  # pinned to the request the LLM was shown
 
 
 async def test_llm_claim_without_the_users_words_leaves_it_unverified(svc):
@@ -307,3 +309,41 @@ async def test_cached_extraction_from_before_m5_still_replays(svc):
     await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
     [m] = await svc.list(scope=None, status=None, project_id=None)
     assert m.text == "Prefers uv over pip" and m.status == S.VERIFIED and llm.calls == []
+
+
+async def test_request_made_after_the_exchange_was_enqueued_is_not_offered(svc):
+    m = await _agent_fact(svc)
+    llm = FakeLLM([NO_FACTS])
+    await _exchange(svc, "yes", "Saved.")
+    await svc.request_confirmation(m.id, actor="mcp")  # after Stop: belongs to the next exchange
+    await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
+    assert len(llm.calls) == 1 and (await svc.get(m.id)).status == S.UNVERIFIED
+
+
+async def test_request_from_another_project_is_not_offered(svc, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        (d / ".git").mkdir(parents=True)
+    await svc.ingest("claude-code", "sb", b, [Turn("user", "hi")], enqueue=False)  # b is a known project
+    m = await _agent_fact(svc)
+    llm = FakeLLM([NO_FACTS])
+    await svc.ingest("claude-code", "sa", a, [Turn("user", "yes")], enqueue=False)
+    await svc.request_confirmation(m.id, actor="mcp", cwd=b)  # an agent in repo b, concurrently
+    await svc.ingest("claude-code", "sa", a, [Turn("assistant", "ok")])
+    await run_worker_until(svc, ExtractionHandler(llm, ExtractionConfig()), lambda s: s["jobs"]["done"] >= 1)
+    assert len(llm.calls) == 1 and (await svc.get(m.id)).status == S.UNVERIFIED
+
+
+async def test_job_window_is_fixed_once_enqueued(svc, clock):
+    await svc.ingest("claude-code", "s1", None, [Turn("user", "one")], enqueue=False)
+    first = (await svc.ingest("claude-code", "s1", None, [Turn("assistant", "r1")])).job_id
+    store = svc.ingest_store
+    w1 = await svc.store.run(store.job_window, first)
+    await svc.store.run(store.claim)  # the worker takes it: claiming (and retrying) moves updated_at only
+    assert await svc.store.run(store.job_window, first) == w1
+    await svc.ingest("claude-code", "s1", None, [Turn("user", "two")], enqueue=False)
+    second = (await svc.ingest("claude-code", "s1", None, [Turn("assistant", "r2")])).job_id
+    assert second != first
+    w2 = await svc.store.run(store.job_window, second)
+    assert w1[1] == w2[0]  # consecutive exchanges meet, never overlap
+    assert w1[0] < w1[1] < w2[1]

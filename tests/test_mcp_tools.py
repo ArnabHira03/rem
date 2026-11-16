@@ -94,8 +94,9 @@ def test_confirm_memory_only_requests_confirmation(client, tmp_path):
     r = call(tools, "confirm_memory", id=mid)
     assert not r.is_error
     assert r.text == (f"Confirmation requested (still unverified): {mid}  [global] unverified  Prefers uv over pip\n"
-                      "rem verifies it only if the user's own message in this conversation confirms it, which it "
-                      "checks after this turn ends; otherwise it stays unverified.")
+                      "rem verifies it only if the user's own message in this conversation confirms it in words "
+                      "that name the fact (a bare \"yes\" is not enough), which it checks after this turn ends; "
+                      "otherwise it stays unverified.")
     m = client.get(mid)
     assert m["status"] == "unverified" and m["provenance"] == "assistant_generated"
     assert m["confirm_requested_at"]

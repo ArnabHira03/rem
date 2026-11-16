@@ -9,7 +9,7 @@ from pathlib import Path
 from rem.errors import RemError
 from rem.models import HistoryEvent, HistoryRow, TargetKind, utcnow
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _MIGRATIONS = {
     1: """
@@ -76,6 +76,11 @@ _MIGRATIONS = {
         candidates TEXT NOT NULL,
         created_at TEXT NOT NULL
     );
+    """,
+    # When a job last took new turns (its exchange's end); updated_at also moves on claim and retry.
+    4: """
+    ALTER TABLE jobs ADD COLUMN enqueued_at TEXT;
+    UPDATE jobs SET enqueued_at = created_at;
     """,
 }
 

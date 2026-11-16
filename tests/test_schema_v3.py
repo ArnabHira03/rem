@@ -15,15 +15,16 @@ def _make_v2(path):
     c.close()
 
 
-def test_schema_version_is_3():
-    assert SCHEMA_VERSION == 3
+def test_schema_version_is_4():
+    assert SCHEMA_VERSION == 4
 
 
-def test_v2_db_migrates_to_v3_and_keeps_rows(tmp_path):
+def test_v2_db_migrates_to_v4_and_keeps_rows(tmp_path):
     p = tmp_path / "rem.db"
     _make_v2(p)
     db = RemDB(p)
-    assert db.get_meta("schema_version") == "3"
+    assert db.get_meta("schema_version") == "4"
+    assert db.conn.execute("SELECT enqueued_at FROM jobs").fetchone()[0] == "t"  # v4 backfills from created_at
     assert len(db.get_history("m1")) == 1
     assert db.conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
     assert db.conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1

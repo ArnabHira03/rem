@@ -32,8 +32,9 @@ class RemService:
     async def add(self, text: str, *, scope: Scope, cwd: Path | None, provenance: Provenance,
                   status: Status, source: str, actor: str):
         project = await asyncio.to_thread(resolve_project, cwd) if scope == Scope.PROJECT and cwd is not None else None
+        # anything an agent writes over MCP is its claim until the user confirms it
         return await self.store.run(self.memory.add, text, scope=scope, cwd=cwd, project=project, provenance=provenance,
-                                    status=status, source=source, actor=actor)
+                                    status=status, source=source, actor=actor, agent_claim=actor == "mcp")
 
     async def search(self, query: str, *, cwd: Path | None, limit: int, scope: Scope | None):
         return await self.store.run(self.memory.search, query, cwd=cwd, limit=limit, scope=scope)
@@ -59,8 +60,8 @@ class RemService:
     async def confirm(self, id: str, *, actor: str):
         return await self.store.run(self.memory.confirm, id, actor=actor)
 
-    async def request_confirmation(self, id: str, *, actor: str):
-        return await self.store.run(self.memory.request_confirmation, id, actor=actor)
+    async def request_confirmation(self, id: str, *, actor: str, cwd: Path | None = None):
+        return await self.store.run(self.memory.request_confirmation, id, actor=actor, cwd=cwd)
 
     async def history(self, id: str):
         return await self.store.run(self.memory.history, id)

@@ -7,6 +7,12 @@ from rem.redact import redact
 
 _QUOTE_MARKS = " \t\n\"'`“”‘’«»"
 MIN_QUOTE_WORD_CHARS = 2
+# words too common to tie a quote to a fact
+_STOPWORDS = frozenset("""
+about after also always been before being could does doing from have just like make more most much never
+only other over same should some such than that their them then there these they this very want what
+when where which while will with would your yours
+""".split())
 
 
 @dataclass(frozen=True)
@@ -50,16 +56,41 @@ def _norm(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
-def quote_in_user_turns(quote: str, user_texts: list[str]) -> bool:
-    """Whether quote is words the user actually wrote: whole words of one of user_texts.
+def _words(text: str) -> list[str]:
+    return re.findall(r"\w+", text.casefold())
 
-    The check is literal (case and whitespace aside), so an LLM's paraphrase, an assistant turn, or
-    an agent's summary of what the user said never passes. A quote needs at least
-    MIN_QUOTE_WORD_CHARS letters or digits, so a stray character can't match every message.
+
+def _key_words(text: str) -> set[str]:
+    """Words that tie a sentence to a fact, cut to 5 letters so "deploy" matches "deploys"."""
+    return {w[:5] for w in _words(text) if len(w) >= 4 and w not in _STOPWORDS}
+
+
+def quote_in_user_turns(quote: str, user_texts: list[str], fact: str) -> bool:
+    """Whether quote is the user's own words confirming fact, as far as can be checked without an LLM.
+
+    The quote must be whole words of one of user_texts (case and whitespace aside), so an LLM's
+    paraphrase, an assistant turn, or an agent's summary of what the user said never passes. And
+    the user's sentence containing it must itself name the fact (share a key word with it): "yep,
+    tabs" confirms "Prefers tabs over spaces", a bare "yes" does not, because what a bare yes
+    agrees to is defined by the assistant's question, which the agent wrote.
     """
     q = _norm(quote.strip(_QUOTE_MARKS))
     if sum(ch.isalnum() for ch in q) < MIN_QUOTE_WORD_CHARS:
         return False
     pattern = re.compile(r"(?<!\w)" + re.escape(q) + r"(?!\w)")
+    fact_words = _key_words(fact)
     # turns are stored redacted already; the prompt redacts again, so accept a quote of either form
-    return any(pattern.search(_norm(t)) or pattern.search(_norm(redact(t))) for t in user_texts)
+    for text in user_texts:
+        for form in (_norm(text), _norm(redact(text))):
+            for m in pattern.finditer(form):
+                if _key_words(_sentence_around(form, m.start(), m.end())) & fact_words:
+                    return True
+    return False
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence(s) of text that the span [start, end) touches."""
+    stops = ".!?;\n"
+    left = max(text.rfind(c, 0, start) for c in stops) + 1
+    rights = [i for c in stops if (i := text.find(c, end)) != -1]
+    return text[left:min(rights) if rights else len(text)]

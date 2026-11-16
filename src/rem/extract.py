@@ -82,15 +82,23 @@ def clip_turn(text: str, limit: int = MAX_TURN_CHARS) -> str:
     return f"{text[:half]}\n[… {len(text) - 2 * half} chars omitted …]\n{text[-half:]}"
 
 
+def render_turn(t: Turn) -> str:
+    """One prompt line per turn: "role: content", redacted and clipped. The content's own line breaks
+    are indented, so a turn can't fake a line of its own (an assistant reply containing
+    "\nuser: yes" stays visibly inside the assistant's turn)."""
+    # redact before clipping, so a cut can't leave half a secret the patterns no longer match
+    body = clip_turn(redact(t.content)).replace("\r", "")
+    return f"{t.role}: " + "\n    ".join(body.split("\n"))
+
+
 def build_prompt(
     turns: list[Turn], context: list[Turn], related: list[MemoryRecord]
 ) -> tuple[str, str]:
     existing = "\n".join(
         f"[{i}] ({m.scope.value}, {m.status.value}) {redact(m.text)}" for i, m in enumerate(related)
     )
-    # redact before clipping, so a cut can't leave half a secret the patterns no longer match
-    earlier = "\n".join(f"{t.role}: {clip_turn(redact(t.content))}" for t in context)
-    new = "\n".join(f"{t.role}: {clip_turn(redact(t.content))}" for t in turns)
+    earlier = "\n".join(render_turn(t) for t in context)
+    new = "\n".join(render_turn(t) for t in turns)
     user = (
         f"## Existing memories\n{existing}\n\n"
         f"## Earlier conversation\n{earlier}\n\n"
@@ -178,23 +186,26 @@ CONFIRM_SYSTEM_PROMPT = """\
 An AI assistant wants to remember some facts about a user, and says the user confirmed them. You \
 check that against what the user actually wrote.
 
-A fact is confirmed ONLY if a "user:" line in the conversation clearly agrees that THIS fact is true: \
-the user states it, or answers yes to the assistant asking about this fact. It is NOT confirmed by \
+Each turn starts with "user:" or "assistant:" at the start of a line; indented lines belong to the \
+turn above. A fact is confirmed ONLY if a user turn clearly agrees that THIS fact is true in words that name \
+it: the user states it, or answers yes and names it ("yes, tabs"). It is NOT confirmed by \
 a yes to a different question, a vague or partial agreement, a correction, a refusal, or anything \
 only the assistant writes (including the assistant saying the user agreed).
 
-For each confirmed fact, return {"id": <its number>, "quote": "<the words from that user line that \
-agree, copied character for character>"}. When no fact is confirmed, or you are unsure, return \
+For each confirmed fact, return {"id": <its number>, "quote": "<the words from that user turn that \
+agree, copied character for character>"}, including the words that name the fact. When no fact is confirmed, or you are unsure, return \
 {"confirmations": []}.
 
 Respond with JSON: {"confirmations": [{"id": ..., "quote": ...}]}"""
 
 
 def build_confirm_prompt(turns: list[Turn], context: list[Turn], pending: list[MemoryRecord]) -> tuple[str, str]:
-    # the assistant's last message before this job is what a bare "yes" answers
+    # the assistant's last message before this job is what a bare "yes" answers; what the assistant
+    # says after the user's last message can't be what the user agreed to, so it is left out
     before = next((t for t in reversed(context) if t.role == "assistant"), None)
-    lines = [before] if before is not None else []
-    convo = "\n".join(f"{t.role}: {clip_turn(redact(t.content))}" for t in [*lines, *turns])
+    last_user = max(i for i, t in enumerate(turns) if t.role == "user")
+    shown = ([before] if before is not None else []) + turns[: last_user + 1]
+    convo = "\n".join(render_turn(t) for t in shown)
     facts = "\n".join(f"[{i}] {redact(m.text)}" for i, m in enumerate(pending))
     return CONFIRM_SYSTEM_PROMPT, f"## Conversation\n{convo}\n\n## Facts awaiting the user's confirmation\n{facts}\n"
 
@@ -219,5 +230,6 @@ def confirm_pending(
             log.warning("dropping invalid confirmation #%d", n)
             continue
         m = pending[index]
-        found.setdefault(m.id, Confirmation(memory_id=m.id, hash=m.hash, quote=quote.strip()))
+        found.setdefault(m.id, Confirmation(memory_id=m.id, hash=m.hash, requested_at=m.confirm_requested_at or "",
+                                            quote=quote.strip()))
     return list(found.values())

@@ -82,9 +82,14 @@ class MemoryRecord(BaseModel):
     job_id: str | None
     entity_ids: list[str] = []
     corroborated_by: str | None = None
-    # Set when an agent asked (over MCP) for this memory to be confirmed. It stays unverified until an
-    # extraction job finds the user's own words confirming it; see Memory.apply_confirmations.
+    # Written or rewritten by an agent (MCP add_memory / update_memory). Only the user can verify it:
+    # `rem confirm`, or Memory.apply_confirmations; an extracted restatement never corroborates it.
+    agent_claim: bool = False
+    # Set when an agent asked (over MCP) for this memory to be confirmed, with the project it asked
+    # from. It stays unverified until an extraction job of that exchange and project finds the user's
+    # own words confirming it; see Memory.apply_confirmations.
     confirm_requested_at: str | None = None
+    confirm_request_project_id: int | None = None
     created_at: str
     updated_at: str
 
@@ -144,4 +149,5 @@ class Confirmation(BaseModel):
 
     memory_id: str
     hash: str
+    requested_at: str
     quote: str

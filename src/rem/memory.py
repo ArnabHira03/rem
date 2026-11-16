@@ -115,15 +115,17 @@ class Memory:
         return [r for r in self.list(scope=scope, status=status)
                 if r.scope != Scope.PROJECT or (current is not None and r.project_id == current)]
 
-    def pending_confirmations(self, since: str, until: str) -> list[MemoryRecord]:
-        """Unverified memories an agent asked to confirm in (since, until], newest first.
+    def pending_confirmations(self, since: str, until: str, project_id: int | None) -> list[MemoryRecord]:
+        """Unverified memories an agent in project_id asked to confirm in (since, until], newest first.
 
         The window is one job's exchange (IngestStore.job_window): an agent asks for confirmation
         after the user's reply, before that exchange's job is enqueued, so an older request (or one
-        from a later exchange) is never matched against this user's words.
+        from a later exchange) is never matched against this user's words. A request from another
+        project's session is never offered either.
         """
         recs = [r for r in self.list(status=Status.UNVERIFIED)
-                if r.confirm_requested_at and since < r.confirm_requested_at <= until]
+                if r.confirm_requested_at and since < r.confirm_requested_at <= until
+                and r.confirm_request_project_id == project_id]
         recs.sort(key=lambda r: r.confirm_requested_at or "", reverse=True)
         return recs[:MAX_PENDING_CONFIRMATIONS]
 
@@ -184,7 +186,9 @@ class Memory:
     def related(self, text: str, project_id: int | None, limit: int) -> list[MemoryRecord]:
         """Memories across all scopes related to text, ranked with project_id as the current project."""
         hits = self.vectors.search(self.col, self.embedder.embed_query(text), overfetch(limit))
-        candidates = [(MemoryRecord.from_payload(h.payload), h.score) for h in hits]
+        candidates = [(r, h.score) for h in hits
+                      # a memory awaiting the user's confirmation is only ever shown to confirm_pending
+                      if not (r := MemoryRecord.from_payload(h.payload)).confirm_requested_at]
         return [r.record for r in rank(candidates, project_id, limit, datetime.now(UTC))]
 
     def similarity(self, text: str, id: str, scope: Scope, project_id: int | None) -> tuple[MemoryRecord, float] | None:
@@ -218,6 +222,7 @@ class Memory:
         session_id: str | None = None,
         project_id: int | None = None,
         evidence_source: str | None = None,
+        agent_claim: bool = False,
     ) -> MemoryRecord:
         normalize_text(text)  # rejects empty text
         text = text.strip()
@@ -252,7 +257,7 @@ class Memory:
         record = MemoryRecord(
             id=mid, text=text, hash=text_hash(text), scope=scope, project_id=project_id,
             project_name=project_name, provenance=provenance, status=status, evidence_source=evidence_source,
-            observed_at=None, source=source, session_id=session_id, job_id=job_id,
+            observed_at=None, source=source, session_id=session_id, job_id=job_id, agent_claim=agent_claim,
             created_at=now, updated_at=now,
         )
         self.vectors.upsert(self.col, [VectorPoint(mid, self.embedder.embed([text])[0], record.to_payload())])
@@ -271,7 +276,7 @@ class Memory:
         # an edit withdraws any confirmation request: the user never saw the new text
         changes = {"text": text, "hash": text_hash(text), "updated_at": utcnow(), "confirm_requested_at": None}
         if unverify:
-            changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED}
+            changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED, "agent_claim": True}
         record = old.model_copy(update=changes)
         self.vectors.upsert(self.col, [VectorPoint(id, self.embedder.embed([text])[0], record.to_payload())])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)
@@ -292,14 +297,17 @@ class Memory:
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.CONFIRM, str(old.status), str(Status.VERIFIED), actor)
         return confirmed
 
-    def request_confirmation(self, id: str, *, actor: str) -> MemoryRecord:
-        """Record that an agent says the user confirmed this memory. It does NOT verify it: the memory
-        stays unverified until apply_confirmations finds the user's own words confirming it."""
+    def request_confirmation(self, id: str, *, actor: str, cwd: Path | None = None) -> MemoryRecord:
+        """Record that an agent working in cwd says the user confirmed this memory. It does NOT verify
+        it: the memory stays unverified until apply_confirmations finds the user's own words, in a job
+        of the same project, confirming it."""
         old = self._require(id)
         if old.status == Status.VERIFIED:
             return old
-        record = old.model_copy(update={"confirm_requested_at": utcnow()})
-        self.vectors.update_payload(self.col, id, {"confirm_requested_at": record.confirm_requested_at})
+        project_id = self.db.find_project(str(project_root(cwd))) if cwd is not None else None
+        record = old.model_copy(update={"confirm_requested_at": utcnow(), "confirm_request_project_id": project_id})
+        self.vectors.update_payload(self.col, id, {"confirm_requested_at": record.confirm_requested_at,
+                                                   "confirm_request_project_id": project_id})
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.CONFIRM_REQUEST, None, None, actor)
         return record
 
@@ -308,8 +316,9 @@ class Memory:
     ) -> list[str]:
         """Verify the memories a job's extraction says the user confirmed, where that holds up.
 
-        Each needs a pending request, the same text the LLM was shown (hash), and a quote that is the
-        user's own words in this job (quote_in_user_turns); otherwise the memory stays unverified.
+        Each needs the same pending request and text the LLM was shown (requested_at, hash), and a
+        quote that is the user's own words in this job and about this fact (quote_in_user_turns);
+        otherwise the memory stays unverified.
         Replaying the job only fills in a missing CONFIRM history row.
         """
         done: list[str] = []
@@ -320,9 +329,10 @@ class Memory:
             replay = (rec.status == Status.VERIFIED and rec.corroborated_by == job_key
                       and rec.provenance == Provenance.USER_CONFIRMED)
             if not replay:
-                if rec.status != Status.UNVERIFIED or rec.confirm_requested_at is None or rec.hash != c.hash:
+                if (rec.status != Status.UNVERIFIED or rec.confirm_requested_at != c.requested_at
+                        or rec.hash != c.hash):
                     continue
-                if not quote_in_user_turns(c.quote, user_texts):
+                if not quote_in_user_turns(c.quote, user_texts, rec.text):
                     log.info("not confirming %s (%s): the quote is not in the user's messages", rec.id, job_key)
                     continue
                 rec = rec.model_copy(update={
@@ -404,8 +414,10 @@ class Memory:
             else:
                 record, similarity = self._comparison_target(c, pid, own, restate_min_similarity)
                 action = decide(trust, record, similarity, restate_min_similarity, job_key)
-                if action == Action.CORROBORATE and record is not None and record.confirm_requested_at:
-                    # an agent asked to confirm it: only the user's quoted words verify it now
+                if action == Action.CORROBORATE and record is not None and (
+                        record.agent_claim or record.confirm_requested_at):
+                    # an agent wrote it (or asked to confirm it): the extractor's word that the user
+                    # said it is not enough; only the user's quoted words or `rem confirm` verify it
                     action = Action.SKIP
             if action == Action.ADD:
                 added = self.add(

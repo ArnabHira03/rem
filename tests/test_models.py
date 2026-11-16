@@ -43,7 +43,7 @@ def test_payload_roundtrip_keeps_all_fields():
     assert set(p) == {
         "id", "text", "hash", "scope", "project_id", "project_name", "provenance", "status",
         "evidence_source", "observed_at", "source", "session_id", "job_id", "entity_ids",
-        "corroborated_by", "confirm_requested_at",
+        "corroborated_by", "agent_claim", "confirm_requested_at", "confirm_request_project_id",
         "created_at", "updated_at",
     }
     assert p["entity_ids"] == [] and p["scope"] == "global"

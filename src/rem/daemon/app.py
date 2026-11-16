@@ -35,6 +35,11 @@ class ActorBody(BaseModel):
     actor: str = "cli"
 
 
+class RequestConfirmationBody(BaseModel):
+    actor: str = "mcp"
+    cwd: str | None = None
+
+
 class SearchBody(BaseModel):
     query: str
     cwd: str | None = None
@@ -121,8 +126,8 @@ def build_app(service: RemService) -> Starlette:
         return _json(await service.confirm(request.path_params["id"], actor=b.actor))
 
     async def request_confirmation(request: Request):
-        b = await _body(request, ActorBody)
-        return _json(await service.request_confirmation(request.path_params["id"], actor=b.actor))
+        b = await _body(request, RequestConfirmationBody)
+        return _json(await service.request_confirmation(request.path_params["id"], actor=b.actor, cwd=_path(b.cwd)))
 
     async def history(request: Request):
         return _json(await service.history(request.path_params["id"]))

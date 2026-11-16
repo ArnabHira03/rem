@@ -79,8 +79,9 @@ class RemClient:
     def confirm(self, id, actor="cli") -> dict:
         return self._call("POST", f"/memories/{id}/confirm", ref=id, json={"actor": actor})
 
-    def request_confirmation(self, id, actor="mcp") -> dict:
-        return self._call("POST", f"/memories/{id}/request-confirmation", ref=id, json={"actor": actor})
+    def request_confirmation(self, id, actor="mcp", cwd=None) -> dict:
+        return self._call("POST", f"/memories/{id}/request-confirmation", ref=id,
+                          json={"actor": actor, "cwd": str(cwd) if cwd else None})
 
     def history(self, id) -> list[dict]:
         return self._call("GET", f"/memories/{id}/history", ref=id)

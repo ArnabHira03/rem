@@ -112,14 +112,14 @@ class IngestStore:
                     if row:
                         job_id = row[0]
                         self.conn.execute(
-                            "UPDATE jobs SET not_before = ?, updated_at = ? WHERE id = ?",
-                            (not_before, stamp, job_id),
+                            "UPDATE jobs SET not_before = ?, updated_at = ?, enqueued_at = ? WHERE id = ?",
+                            (not_before, stamp, stamp, job_id),
                         )
                     else:
                         job_id = self.conn.execute(
-                            "INSERT INTO jobs (session_pk, status, not_before, created_at, updated_at) "
-                            "VALUES (?, 'pending', ?, ?, ?)",
-                            (session_pk, not_before, stamp, stamp),
+                            "INSERT INTO jobs (session_pk, status, not_before, created_at, updated_at, enqueued_at) "
+                            "VALUES (?, 'pending', ?, ?, ?, ?)",
+                            (session_pk, not_before, stamp, stamp, stamp),
                         ).lastrowid
             self.conn.execute("COMMIT")
         except BaseException:
@@ -128,17 +128,19 @@ class IngestStore:
         return IngestResult(session_pk, accepted, len(turns) - accepted, job_id)
 
     def job_window(self, job_id: int) -> tuple[str, str]:
-        """(since, until): from the session's previous job (or its first turn) to this job's last enqueue.
+        """(since, until): from the session's previous job's last enqueue (or its first turn) to this job's.
 
         This is the exchange the job covers: the user's message, then the assistant's turn that ends
-        with the Stop ingest enqueueing the job. ISO timestamps, comparable with utcnow().
+        with the Stop ingest enqueueing the job. Fixed once the job is claimed (enqueued_at only moves
+        when turns are added), so a retry, even days later, checks the same window. ISO timestamps,
+        comparable with utcnow().
         """
         row = self.conn.execute(
-            "SELECT j.session_pk, j.updated_at, s.first_seen FROM jobs j JOIN sessions s ON s.id = j.session_pk "
-            "WHERE j.id = ?", (job_id,),
+            "SELECT j.session_pk, COALESCE(j.enqueued_at, j.created_at), s.first_seen "
+            "FROM jobs j JOIN sessions s ON s.id = j.session_pk WHERE j.id = ?", (job_id,),
         ).fetchone()
         prev = self.conn.execute(
-            "SELECT MAX(created_at) FROM jobs WHERE session_pk = ? AND id < ?", (row[0], job_id)
+            "SELECT MAX(COALESCE(enqueued_at, created_at)) FROM jobs WHERE session_pk = ? AND id < ?", (row[0], job_id)
         ).fetchone()[0]
         # first_seen is the session's first ingest, the user's opening prompt: nothing before it counts
         return (prev or row[2], row[1])

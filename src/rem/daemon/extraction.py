@@ -70,7 +70,7 @@ class ExtractionHandler:
             confirmations: list[Confirmation] = []
             if user_texts:  # only the user's own turn can confirm a memory an agent asked about
                 since, until = await store.run(service.ingest_store.job_window, job.id)
-                pending = await store.run(memory.pending_confirmations, since, until)
+                pending = await store.run(memory.pending_confirmations, since, until, job.project_id)
                 if pending:  # a second, separate call: its output can confirm but never add a memory
                     confirmations = await _in_daemon_thread(confirm_pending, self.llm, turns, context, pending)
             payload = json.dumps({

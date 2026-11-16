@@ -30,8 +30,8 @@ SCOPES = ["global", "system", "project"]
 STATUSES = ["verified", "unverified"]
 NONE_FOUND = "No memories found."
 CONFIRM_PENDING_NOTE = (
-    "rem verifies it only if the user's own message in this conversation confirms it, which it checks "
-    "after this turn ends; otherwise it stays unverified.")
+    "rem verifies it only if the user's own message in this conversation confirms it in words that name the "
+    "fact (a bare \"yes\" is not enough), which it checks after this turn ends; otherwise it stays unverified.")
 
 _SCOPE = {"type": "string", "enum": SCOPES}
 _ID = {"type": "string", "description": "The memory id."}
@@ -133,7 +133,7 @@ def build_tools(get_client: Callable[[], RemClient], cwd: Path) -> list[Tool]:
     def confirm_memory(args: dict) -> str:
         id_ = _Args(args, {"id"}).str("id", required=True)
         # never POST /confirm: an agent's word is not the user's, so this only asks the extractor to check
-        m = get_client().request_confirmation(id_, actor="mcp")
+        m = get_client().request_confirmation(id_, actor="mcp", cwd=cwd)
         if m["status"] == "verified":
             return "Already verified: " + memory_line(m)
         return ("Confirmation requested (still unverified): " + memory_line(m) + "\n" + CONFIRM_PENDING_NOTE)
@@ -185,10 +185,10 @@ def build_tools(get_client: Callable[[], RemClient], cwd: Path) -> list[Tool]:
              }, ["text"]),
              guarded(add_memory)),
         Tool("confirm_memory",
-             "Ask rem to verify a memory the user has just confirmed in this conversation (for example by "
-             "answering yes when you asked about it). This does not verify it by itself: rem verifies it only if "
-             "the user's own message confirms it, and otherwise it stays unverified. Never use it for your own "
-             "claims.",
+             "Ask rem to verify a memory the user has just confirmed in this conversation, in their own words "
+             "that name the fact (e.g. \"yes, tabs\"; a bare \"yes\" is not enough). This does not verify it by "
+             "itself: rem verifies it only if the user's own message confirms it, and otherwise it stays "
+             "unverified. Never use it for your own claims.",
              _schema({"id": _ID}, ["id"]),
              guarded(confirm_memory)),
         Tool("update_memory",
