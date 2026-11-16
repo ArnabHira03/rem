@@ -171,14 +171,30 @@ def test_update_refreshes_bm25_slot(mem):
     assert p.sparse == mem.sparse_embedder.embed_docs(["uses Postgres for storage"])[0]
 
 
-def test_dense_only_collection_is_refused_before_writing(cfg):
+def test_dense_only_collection_opens_with_keyword_search_off(cfg):
     from rem.embed.base import collection_slug
     from rem.embed.hashing import HashingEmbedder
-    from rem.storage.sqlite import RemDB
 
     e = HashingEmbedder(64)
     vs = InMemoryVectorStore()
     vs.create_col(f"rem_memories__{collection_slug(e.model_id, e.dims)}", e.dims)  # M5 layout: no BM25 slot
-    with pytest.raises(EmbedderMismatchError, match="rem reembed"):
-        Memory(cfg, vector_store=vs, embedder=e)
-    assert RemDB(cfg.db_path).get_meta("active_embedder") is None
+    mem = Memory(cfg, vector_store=vs, embedder=e)
+    try:
+        assert mem.keyword_enabled is False
+        r = add(mem, "uses tabs")  # writes still work, dense only
+        assert [h.record.id for h in mem.search("tabs")] == [r.id]
+    finally:
+        mem.close()
+
+
+def test_mismatch_after_finalize_names_the_stored_model(cfg):
+    """F4: after a switch, the message must name the model to set in config, not only slugs."""
+    from rem import reembed
+
+    m = Memory(cfg)
+    add(m, "uses tabs")
+    reembed.run(m, "hash-32")
+    reembed.finalize(m)
+    m.close()
+    with pytest.raises(EmbedderMismatchError, match='model = "hash-32"'):
+        Memory(cfg)

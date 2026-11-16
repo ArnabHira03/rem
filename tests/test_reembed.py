@@ -3,6 +3,7 @@ import json
 import pytest
 
 from rem import reembed
+from rem.embed.base import collection_slug
 from rem.errors import ReembedError
 from tests.conftest import add
 
@@ -65,3 +66,56 @@ def test_finalize_catches_up_writes_made_during_reembed(mem):
 def test_finalize_without_a_pending_reembed_is_refused(mem):
     with pytest.raises(ReembedError, match="no reembed"):
         reembed.finalize(mem)
+
+
+def test_same_model_target_never_is_the_active_collection(mem):
+    """F2: an orphan at the base name pushes the copy to __g1; a second same-model copy must not pick the
+    active __g1 (which finalize would then delete)."""
+    a = add(mem, "uses tabs")
+    base = f"rem_memories__{collection_slug('hash-32', 32)}"
+    mem.vectors.create_col(base, 32)                # orphan left by a crashed copy
+    reembed.run(mem, "hash-32")
+    reembed.finalize(mem)                           # active is now __g1
+    active = mem.col
+    assert active.endswith("__g1")
+    res = reembed.run(mem, "hash-32")
+    assert res.collection not in (active,)
+    reembed.finalize(mem)
+    assert mem.vectors.col_exists(mem.col)
+    assert [h.record.id for h in mem.search("tabs")] == [a.id]
+
+
+def test_finalize_refuses_a_target_that_is_the_active_collection(mem):
+    """F2 guard: a corrupt pending record that points at the active collection must not be switched or deleted."""
+    add(mem, "uses tabs")
+    mem.db.set_meta(reembed.TARGET_KEY, json.dumps({"collection": mem.col, "slug": "x", "model": "hash-64"}))
+    with pytest.raises(ReembedError, match="active"):
+        reembed.finalize(mem)
+    assert mem.vectors.col_exists(mem.col)
+
+
+def test_pending_target_is_recorded_before_the_copy_and_a_crash_resumes(mem, monkeypatch):
+    """F3: a copy killed after its first batch must be resumed by the rerun, not orphaned, and finalize completes it."""
+    ids = [add(mem, t).id for t in ["uses tabs", "uses spaces", "uses qdrant"]]
+    real_target = reembed._target_embedder(mem, "hash-32")
+
+    class Dies:
+        model_id = real_target.model_id
+        dims = real_target.dims
+        calls = 0
+
+        def embed(self, texts):
+            Dies.calls += 1
+            if Dies.calls == 2:
+                raise RuntimeError("killed")
+            return real_target.embed(texts)
+
+    monkeypatch.setattr(reembed, "_target_embedder", lambda m, model: Dies())
+    with pytest.raises(RuntimeError):
+        reembed.run(mem, "hash-32", batch=1)
+    pending = json.loads(mem.db.get_meta(reembed.TARGET_KEY))   # recorded before the copy finished
+    monkeypatch.undo()
+    res = reembed.run(mem, "hash-32", batch=1)
+    assert res.collection == pending["collection"]               # resumed, no orphan
+    assert reembed.finalize(mem) == res.collection
+    assert set(points(mem, mem.col)) == set(ids)

@@ -95,13 +95,14 @@ class RemClient:
         return self._call("POST", "/jobs/retry")["requeued"]
 
     def reembed(self, model: str) -> dict:
-        return self._call("POST", "/reembed", json={"model": model})
+        # one store-thread call that can run for minutes (a model download plus every memory): no client timeout
+        return self._call("POST", "/reembed", json={"model": model}, timeout=None)
 
     def reembed_status(self) -> dict | None:
         return self._call("GET", "/reembed")
 
     def reembed_finalize(self) -> dict:
-        return self._call("POST", "/reembed/finalize")
+        return self._call("POST", "/reembed/finalize", timeout=None)
 
 
 def _log_tail(path: Path, lines: int = 20) -> str:

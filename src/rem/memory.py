@@ -43,6 +43,8 @@ log = logging.getLogger(__name__)
 
 ACTIVE_EMBEDDER_KEY = "active_embedder"
 ACTIVE_COLLECTION_KEY = "active_collection"  # set once a reembed is finalized; default is rem_memories__<slug>
+ACTIVE_MODEL_KEY = "active_model"  # the model string the active embedder was built from
+TARGET_KEY = "reembed_target"  # JSON {"collection", "slug", "model"} while a reembed is pending
 MAX_PENDING_CONFIRMATIONS = 10  # requests one job checks, newest first
 
 
@@ -81,23 +83,30 @@ class Memory:
             slug = collection_slug(self.embedder.model_id, self.embedder.dims)
             stored = self.db.get_meta(ACTIVE_EMBEDDER_KEY)
             if stored and stored != slug:
+                stored_model = self.db.get_meta(ACTIVE_MODEL_KEY) or stored
+                model = self.embedder.model_id
                 raise EmbedderMismatchError(
-                    f"stored memories use {stored}; configured embedder is {slug}. "
-                    f"Move them with `rem reembed --model {self.embedder.model_id}` while the old config is in place, "
-                    "then `rem reembed --finalize`; or change the config back."
+                    f"stored memories use {stored_model} ({stored}); configured embedder is {model} ({slug}). "
+                    f'Set [embedder] model = "{stored_model}" to use them as they are, or move them to {model} '
+                    f"with `rem reembed --model {model}` run while the old config is in place, "
+                    "then `rem reembed --finalize`."
                 )
             self.vectors = vector_store or create_vector_store(cfg)
             self.col = self.db.get_meta(ACTIVE_COLLECTION_KEY) or f"rem_memories__{slug}"
-            if self.vectors.col_exists(self.col) and not self.vectors.col_has_sparse(self.col):
-                # created before M6: keyword search would silently be off, so refuse before writing anything
-                raise EmbedderMismatchError(
-                    f"{self.col} was created before BM25 search existed; run `rem reembed` to rebuild it."
-                )
+            if self.vectors.col_exists(self.col):
+                # a collection from before M6 has no BM25 slot: it opens dense-only, keyword search is off
+                # until `rem reembed` copies it (writes and dense search keep working)
+                self.keyword_enabled = self.vectors.col_has_sparse(self.col)
+            else:
+                self.vectors.create_col(self.col, self.embedder.dims, sparse=True)
+                self.keyword_enabled = True
+            if not self.keyword_enabled:
+                log.warning("%s has no BM25 slot: keyword search is off until `rem reembed` rebuilds it", self.col)
         except BaseException:
             self.db.close()
             raise
         self.db.set_meta(ACTIVE_EMBEDDER_KEY, slug)
-        self.vectors.create_col(self.col, self.embedder.dims, sparse=True)
+        self.db.set_meta(ACTIVE_MODEL_KEY, self.embedder.model_id)
 
     # ---- reads -------------------------------------------------------------
 
@@ -158,7 +167,7 @@ class Memory:
         hits = self.vectors.search(self.col, dense_vec, overfetch(limit), filters)
         keyword_hits = (
             self.vectors.keyword_search(self.col, sparse_vec, overfetch(limit), filters) or []
-            if sparse_vec.indices else []
+            if sparse_vec.indices and self.keyword_enabled else []
         )
         keyword = {h.id: h.score for h in keyword_hits}
         payloads = {h.id: (h.payload, h.score) for h in hits}
