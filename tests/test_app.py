@@ -132,3 +132,31 @@ async def test_store_thread_never_runs_git(cfg, tmp_path, monkeypatch):
     finally:
         svc.close()
     assert names and not any(n.startswith("rem-store") for n in names)
+
+
+async def test_patch_passes_unverify(api):
+    mid = (await api.post("/memories", json={"text": "Prefers uv over pip"})).json()["id"]
+    r = (await api.patch(f"/memories/{mid}", json={"text": "Prefers uv"})).json()
+    assert r["status"] == "verified" and r["provenance"] == "user_confirmed"
+    r = (await api.patch(f"/memories/{mid}", json={"text": "Prefers pip", "unverify": True, "actor": "mcp"})).json()
+    assert r["status"] == "unverified" and r["provenance"] == "assistant_generated"
+    assert (await api.patch(f"/memories/{mid}", json={"text": "x", "unverify": "maybe"})).status_code == 400
+
+
+def test_client_update_sends_unverify():
+    from rem.client import RemClient
+
+    sent = []
+
+    def handler(request):
+        import json as _json
+
+        sent.append(_json.loads(request.content))
+        return httpx.Response(200, json={"id": "m"})
+
+    c = RemClient.__new__(RemClient)
+    c.socket_path = "x"
+    c._http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://rem")
+    c.update("m", "t")
+    c.update("m", "t", actor="mcp", unverify=True)
+    assert sent == [{"text": "t", "actor": "cli", "unverify": False}, {"text": "t", "actor": "mcp", "unverify": True}]

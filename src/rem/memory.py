@@ -235,14 +235,20 @@ class Memory:
         self.db.add_history(TargetKind.MEMORY, mid, HistoryEvent.ADD, None, text, actor, job_id)
         return record
 
-    def update(self, id: str, text: str, *, actor: str) -> MemoryRecord:
+    def update(self, id: str, text: str, *, actor: str, unverify: bool = False) -> MemoryRecord:
+        """Change a memory's text. With ``unverify`` (an agent's edit) the record also becomes
+        assistant-generated and unverified, in the same upsert, until the user confirms it."""
         normalize_text(text)
         text = text.strip()
         old = self._require(id)
         other = self._find_by_text(text, old.scope, old.project_id)
         if other is not None and other.id != id:
             raise ValueError(f"another memory already has this text: {other.id}")
-        record = old.model_copy(update={"text": text, "hash": text_hash(text), "updated_at": utcnow()})
+        changes = {"text": text, "hash": text_hash(text), "updated_at": utcnow()}
+        if unverify:
+            changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED,
+                        "corroborated_by": None}
+        record = old.model_copy(update=changes)
         self.vectors.upsert(self.col, [VectorPoint(id, self.embedder.embed([text])[0], record.to_payload())])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)
         return record

@@ -49,6 +49,8 @@ def test_tool_names_and_schemas(tmp_path):
     assert by["list_memories"].input_schema["properties"]["status"]["enum"] == ["verified", "unverified"]
     assert "never to verify your own claims" in by["confirm_memory"].description
     assert "unverified until the user confirms it" in by["add_memory"].description
+    assert by["update_memory"].description == (
+        "Change a memory's text. The memory becomes unverified until the user confirms it.")
     assert INSTRUCTIONS.startswith("rem is the user's long-term memory")
 
 
@@ -103,11 +105,24 @@ def test_update_and_delete(client, tmp_path):
     mid = added_id(call(tools, "add_memory", text="Uses npm"))
     r = call(tools, "update_memory", id=mid, text="Uses pnpm")
     assert not r.is_error
-    assert r.text == f"Updated: {mid}  [global] unverified  Uses pnpm"
+    assert r.text == f"Updated (now unverified until the user confirms): {mid}  [global] unverified  Uses pnpm"
     r = call(tools, "delete_memory", id=mid)
     assert not r.is_error and r.text == f"Deleted {mid}"
     assert [(x["event"], x["actor"]) for x in client.history(mid)] == [
         ("ADD", "mcp"), ("UPDATE", "mcp"), ("DELETE", "mcp")]
+
+
+def test_update_of_confirmed_memory_makes_it_unverified(client, tmp_path):
+    tools = tools_for(client, tmp_path)
+    mid = client.add("Prefers uv over pip")["id"]  # user-confirmed, verified
+    assert client.get(mid)["status"] == "verified"
+    r = call(tools, "update_memory", id=mid, text="Prefers pip")
+    assert not r.is_error
+    m = client.get(mid)
+    assert m["text"] == "Prefers pip"
+    assert m["status"] == "unverified" and m["provenance"] == "assistant_generated"
+    assert not call(tools, "confirm_memory", id=mid).is_error
+    assert client.get(mid)["status"] == "verified"
 
 
 def test_unknown_id_is_error_result(client, tmp_path):

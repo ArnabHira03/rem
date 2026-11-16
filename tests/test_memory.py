@@ -131,3 +131,18 @@ def test_crash_during_direct_add_recovers_history_on_retry(mem, monkeypatch):
     assert [h.event for h in mem.history(r.id)] == ["ADD"]
     add(mem)
     assert [h.event for h in mem.history(r.id)] == ["ADD"]
+
+
+def test_update_unverify_downgrades_a_verified_memory(mem):
+    m = add(mem, "Prefers uv over pip")
+    assert m.status == Status.VERIFIED and m.provenance == Provenance.USER_CONFIRMED
+    kept = mem.update(m.id, "Prefers uv", actor="cli")
+    assert kept.status == Status.VERIFIED and kept.provenance == Provenance.USER_CONFIRMED
+    r = mem.update(m.id, "Prefers pip", actor="mcp", unverify=True)
+    assert r.text == "Prefers pip" and r.corroborated_by is None
+    assert r.status == Status.UNVERIFIED and r.provenance == Provenance.ASSISTANT_GENERATED
+    stored = mem.get(m.id)
+    assert stored.status == Status.UNVERIFIED and stored.provenance == Provenance.ASSISTANT_GENERATED
+    assert stored.text == "Prefers pip"
+    assert [(h.event, h.old_value, h.new_value) for h in mem.history(m.id)][1:] == [
+        ("UPDATE", "Prefers uv over pip", "Prefers uv"), ("UPDATE", "Prefers uv", "Prefers pip")]

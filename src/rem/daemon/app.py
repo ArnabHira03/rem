@@ -28,6 +28,7 @@ class AddBody(BaseModel):
 class UpdateBody(BaseModel):
     text: str
     actor: str = "cli"
+    unverify: bool = False
 
 
 class ActorBody(BaseModel):
@@ -106,7 +107,7 @@ def build_app(service: RemService) -> Starlette:
 
     async def update(request: Request):
         b = await _body(request, UpdateBody)
-        return _json(await service.update(request.path_params["id"], b.text, actor=b.actor))
+        return _json(await service.update(request.path_params["id"], b.text, actor=b.actor, unverify=b.unverify))
 
     async def delete(request: Request):
         await service.delete(request.path_params["id"], actor=request.query_params.get("actor", "cli"))

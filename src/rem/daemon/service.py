@@ -47,8 +47,8 @@ class RemService:
     async def get(self, id: str):
         return await self.store.run(self.memory.get, id)
 
-    async def update(self, id: str, text: str, *, actor: str):
-        return await self.store.run(self.memory.update, id, text, actor=actor)
+    async def update(self, id: str, text: str, *, actor: str, unverify: bool = False):
+        return await self.store.run(self.memory.update, id, text, actor=actor, unverify=unverify)
 
     async def delete(self, id: str, *, actor: str):
         return await self.store.run(self.memory.delete, id, actor=actor)

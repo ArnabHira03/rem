@@ -122,7 +122,9 @@ def build_tools(get_client: Callable[[], RemClient], cwd: Path) -> list[Tool]:
         a = _Args(args, {"id", "text"})
         id_ = a.str("id", required=True)
         text = a.str("text", required=True)
-        return "Updated: " + memory_line(get_client().update(id_, text, actor="mcp"))
+        # an agent's edit is an agent's claim: it must not keep a user-confirmed memory verified
+        m = get_client().update(id_, text, actor="mcp", unverify=True)
+        return "Updated (now unverified until the user confirms): " + memory_line(m)
 
     def delete_memory(args: dict) -> str:
         id_ = _Args(args, {"id"}).str("id", required=True)
@@ -167,7 +169,7 @@ def build_tools(get_client: Callable[[], RemClient], cwd: Path) -> list[Tool]:
              _schema({"id": _ID}, ["id"]),
              guarded(confirm_memory)),
         Tool("update_memory",
-             "Change a memory's text, e.g. when the user corrects it.",
+             "Change a memory's text. The memory becomes unverified until the user confirms it.",
              _schema({"id": _ID, "text": {"type": "string", "description": "The new text."}}, ["id", "text"]),
              guarded(update_memory)),
         Tool("delete_memory",

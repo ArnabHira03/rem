@@ -68,8 +68,9 @@ class RemClient:
     def get(self, id) -> dict:
         return self._call("GET", f"/memories/{id}", ref=id)
 
-    def update(self, id, text, actor="cli") -> dict:
-        return self._call("PATCH", f"/memories/{id}", ref=id, json={"text": text, "actor": actor})
+    def update(self, id, text, actor="cli", unverify=False) -> dict:
+        return self._call("PATCH", f"/memories/{id}", ref=id,
+                          json={"text": text, "actor": actor, "unverify": unverify})
 
     def delete(self, id, actor="cli") -> None:
         return self._call("DELETE", f"/memories/{id}", ref=id, params={"actor": actor})
