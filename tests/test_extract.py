@@ -166,3 +166,48 @@ def test_schema_requires_entities_and_prompt_lists_types():
     system, _ = build_prompt(T, [], [])
     for t in ("person", "tool", "project", "language", "org", "place", "concept"):
         assert t in system
+
+
+def _rel_fact(relations, entities=("uv", "pip")):
+    f = {"text": "Prefers uv over pip", "scope": "global", "origin": "user", "restates": None,
+         "entities": [{"name": n, "type": "tool"} for n in entities]}
+    if relations is not None:
+        f["relations"] = relations
+    return {"facts": [f]}
+
+
+def test_extract_keeps_valid_relations():
+    from rem.models import RelationMention
+    out = _rel_fact([{"source": "UV", "type": "preferred over", "target": "pip"}])
+    [c] = extract(FakeLLM([out]), T, [], [], 20).candidates
+    assert c.relations == [RelationMention(source="uv", type="preferred_over", target="pip")]
+
+
+def test_extract_drops_bad_relations_keeps_fact_and_entities():
+    out = _rel_fact([{"source": "uv", "type": "uses", "target": "cargo"},
+                     {"source": "uv", "type": "uses", "target": "uv"},
+                     "nope",
+                     {"source": "uv", "type": "uses", "target": "pip"},
+                     {"source": "uv", "type": "uses", "target": "pip"}])
+    [c] = extract(FakeLLM([out]), T, [], [], 20).candidates
+    assert [(r.source, r.type, r.target) for r in c.relations] == [("uv", "uses", "pip")]
+    assert c.text == "Prefers uv over pip" and [m.name for m in c.entities] == ["uv", "pip"]
+
+
+def test_extract_missing_relations_key_means_none():
+    [c] = extract(FakeLLM([_rel_fact(None)]), T, [], [], 20).candidates
+    assert c.relations == [] and len(c.entities) == 2
+
+
+def test_schema_requires_relations():
+    item = EXTRACTION_SCHEMA["properties"]["facts"]["items"]
+    assert "relations" in item["required"]
+    assert item["properties"]["relations"]["items"]["required"] == ["source", "type", "target"]
+    assert item["properties"]["relations"]["items"]["additionalProperties"] is False
+
+
+def test_prompt_lists_relation_types_and_no_user_node():
+    from rem.extract import SYSTEM_PROMPT
+    from rem.models import RELATION_TYPES
+    assert all(t in SYSTEM_PROMPT for t in RELATION_TYPES)
+    assert "user is not an entity" in SYSTEM_PROMPT

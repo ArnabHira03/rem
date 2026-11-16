@@ -53,6 +53,13 @@ class RemService:
         records = await self.store.run(self.memory.list_entities)
         return sorted(records, key=lambda r: (r.name.casefold(), r.id))
 
+    async def relations(self, *, query: str | None, entity: str | None, scope: Scope | None, limit: int,
+                        cwd: Path | None):
+        if query is not None:
+            return await self.store.run(self.memory.search_relations, query, cwd=cwd, limit=limit, scope=scope,
+                                        entity=entity)
+        return await self.store.run(self.memory.list_relations, scope=scope, entity=entity)
+
     async def get(self, id: str):
         return await self.store.run(self.memory.get, id)
 

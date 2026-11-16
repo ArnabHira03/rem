@@ -27,6 +27,9 @@ from rem.models import (
     HistoryRow,
     MemoryRecord,
     Provenance,
+    RelationMention,
+    RelationRecord,
+    RelationResult,
     SearchResult,
     Scope,
     Status,
@@ -36,8 +39,9 @@ from rem.models import (
     text_hash,
     utcnow,
 )
+from rem.relations import derive_trust, normalize_type, relation_id, relation_sentence
 from rem.projects import ProjectInfo, project_root, resolve_project
-from rem.retrieve import cosine, fuse, overfetch, score_and_rank
+from rem.retrieve import T_BASE, T_OTHER, cosine, fuse, overfetch, score_and_rank
 from rem.storage.sqlite import RemDB
 from rem.storage.vector.base import VectorPoint, VectorStore
 from rem.storage.vector.factory import create_vector_store
@@ -47,10 +51,12 @@ log = logging.getLogger(__name__)
 
 ACTIVE_EMBEDDER_KEY = "active_embedder"
 ACTIVE_COLLECTION_KEY = "active_collection"  # set once a reembed is finalized; default is rem_memories__<slug>
+ACTIVE_RELATION_COLLECTION_KEY = "active_relation_collection"  # set by reembed; default is rem_relations__<slug>
 ACTIVE_ENTITY_COLLECTION_KEY = "active_entity_collection"  # set by reembed; default is rem_entities__<slug>
 ACTIVE_MODEL_KEY = "active_model"  # the model string the active embedder was built from
 TARGET_KEY = "reembed_target"  # JSON {"collection", "slug", "model", "entity_collection"} while a reembed is pending
 MAX_PENDING_CONFIRMATIONS = 10  # requests one job checks, newest first
+ENTITY_SEARCH_FETCH = 10_000  # relation search with an entity filter looks at (nearly) the whole bucket
 
 
 @dataclass
@@ -61,6 +67,7 @@ class ApplyResult:
     skipped: int = 0
     dropped: int = 0
     entities: int = 0  # entity ADD and MERGE events performed (0 on a pure replay)
+    relations: int = 0  # relation ADD events performed (0 on a pure replay)
 
 
 class EntityAction(StrEnum):
@@ -118,6 +125,9 @@ class Memory:
             self.entity_col = self.db.get_meta(ACTIVE_ENTITY_COLLECTION_KEY) or f"rem_entities__{slug}"
             if not self.vectors.col_exists(self.entity_col):
                 self.vectors.create_col(self.entity_col, self.embedder.dims, sparse=False)
+            self.relation_col = self.db.get_meta(ACTIVE_RELATION_COLLECTION_KEY) or f"rem_relations__{slug}"
+            if not self.vectors.col_exists(self.relation_col):
+                self.vectors.create_col(self.relation_col, self.embedder.dims, sparse=False)
         except BaseException:
             self.db.close()
             raise
@@ -151,6 +161,80 @@ class Memory:
                    {"scope": scope, "project_id": project_id}.items() if v is not None}
         records = [EntityRecord.from_payload(p.payload) for p in self.vectors.list_points(self.entity_col, filters)]
         return sorted(records, key=lambda r: r.created_at, reverse=True)
+
+    def get_relation(self, id: str) -> RelationRecord | None:
+        found = self.vectors.get(self.relation_col, [id])
+        return RelationRecord.from_payload(found[0].payload) if found else None
+
+    def relations_for(self, memory_id: str, scope: Scope, project_id: int | None) -> list[RelationRecord]:
+        """The relations in (scope, project_id)'s bucket that cite `memory_id` as evidence."""
+        scope, project_id = bucket(scope, project_id)
+        points = self.vectors.list_points(self.relation_col, {"scope": str(scope), "project_id": project_id})
+        recs = [RelationRecord.from_payload(p.payload) for p in points]
+        return [r for r in recs if memory_id in r.memory_ids]
+
+    def list_relations(
+        self, *, scope: Scope | None = None, project_id: int | None = None, entity: str | None = None
+    ) -> list[RelationResult]:
+        filters = {k: str(v) if k != "project_id" else v for k, v in
+                   {"scope": scope, "project_id": project_id}.items() if v is not None}
+        records = [RelationRecord.from_payload(p.payload) for p in self.vectors.list_points(self.relation_col, filters)]
+        if entity is not None:
+            records = self._relations_naming(records, entity)
+        results = [self._relation_result(r) for r in records]
+        return sorted(results, key=lambda r: (r.source.casefold(), r.type, r.target.casefold(), r.id))
+
+    def _relations_naming(self, records: list[RelationRecord], entity: str) -> list[RelationRecord]:
+        """The relations with an end whose name or an alias normalizes to `entity`."""
+        wanted = normalize_name(entity)
+        kept = []
+        for r in records:
+            ends = (self.get_entity(r.source_entity_id), self.get_entity(r.target_entity_id))
+            if any(e is not None and (e.normalized == wanted or any(normalize_name(a) == wanted for a in e.aliases))
+                   for e in ends):
+                kept.append(r)
+        return kept
+
+    def search_relations(
+        self,
+        query: str,
+        *,
+        cwd: Path | None = None,
+        limit: int = 10,
+        scope: Scope | None = None,
+        entity: str | None = None,
+    ) -> list[RelationResult]:
+        """Relations whose sentence is close in meaning to the query: dense cosine only, no boost. Read-only."""
+        normalize_text(query)  # rejects empty queries
+        current = self.db.find_project(str(project_root(cwd))) if cwd is not None else None
+        filters = {"scope": str(scope)} if scope else None
+        # with an entity named, look at the whole bucket: its relations must not be crowded out by closer ones
+        fetch = ENTITY_SEARCH_FETCH if entity is not None else overfetch(limit)
+        hits = self.vectors.search(self.relation_col, self.embedder.embed_query(query), fetch, filters)
+        kept: list[tuple[RelationRecord, float]] = []
+        for h in hits:
+            rec = RelationRecord.from_payload(h.payload)
+            other = rec.scope == Scope.PROJECT and rec.project_id != current
+            if h.score >= (T_OTHER if other else T_BASE):
+                kept.append((rec, h.score))
+        if entity is not None:
+            ok = {r.id for r in self._relations_naming([r for r, _ in kept], entity)}
+            kept = [(r, s) for r, s in kept if r.id in ok]
+        kept.sort(key=lambda rs: -rs[1])
+        return [self._relation_result(r, score) for r, score in kept[:limit]]
+
+    def _relation_result(self, rec: RelationRecord, score: float | None = None) -> RelationResult:
+        src = self.get_entity(rec.source_entity_id)
+        dst = self.get_entity(rec.target_entity_id)
+        project = self.db.get_project(rec.project_id) if rec.project_id is not None else None
+        return RelationResult(
+            id=rec.id,
+            source=src.name if src else rec.source_entity_id,
+            target=dst.name if dst else rec.target_entity_id,
+            type=rec.type, status=rec.status, provenance=rec.provenance, scope=rec.scope,
+            project_id=rec.project_id, project_name=project[1] if project else None,
+            evidence=len(rec.memory_ids), created_at=rec.created_at, score=score,
+        )
 
     def find_entity(self, normalized: str, scope: Scope, project_id: int | None) -> EntityRecord | None:
         """The entity in (scope, project_id)'s bucket whose name or an alias normalizes to `normalized`."""
@@ -359,11 +443,16 @@ class Memory:
             # the entities were named by the old text: unlink them first (an orphan is deleted), then clear
             # entity_ids in the upsert below. After a crash in between, a repeated update or a delete
             # converges, since _unlink skips links that are already gone.
+            self._unlink_relations(id, old.scope, old.project_id, actor)
             self._unlink(id, old.entity_ids, actor)
             changes["entity_ids"] = []
         if unverify:
             changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED, "agent_claim": True}
         record = old.model_copy(update=changes)
+        if unverify and "entity_ids" not in changes:
+            # relations first, with the new (unverified) record standing in for this memory: a crash
+            # before the upsert leaves them under-verified, never verified on an unverified-only claim
+            self._refresh_relations(id, record.scope, record.project_id, actor, override=record)
         self.vectors.upsert(self.col, [self._point(id, text, record)])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)
         return record
@@ -371,6 +460,8 @@ class Memory:
     def confirm(self, id: str, *, actor: str) -> MemoryRecord:
         old = self._require(id)
         if old.provenance == Provenance.USER_CONFIRMED and old.status == Status.VERIFIED:
+            # idempotent: a crash after the payload write left the relations stale; repair them
+            self._refresh_relations(id, old.scope, old.project_id, actor)
             return old
         confirmed = old.model_copy(
             update={"provenance": Provenance.USER_CONFIRMED, "status": Status.VERIFIED, "updated_at": utcnow(),
@@ -381,6 +472,7 @@ class Memory:
             self.col, id, {k: payload[k] for k in ("provenance", "status", "updated_at", "confirm_requested_at")}
         )
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.CONFIRM, str(old.status), str(Status.VERIFIED), actor)
+        self._refresh_relations(id, confirmed.scope, confirmed.project_id, actor)
         return confirmed
 
     def request_confirmation(self, id: str, *, actor: str, cwd: Path | None = None) -> MemoryRecord:
@@ -430,6 +522,7 @@ class Memory:
                     "provenance", "status", "corroborated_by", "confirm_requested_at", "updated_at")})
             self.db.add_history(TargetKind.MEMORY, rec.id, HistoryEvent.CONFIRM, str(Status.UNVERIFIED),
                                 str(Status.VERIFIED), "extractor", job_key)
+            self._refresh_relations(rec.id, rec.scope, rec.project_id, "extractor", job_key)
             done.append(rec.id)
         return done
 
@@ -454,6 +547,7 @@ class Memory:
         self.db.add_history(
             TargetKind.MEMORY, id, HistoryEvent.CORROBORATE, str(Status.UNVERIFIED), str(Status.VERIFIED), actor, job_id
         )
+        self._refresh_relations(id, record.scope, record.project_id, actor, job_id)
         return record
 
     def apply_candidates(
@@ -535,20 +629,28 @@ class Memory:
                     # skipped, an agent's claim, or corroborated earlier in this job: it gets the mentions
                     linked = record.id
             if linked is not None and c.entities:
-                result.entities += self._link_mentions(linked, c.entities, c.scope, pid, job_key, "extractor")
+                events, names_to_ids = self._link_mentions(linked, c.entities, c.scope, pid, job_key, "extractor")
+                result.entities += events
+                # relations attach only to a memory whose text is this candidate's own
+                if c.relations and (action == Action.ADD or (own is not None and linked == own.id)):
+                    result.relations += self._write_relations(
+                        linked, c.relations, names_to_ids, c.scope, pid, job_key, "extractor")
         return result
 
     def _link_mentions(
         self, memory_id: str, mentions: list[EntityMention], scope: Scope, project_id: int | None,
         job_key: str, actor: str,
-    ) -> int:
-        """Resolve a candidate's mentions in its bucket and link them to memory_id; returns ADD+MERGE count.
+    ) -> tuple[int, dict[str, str]]:
+        """Resolve a candidate's mentions in its bucket and link them to memory_id.
+
+        Returns the ADD+MERGE event count and a map from each mention's normalized name to its entity id.
 
         Order: entity upsert (in _resolve_entity) -> entity history (INSERT OR IGNORE) -> _link. Each
         step is a set union, so replaying the job only completes what a crash left undone.
         """
         seen: set[str] = set()
         ids: list[str] = []
+        names_to_ids: dict[str, str] = {}
         events = 0
         now = utcnow()
         for m in mentions:
@@ -567,8 +669,125 @@ class Memory:
                 # a crash between the entity upsert and its ADD row: repair the row on replay
                 self.db.add_history(TargetKind.ENTITY, ent.id, HistoryEvent.ADD, None, ent.name, actor, job_key)
             ids.append(ent.id)
+            names_to_ids[norm] = ent.id
         self._link(memory_id, ids)
-        return events
+        return events, names_to_ids
+
+    def _write_relations(
+        self, memory_id: str, relations: list[RelationMention], names_to_ids: dict[str, str],
+        scope: Scope, project_id: int | None, job_key: str, actor: str,
+    ) -> int:
+        """Write the relations a fact states between its linked entities; returns the ADD event count.
+
+        Order per relation: point upsert/update -> history (INSERT OR IGNORE). Evidence is a set union,
+        so replaying the job only completes what a crash left undone.
+        """
+        scope, project_id = bucket(scope, project_id)
+        added = 0
+        for rel in relations:
+            src_id = names_to_ids.get(normalize_name(rel.source))
+            dst_id = names_to_ids.get(normalize_name(rel.target))
+            if src_id is None or dst_id is None or src_id == dst_id:
+                continue
+            type = normalize_type(rel.type)
+            rid = relation_id(src_id, type, dst_id)
+            existing = self.get_relation(rid)
+            if existing is None:
+                src, dst = self.get_entity(src_id), self.get_entity(dst_id)
+                memory = self.get(memory_id)
+                if src is None or dst is None or memory is None:
+                    continue
+                sentence = relation_sentence(src.name, type, dst.name)
+                provenance, status = derive_trust([memory])
+                now = utcnow()
+                rec = RelationRecord(
+                    id=rid, source_entity_id=src_id, target_entity_id=dst_id, type=type, sentence=sentence,
+                    memory_ids=[memory_id], provenance=provenance, status=status, scope=scope,
+                    project_id=project_id, created_at=now, updated_at=now,
+                )
+                self.vectors.upsert(
+                    self.relation_col, [VectorPoint(rid, self.embedder.embed([sentence])[0], rec.to_payload())])
+                self.db.add_history(TargetKind.RELATION, rid, HistoryEvent.ADD, None, sentence, actor, job_key)
+                added += 1
+                continue
+            if memory_id not in existing.memory_ids:
+                ids = sorted({*existing.memory_ids, memory_id})
+                now = utcnow()
+                self.vectors.update_payload(self.relation_col, rid, {"memory_ids": ids, "updated_at": now})
+                existing = existing.model_copy(update={"memory_ids": ids, "updated_at": now})
+            if self._lacks_add_row(rid):
+                # a crash between the relation upsert and its ADD row (also after a delete and a re-create
+                # in a later job): the current life of the relation has no ADD row, so repair it on replay
+                self.db.add_history(
+                    TargetKind.RELATION, rid, HistoryEvent.ADD, None, existing.sentence, actor, job_key)
+            self._apply_trust(existing, actor, job_key)
+        return added
+
+    def _lacks_add_row(self, rid: str) -> bool:
+        """True when the relation's current life (the rows after its last DELETE) has no ADD row."""
+        life: list[HistoryEvent] = []
+        for h in self.db.get_history(rid):
+            if h.event == HistoryEvent.DELETE:
+                life = []
+            else:
+                life.append(h.event)
+        return HistoryEvent.ADD not in life
+
+    def _evidence(
+        self, rec: RelationRecord, exclude: str | None = None, override: MemoryRecord | None = None
+    ) -> list[MemoryRecord]:
+        """The evidence memories of a relation that still exist (never `exclude`, a memory about to go).
+        `override` stands in for the stored copy of its memory (a write that has not landed yet)."""
+        ids = [m for m in rec.memory_ids if m != exclude]
+        found = self.vectors.get(self.col, ids) if ids else []
+        recs = [MemoryRecord.from_payload(p.payload) for p in found]
+        if override is not None:
+            recs = [override if m.id == override.id else m for m in recs]
+        return recs
+
+    def _apply_trust(
+        self, rec: RelationRecord, actor: str, job_id: str | None, exclude: str | None = None,
+        override: MemoryRecord | None = None,
+    ) -> RelationRecord | None:
+        """Recompute a relation's status and provenance from its evidence. With no evidence left the
+        point is deleted (DELETE row) and None returned. A status change writes the payload first, then
+        its CORROBORATE or UPDATE row; otherwise the payload is written only if it differs."""
+        evidence = self._evidence(rec, exclude, override)
+        if not evidence:
+            self.vectors.delete(self.relation_col, [rec.id])
+            self.db.add_history(TargetKind.RELATION, rec.id, HistoryEvent.DELETE, rec.sentence, None, actor, job_id)
+            return None
+        provenance, status = derive_trust(evidence)
+        ids = [m.id for m in evidence]
+        if status == rec.status and provenance == rec.provenance and ids == rec.memory_ids:
+            return rec
+        new = rec.model_copy(update={
+            "provenance": provenance, "status": status, "memory_ids": ids, "updated_at": utcnow()})
+        self.vectors.update_payload(self.relation_col, rec.id, {
+            "provenance": str(provenance), "status": str(status), "memory_ids": ids,
+            "updated_at": new.updated_at})
+        if status != rec.status:
+            event = HistoryEvent.CORROBORATE if status == Status.VERIFIED else HistoryEvent.UPDATE
+            self.db.add_history(
+                TargetKind.RELATION, rec.id, event, str(rec.status), str(status), actor, job_id)
+        return new
+
+    def _refresh_relations(
+        self, memory_id: str, scope: Scope, project_id: int | None, actor: str, job_id: str | None = None,
+        override: MemoryRecord | None = None,
+    ) -> None:
+        """Recompute the trust of every relation this memory evidences (after its own payload changed,
+        or before it does, with `override` as the new record)."""
+        for rel in self.relations_for(memory_id, scope, project_id):
+            self._apply_trust(rel, actor, job_id, override=override)
+
+    def _unlink_relations(self, memory_id: str, scope: Scope, project_id: int | None, actor: str) -> None:
+        """Remove a memory from the evidence of its relations; one left with none is deleted.
+        Repeat-safe: relations that no longer list the memory are not returned by relations_for."""
+        for rel in self.relations_for(memory_id, scope, project_id):
+            # memory_ids is written only inside _apply_trust, together with status and provenance, so a
+            # crash before that write leaves the id in place and a retry finds this relation again
+            self._apply_trust(rel, actor, None, exclude=memory_id)
 
     def _resolve_entity(
         self, mention: EntityMention, scope: Scope, project_id: int | None, now: str
@@ -631,6 +850,7 @@ class Memory:
 
     def delete(self, id: str, *, actor: str) -> None:
         old = self._require(id)
+        self._unlink_relations(id, old.scope, old.project_id, actor)
         self._unlink(id, old.entity_ids, actor)
         self.vectors.delete(self.col, [id])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.DELETE, old.text, None, actor)
@@ -658,6 +878,10 @@ class Memory:
     def set_entity_col(self, col: str) -> None:
         """Switch this process to a finalized reembed's entity collection."""
         self.entity_col = col
+
+    def set_relation_col(self, col: str) -> None:
+        """Switch this process to a finalized reembed's relation collection."""
+        self.relation_col = col
 
     def _point(self, id: str, text: str, record: MemoryRecord) -> VectorPoint:
         """The point for a memory: dense vector, BM25 sparse vector and the payload that is the record."""
@@ -690,7 +914,8 @@ def _collapse_duplicates(candidates: list[Candidate]) -> tuple[list[Candidate], 
     """Keep one candidate per (normalized text, scope): the most trusted, at the group's first position.
 
     The kept candidate carries every copy's entity mentions: its own first, then the dropped copies' in
-    order, de-duped by normalized name (the first spelling wins)."""
+    order, de-duped by normalized name (the first spelling wins). Relations pool the same way, de-duped
+    by (normalized source, type, normalized target)."""
     kept: dict[tuple[str, Scope], Candidate] = {}
     groups: dict[tuple[str, Scope], list[Candidate]] = {}
     for c in candidates:
@@ -710,5 +935,11 @@ def _collapse_duplicates(candidates: list[Candidate]) -> tuple[list[Candidate], 
             if (norm := normalize_name(m.name)) not in seen:
                 seen.add(norm)
                 mentions.append(m)
-        kept[key] = best.model_copy(update={"entities": mentions})
+        seen_rel: set[tuple[str, str, str]] = set()
+        relations: list[RelationMention] = []
+        for r in [*best.relations, *(r for c in groups[key] if c is not best for r in c.relations)]:
+            if (rk := (normalize_name(r.source), r.type, normalize_name(r.target))) not in seen_rel:
+                seen_rel.add(rk)
+                relations.append(r)
+        kept[key] = best.model_copy(update={"entities": mentions, "relations": relations})
     return list(kept.values()), len(candidates) - len(kept)

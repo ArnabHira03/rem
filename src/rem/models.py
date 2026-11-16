@@ -166,6 +166,78 @@ class EntityRecord(BaseModel):
         return cls.model_validate(payload)
 
 
+RELATION_TYPES = ("uses", "depends_on", "part_of", "runs_on", "works_on", "preferred_over", "related_to")
+
+
+def normalize_type(t: str) -> str:
+    """Canonical relation type: stripped, lowercased, spaces and "-" as "_"; unknown becomes related_to.
+    Lives here (re-exported by rem.relations) so RelationMention can validate without an import cycle."""
+    norm = t.strip().lower().replace(" ", "_").replace("-", "_")
+    return norm if norm in RELATION_TYPES else "related_to"
+
+
+class RelationMention(BaseModel):
+    """A directed relation between two entities a fact mentions, as proposed by the extraction LLM."""
+
+    source: str
+    type: str
+    target: str
+
+    @field_validator("source", "target")
+    @classmethod
+    def _name_valid(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 80:
+            raise ValueError("name must be 1..80 characters")
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def _type_normalized(cls, v: str) -> str:
+        return normalize_type(v)
+
+
+class RelationRecord(BaseModel):
+    """A relation as stored in the vector store payload."""
+
+    id: str
+    source_entity_id: str
+    target_entity_id: str
+    type: str
+    sentence: str
+    memory_ids: list[str] = []
+    provenance: Provenance
+    status: Status
+    scope: Scope
+    project_id: int | None
+    created_at: str
+    updated_at: str
+
+    def to_payload(self) -> dict:
+        return self.model_dump(mode="json")
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "RelationRecord":
+        return cls.model_validate(payload)
+
+
+class RelationResult(BaseModel):
+    """A relation as the API returns it: source and target are entity names."""
+
+    id: str
+    source: str
+    target: str
+    type: str
+    status: Status
+    provenance: Provenance
+    scope: Scope
+    project_id: int | None
+    project_name: str | None
+    evidence: int
+    created_at: str
+    score: float | None = None
+
+
 class Candidate(BaseModel):
     text: str
     scope: Scope
@@ -175,6 +247,7 @@ class Candidate(BaseModel):
     # extraction time, so a cached extraction replays against the same memory).
     restates: str | None = None
     entities: list[EntityMention] = []
+    relations: list[RelationMention] = []
 
     @field_validator("text")
     @classmethod

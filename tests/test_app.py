@@ -220,3 +220,37 @@ async def test_entities_endpoint_lists_entities_sorted(cfg):
     got = r.json()
     assert [e["name"] for e in got] == ["Alpha", "uv"]
     assert {"id", "name", "normalized", "type", "aliases", "scope", "project_id", "memory_ids"} <= got[0].keys()
+
+
+async def test_relations_endpoint_empty(api):
+    assert (await api.get("/relations")).json() == []
+
+
+async def test_relations_endpoint_lists_and_searches(cfg):
+    from tests.test_memory_entities import apply
+    from tests.test_memory_relations import rcand
+
+    svc = RemService(cfg)
+    try:
+        apply(svc.memory, [rcand("Prefers uv over pip", ["uv", "pip"], [("uv", "preferred_over", "pip")])])
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(svc)), base_url="http://rem") as c:
+            listed = (await c.get("/relations")).json()
+            searched = (await c.get("/relations", params={"query": "uv preferred over pip", "limit": "3"})).json()
+            by_entity = (await c.get("/relations", params={"entity": "nothing"})).json()
+    finally:
+        svc.close()
+    assert len(listed) == 1 and (listed[0]["source"], listed[0]["type"], listed[0]["target"]) == ("uv", "preferred_over", "pip")
+    assert listed[0]["score"] is None and listed[0]["evidence"] == 1
+    assert len(searched) == 1 and searched[0]["score"] > 0.9
+    assert by_entity == []
+
+
+async def test_relations_endpoint_bad_scope_and_limit_are_400(api):
+    assert (await api.get("/relations", params={"scope": "nope"})).status_code == 400
+    assert (await api.get("/relations", params={"query": "x", "limit": "abc"})).status_code == 400
+
+
+async def test_relations_endpoint_limit_is_bounded(api):
+    for bad in ("0", "-1", "101"):
+        assert (await api.get("/relations", params={"query": "x", "limit": bad})).status_code == 400
+    assert (await api.get("/relations", params={"query": "x", "limit": "100"})).status_code == 200

@@ -8,6 +8,9 @@ from rem.models import (
     EntityMention,
     EntityRecord,
     MemoryRecord,
+    RelationMention,
+    RelationRecord,
+    RelationResult,
     Provenance,
     Scope,
     Status,
@@ -106,3 +109,33 @@ def test_entity_record_payload_roundtrip():
     e = EntityRecord(id="e1", name="uv", normalized="uv", type="tool", aliases=["UV"], scope=Scope.GLOBAL,
                      project_id=None, memory_ids=["m1"], created_at=utcnow(), updated_at=utcnow())
     assert EntityRecord.from_payload(e.to_payload()) == e
+
+
+def test_relation_mention_validates():
+    m = RelationMention(source=" uv ", type="Preferred Over", target="pip")
+    assert (m.source, m.type, m.target) == ("uv", "preferred_over", "pip")
+    with pytest.raises(ValidationError):
+        RelationMention(source="", type="uses", target="x")
+    with pytest.raises(ValidationError):
+        RelationMention(source="x", type="uses", target="y" * 81)
+    assert Candidate(text="Uses uv", scope="global", origin="user").relations == []
+
+
+def test_relation_record_payload_round_trip():
+    now = utcnow()
+    r = RelationRecord(
+        id="r", source_entity_id="a", target_entity_id="b", type="uses", sentence="a uses b",
+        memory_ids=["m"], provenance=Provenance.USER_ASSERTED, status=Status.VERIFIED,
+        scope=Scope.GLOBAL, project_id=None, created_at=now, updated_at=now,
+    )
+    assert RelationRecord.from_payload(r.to_payload()) == r
+
+
+def test_relation_result_fields():
+    now = utcnow()
+    res = RelationResult(
+        id="r", source="uv", target="pip", type="preferred_over", status=Status.VERIFIED,
+        provenance=Provenance.USER_ASSERTED, scope=Scope.GLOBAL, project_id=None, project_name=None,
+        evidence=1, created_at=now,
+    )
+    assert res.score is None

@@ -255,3 +255,105 @@ def test_finalize_meta_writes_are_one_transaction(mem, monkeypatch):
     col = reembed.finalize(mem)  # the pending target is still there: finalize simply runs again
     assert mem.col == col and mem.db.get_meta(reembed.TARGET_KEY) is None
     assert [r.record.text for r in mem.search("uses tabs")] == ["uses tabs"]
+
+
+# ---- relations (M8) ---------------------------------------------------------------
+
+
+def with_relation(mem, text, src, dst, job_key="job:1"):
+    from rem.models import Candidate, RelationMention
+
+    cand = Candidate(text=text, scope="global", origin="user",
+                     entities=[{"name": src, "type": "tool"}, {"name": dst, "type": "tool"}],
+                     relations=[RelationMention(source=src, type="preferred_over", target=dst)])
+    mem.apply_candidates([cand], job_key=job_key, project_id=None, session_id=None, source="cli",
+                         restate_min_similarity=0.9, has_user_turn=True, user_texts=[text])
+    return next(r for r in mem.list() if r.text == text)
+
+
+def test_reembed_copies_relations_same_ids_and_payloads(mem):
+    with_relation(mem, "uv is preferred over pip", "uv", "pip")
+    with_relation(mem, "ruff is preferred over flake8", "ruff", "flake8", job_key="job:2")
+    before = points(mem, mem.relation_col)
+    assert len(before) == 2
+    reembed.run(mem, "hash-32")
+    target = json.loads(mem.db.get_meta(reembed.TARGET_KEY))["relation_collection"]
+    assert target == f"rem_relations__{collection_slug('hash-32', 32)}" and target != mem.relation_col
+    assert points(mem, target) == before
+    vecs = vectors(mem, target)
+    expected = reembed._target_embedder(mem, "hash-32")
+    assert all(vecs[i] == expected.embed([p["sentence"]])[0] for i, p in before.items())
+    assert not mem.vectors.col_has_sparse(target)
+
+
+def test_finalize_switches_relation_collection_and_meta(mem):
+    from rem.memory import ACTIVE_RELATION_COLLECTION_KEY
+
+    with_relation(mem, "uv is preferred over pip", "uv", "pip")
+    before = points(mem, mem.relation_col)
+    old = mem.relation_col
+    reembed.run(mem, "hash-32")
+    target = json.loads(mem.db.get_meta(reembed.TARGET_KEY))["relation_collection"]
+    reembed.finalize(mem)
+    assert mem.relation_col == target
+    assert mem.db.get_meta(ACTIVE_RELATION_COLLECTION_KEY) == target
+    assert not mem.vectors.col_exists(old)
+    assert points(mem, target) == before
+    assert [r.id for r in mem.list_relations()] == list(before)
+
+
+def test_finalize_with_pre_m8_pending_target_copies_all_relations(mem):
+    with_relation(mem, "uv is preferred over pip", "uv", "pip")
+    before = points(mem, mem.relation_col)
+    old = mem.relation_col
+    reembed.run(mem, "hash-32")
+    pending = json.loads(mem.db.get_meta(reembed.TARGET_KEY))
+    rel_target = pending.pop("relation_collection")
+    mem.vectors.delete_col(rel_target)
+    mem.db.set_meta(reembed.TARGET_KEY, json.dumps(pending))
+    reembed.finalize(mem)
+    assert mem.relation_col == rel_target and mem.relation_col != old
+    assert not mem.vectors.col_exists(old)
+    assert points(mem, mem.relation_col) == before
+    assert all(len(v) == 32 for v in vectors(mem, mem.relation_col).values())
+
+
+def test_finalize_syncs_relations_written_after_the_copy(mem):
+    a = with_relation(mem, "uv is preferred over pip", "uv", "pip")
+    b = with_relation(mem, "ruff is preferred over flake8", "ruff", "flake8", job_key="job:2")
+    reembed.run(mem, "hash-32")
+    with_relation(mem, "poetry is preferred over pipenv", "poetry", "pipenv", job_key="job:3")  # new
+    mem.confirm(a.id, actor="cli")  # status change on an existing relation
+    mem.delete(b.id, actor="cli")   # drops one
+    expected = points(mem, mem.relation_col)
+    assert len(expected) == 2
+    reembed.finalize(mem)
+    assert points(mem, mem.relation_col) == expected
+    assert all(len(v) == 32 for v in vectors(mem, mem.relation_col).values())
+
+
+def test_pre_m7_pending_target_keeps_both_recorded_collections_when_finalize_fails(mem, monkeypatch):
+    with_relation(mem, "uv is preferred over pip", "uv", "pip")
+    reembed.run(mem, "hash-32")
+    pending = json.loads(mem.db.get_meta(reembed.TARGET_KEY))
+    mem.vectors.delete_col(pending.pop("entity_collection"))
+    mem.vectors.delete_col(pending.pop("relation_collection"))
+    mem.db.set_meta(reembed.TARGET_KEY, json.dumps(pending))
+    real = reembed._sync
+    calls = []
+
+    def flaky(m, src, dst, write):
+        calls.append(dst)
+        if len(calls) == 3:  # memories, entities, then the relation sync fails
+            raise RuntimeError("crash")
+        return real(m, src, dst, write)
+
+    monkeypatch.setattr(reembed, "_sync", flaky)
+    with pytest.raises(RuntimeError):
+        reembed.finalize(mem)
+    recorded = json.loads(mem.db.get_meta(reembed.TARGET_KEY))
+    assert recorded["entity_collection"] and recorded["relation_collection"]
+    monkeypatch.setattr(reembed, "_sync", real)
+    reembed.finalize(mem)
+    assert mem.entity_col == recorded["entity_collection"]
+    assert mem.relation_col == recorded["relation_collection"]
