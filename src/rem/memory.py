@@ -33,7 +33,7 @@ from rem.models import (
     utcnow,
 )
 from rem.projects import ProjectInfo, project_root, resolve_project
-from rem.retrieve import overfetch, rank
+from rem.retrieve import cosine, fuse, overfetch, score_and_rank
 from rem.storage.sqlite import RemDB
 from rem.storage.vector.base import VectorPoint, VectorStore
 from rem.storage.vector.factory import create_vector_store
@@ -144,14 +144,24 @@ class Memory:
         current = None
         if cwd is not None:  # search never registers new projects
             current = self.db.find_project(str(project_root(cwd)))
-        hits = self.vectors.search(
-            self.col,
-            self.embedder.embed_query(query),
-            overfetch(limit),
-            {"scope": str(scope)} if scope else None,
+        filters = {"scope": str(scope)} if scope else None
+        dense_vec = self.embedder.embed_query(query)
+        sparse_vec = self.sparse_embedder.embed_query(query)
+        hits = self.vectors.search(self.col, dense_vec, overfetch(limit), filters)
+        keyword_hits = (
+            self.vectors.keyword_search(self.col, sparse_vec, overfetch(limit), filters) or []
+            if sparse_vec.indices else []
         )
-        candidates = [(MemoryRecord.from_payload(h.payload), h.score) for h in hits]
-        return rank(candidates, current, limit, datetime.now(UTC))
+        keyword = {h.id: h.score for h in keyword_hits}
+        payloads = {h.id: (h.payload, h.score) for h in hits}
+        # keyword-only matches: fetch them and score their dense cosine, so the threshold applies to a real number
+        missing = [i for i in keyword if i not in payloads]
+        for p in self.vectors.get(self.col, missing, with_vectors=True) if missing else []:
+            if filters and any(p.payload.get(k) != v for k, v in filters.items()):
+                continue
+            payloads[p.id] = (p.payload, cosine(dense_vec, p.vector or []))
+        candidates = [(MemoryRecord.from_payload(payload), score) for payload, score in payloads.values()]
+        return score_and_rank(fuse(candidates, keyword), current, limit, datetime.now(UTC))
 
     def context(self, cwd: Path | None, max_chars: int) -> ContextResult:
         """Verified memories for SessionStart: current project, then system, then global; read-only."""
@@ -192,7 +202,7 @@ class Memory:
         candidates = [(r, h.score) for h in hits
                       # a memory awaiting the user's confirmation is only ever shown to confirm_pending
                       if not (r := MemoryRecord.from_payload(h.payload)).confirm_requested_at]
-        return [r.record for r in rank(candidates, project_id, limit, datetime.now(UTC))]
+        return [r.record for r in score_and_rank(fuse(candidates, {}), project_id, limit, datetime.now(UTC))]
 
     def similarity(self, text: str, id: str, scope: Scope, project_id: int | None) -> tuple[MemoryRecord, float] | None:
         """Memory `id` with its cosine similarity to text, if it is live in the given scope and project."""
