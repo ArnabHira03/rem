@@ -290,3 +290,11 @@ def test_cli_install_ignores_broken_rem_config(path, tmp_path, monkeypatch, caps
     monkeypatch.chdir(tmp_path)
     assert main(["install", "claude-code", *extra]) == 0
     assert capsys.readouterr().err == ""
+
+
+def test_symlink_loop_is_a_clean_error(tmp_path, capsys):
+    loop = tmp_path / "claude"
+    loop.mkdir()
+    (loop / "settings.json").symlink_to(loop / "settings.json")
+    assert main(["install", "claude-code"]) == 1
+    assert capsys.readouterr().err.startswith("rem: ")

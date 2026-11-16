@@ -118,7 +118,7 @@ def start_daemon_background(cfg: RemConfig) -> bool:
     """
     stamp = cfg.data_dir / "daemon-start.stamp"
     try:
-        if time.time() - stamp.stat().st_mtime < START_BACKOFF_SECONDS:
+        if 0 <= time.time() - stamp.stat().st_mtime < START_BACKOFF_SECONDS:  # a future stamp (clock stepped back) doesn't block
             return False
     except FileNotFoundError:
         pass

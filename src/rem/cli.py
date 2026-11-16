@@ -224,10 +224,13 @@ def _stop(cfg) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args_in = sys.argv[1:] if argv is None else argv
-    if args_in[:1] == ["hook"]:  # before argparse/config/daemon: a hook must never fail, print or block
+    rest = list(args_in)
+    while rest[:1] == ["--json"]:  # `rem --json hook ...` is still a hook
+        rest.pop(0)
+    if rest[:1] == ["hook"]:  # before argparse/config/daemon: a hook must never fail, print or block
         from rem.adapters import claude_code
 
-        return claude_code.main() if args_in[1:] == ["claude-code"] else claude_code.bad_args()
+        return claude_code.main() if rest[1:] == ["claude-code"] else claude_code.bad_args()
     parser = _parser()
     try:
         args = parser.parse_args(argv)
@@ -236,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "install":  # edits Claude Code settings only: works even with a broken rem config
         try:
             return _install(args)
-        except RemError as e:
+        except (RemError, OSError, RuntimeError) as e:
             print(f"rem: {e}", file=sys.stderr)
             return 1
     try:

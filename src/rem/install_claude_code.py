@@ -106,6 +106,8 @@ def _write(path: Path, data: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, path)

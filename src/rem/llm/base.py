@@ -13,6 +13,9 @@ class LLM(ABC):
     def complete_json(self, system: str, user: str, schema: dict) -> dict:
         """Return a JSON object matching `schema`. Raises LLMError on failure."""
 
+    def close(self) -> None:
+        """Release any client resources. Default: nothing to release."""
+
 
 def is_loopback(url: str) -> bool:
     host = urlparse(url).hostname

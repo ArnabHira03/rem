@@ -45,3 +45,9 @@ def test_unknown_id_exit_1(cli_env, capsys):
 
 def test_empty_text_exit_2(cli_env, capsys):
     assert main(["add", "   "]) == 2 and "text must not be empty" in capsys.readouterr().err
+
+
+def test_json_before_hook_still_runs_the_hook(monkeypatch):
+    called = []
+    monkeypatch.setattr("rem.adapters.claude_code.main", lambda: called.append(1) or 0)
+    assert main(["--json", "hook", "claude-code"]) == 0 and called == [1]

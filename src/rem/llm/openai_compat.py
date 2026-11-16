@@ -24,6 +24,9 @@ class OpenAICompatLLM(LLM):
             headers=headers,
         )
 
+    def close(self) -> None:
+        self.client.close()
+
     @property
     def name(self) -> str:
         return f"{self.cfg.provider}:{self.cfg.model}"

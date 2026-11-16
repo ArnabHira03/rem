@@ -58,6 +58,7 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         # We hold the lock, so any socket file here was left by a crashed daemon.
         sock.unlink(missing_ok=True)
         sock.parent.mkdir(parents=True, exist_ok=True)
+        llm = None
         try:
             if handler is None:
                 llm = create_llm(cfg.llm)  # raises before any network call if remote is not allowed
@@ -75,6 +76,8 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
             asyncio.run(_serve(service, cfg, handler))
         finally:
             service.close()
+            if llm is not None:
+                llm.close()
             sock.unlink(missing_ok=True)
         log.info("stopped")
         return EXIT_OK

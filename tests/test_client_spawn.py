@@ -71,3 +71,12 @@ def test_ensure_daemon_ignores_the_backoff(scfg, popen, monkeypatch):
     with pytest.raises(client.DaemonUnavailable, match="failed to start"):
         client.ensure_daemon(scfg)  # FakePopen exits 1 at once: the CLI shows the real error
     assert len(popen) == 2
+
+
+def test_future_stamp_does_not_block_start(scfg, popen):
+    scfg.data_dir.mkdir(parents=True)
+    stamp = scfg.data_dir / "daemon-start.stamp"
+    stamp.touch()
+    os.utime(stamp, (time.time() + 3600,) * 2)  # the clock was stepped back
+    assert client.start_daemon_background(scfg) is True
+    assert len(popen) == 1
