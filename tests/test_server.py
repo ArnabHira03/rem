@@ -42,9 +42,12 @@ def test_ingested_job_stays_pending_without_llm(daemon_env):
 
     p = spawn_daemon(daemon_env)
     wait_for_socket(daemon_env.sock)
+    deadline = time.monotonic() + 10
+    while "extraction disabled" not in (daemon_env.log.read_text() if daemon_env.log.exists() else ""):
+        assert time.monotonic() < deadline, "daemon never logged 'extraction disabled'"
+        time.sleep(0.05)
     c = uds_client(daemon_env.sock)
     c.post("/ingest", json={"source": "cli", "session_id": "s", "turns": [{"role": "user", "content": "hi"}]})
-    time.sleep(0.6)  # past the 0.2s debounce: a running worker would have claimed the job by now
     status = c.get("/status").json()
     assert status["jobs"]["pending"] == 1 and status["jobs"]["done"] == 0
     assert status["llm"] == {"provider": "none"}

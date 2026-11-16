@@ -95,3 +95,16 @@ def test_context_count_beyond_a_scroll_page(tmp_path, monkeypatch):
         assert m.context(None, 1600).count == 5
     finally:
         m.close()
+
+
+def test_cap_never_leaves_a_dangling_title(mem):
+    add(mem, "x" * 60)
+    title = "About the user:"
+    cap = len(HEADER) + 1 + len(title) + 5  # header and title fit, the first fact does not
+    assert mem.context(None, cap) == ContextResult("", 0)
+    add(mem, "short")
+    for cap in range(len(HEADER), len(HEADER) + 200):
+        r = mem.context(None, cap)
+        assert len(r.text) <= cap
+        if r.text:
+            assert r.text.splitlines()[-1].startswith("- ")

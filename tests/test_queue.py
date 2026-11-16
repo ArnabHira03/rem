@@ -222,3 +222,22 @@ def test_quick_follow_up_prompt_lands_in_the_previous_job(q, clock):
     clock.t += 5
     j2 = q.claim()
     assert [t.content for t in q.messages_for(j2.id)] == ["r2"]
+
+
+def test_held_prompt_while_job_processing(q, clock):
+    q.ingest("cc", "S", None, [T("user", "first", "a1")])
+    clock.t += 5
+    job = q.claim()
+    assert q.counts()["processing"] == 1
+    r = q.ingest("cc", "S", None, [T("user", "held prompt", "h1")], enqueue=False)
+    assert r.accepted == 1 and r.job_id is None
+    assert [t.content for t in q.messages_for(job.id)] == ["first"]
+    assert q.db.conn.execute("SELECT job_id FROM messages WHERE message_id = 'h1'").fetchone()[0] is None
+    q.complete(job.id)
+    r2 = q.ingest("cc", "S", None, [T("assistant", "reply", "r1")], enqueue=True)
+    assert r2.job_id is not None and r2.job_id != job.id
+    assert q.counts() == {"pending": 1, "processing": 0, "done": 1, "failed": 0}
+    clock.t += 5
+    job2 = q.claim()
+    assert job2.id == r2.job_id
+    assert [t.content for t in q.messages_for(job2.id)] == ["held prompt", "reply"]
