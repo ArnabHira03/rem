@@ -10,6 +10,7 @@ from pathlib import Path
 
 from rem.config import load_config
 from rem.errors import RemError
+from rem.format import history_line, memory_line, search_line
 from rem.models import Scope, Status
 
 SCOPES = [s.value for s in Scope]
@@ -67,16 +68,13 @@ def _parser() -> argparse.ArgumentParser:
     ins.add_argument("--uninstall", action="store_true", help="remove rem's hooks")
     ins.add_argument("--dry-run", action="store_true", help="print the resulting settings, write nothing")
 
+    cmd("mcp", "serve rem's memory tools over MCP (stdio)")
+
     ev = cmd("eval", "score the configured LLM (runs in-process, no daemon)")
     ev.add_argument("what", choices=["extraction"])
     ev.add_argument("--dataset", type=Path, help="JSONL dataset (default: the one shipped with rem)")
     ev.add_argument("--limit", type=int, help="only run the first N cases")
     return p
-
-
-def _line(m: dict) -> str:
-    where = f"{m['scope']}:{m['project_name']}" if m.get("project_name") else m["scope"]
-    return f"{m['id']}  [{where}] {m['status']}  {m['text']}"
 
 
 def _emit(args, value) -> None:
@@ -87,11 +85,11 @@ def _emit(args, value) -> None:
         return
     for v in value if isinstance(value, list) else [value]:
         if "event" in v:
-            print(f"{v['created_at']}  {v['event']:<11} {v['actor']:<9} {v['old_value']!r} → {v['new_value']!r}")
+            print(history_line(v))
         elif "score" in v:
-            print(f"{v['score']:.2f}  {_line(v)}")
+            print(search_line(v))
         else:
-            print(_line(v))
+            print(memory_line(v))
 
 
 def _memory_command(args, cfg):
@@ -246,7 +244,12 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config()
     except ValueError as e:
         print(f"rem: {e}", file=sys.stderr)
-        return 3 if args.cmd == "daemon" else 2
+        return 3 if args.cmd in ("daemon", "mcp") else 2
+
+    if args.cmd == "mcp":  # stdout carries JSON-RPC only from here on
+        from rem.mcp.tools import run_mcp
+
+        return run_mcp(cfg)
 
     if args.cmd == "daemon":
         from rem.daemon.server import run_daemon

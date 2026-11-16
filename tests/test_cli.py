@@ -51,3 +51,18 @@ def test_json_before_hook_still_runs_the_hook(monkeypatch):
     called = []
     monkeypatch.setattr("rem.adapters.claude_code.main", lambda: called.append(1) or 0)
     assert main(["--json", "hook", "claude-code"]) == 0 and called == [1]
+
+
+def test_mcp_config_error_exit_3(tmp_path, monkeypatch, capsys):
+    bad = tmp_path / "bad.toml"
+    bad.write_text("[[[ not toml")
+    monkeypatch.setenv("REM_CONFIG", str(bad))
+    assert main(["mcp"]) == 3
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.startswith("rem: ")
+
+
+def test_mcp_dispatches_to_run_mcp(monkeypatch):
+    seen = []
+    monkeypatch.setattr("rem.mcp.tools.run_mcp", lambda cfg: seen.append(cfg) or 0)
+    assert main(["mcp"]) == 0 and len(seen) == 1
