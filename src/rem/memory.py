@@ -15,7 +15,7 @@ from rem.config import RemConfig
 from rem.embed.base import Embedder, collection_slug
 from rem.embed.factory import create_embedder, create_sparse_embedder
 from rem.embed.sparse import SparseEmbedder
-from rem.entities import ENTITY_MERGE_MIN, bucket, entity_id, normalize_name
+from rem.entities import ENTITY_MERGE_MIN, ENTITY_QUERY_MIN, bucket, entity_id, normalize_name
 from rem.errors import EmbedderMismatchError, MemoryNotFound
 from rem.models import (
     Candidate,
@@ -219,7 +219,13 @@ class Memory:
                 continue
             payloads[p.id] = (p.payload, cosine(dense_vec, p.vector or []))
         candidates = [(MemoryRecord.from_payload(payload), score) for payload, score in payloads.values()]
-        return score_and_rank(fuse(candidates, keyword), current, limit, datetime.now(UTC))
+        # entities the query matches boost their linked memories; they never add candidates
+        entity_memory_ids: set[str] = set()
+        if self.vectors.col_exists(self.entity_col):
+            for h in self.vectors.search(self.entity_col, dense_vec, overfetch(limit)):
+                if h.score >= ENTITY_QUERY_MIN:
+                    entity_memory_ids.update(h.payload.get("memory_ids") or [])
+        return score_and_rank(fuse(candidates, keyword, entity_memory_ids), current, limit, datetime.now(UTC))
 
     def context(self, cwd: Path | None, max_chars: int) -> ContextResult:
         """Verified memories for SessionStart: current project, then system, then global; read-only."""

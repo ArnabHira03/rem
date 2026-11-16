@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from rem.models import MemoryRecord
-from rem.retrieve import KEYWORD_BOOST, fuse, overfetch, score_and_rank
+from rem.retrieve import ENTITY_BOOST, KEYWORD_BOOST, fuse, overfetch, score_and_rank
 
 
 def rank(pairs, *args):
@@ -80,3 +80,16 @@ def test_keyword_only_hit_below_floor_is_dropped():
 def test_no_keyword_hits_leaves_dense_scores_unchanged():
     a = rec("global")
     assert fuse([(a, 0.60)], {}) == [(a, 0.60, 0.60)]
+
+
+def test_memory_linked_to_a_matched_entity_is_boosted():
+    a, b = rec("global"), rec("global")
+    ranked = score_and_rank(fuse([(a, 0.40), (b, 0.41)], {}, entity_memory_ids={a.id}), None, 10, NOW)
+    # hybrid 0.40 + ENTITY_BOOST, verified global (no adjustment), full recency bonus (created at NOW) 0.02
+    assert ranked[0].record.id == a.id and ranked[0].score == pytest.approx(0.40 + ENTITY_BOOST + 0.02)
+    assert ranked[0].semantic == pytest.approx(0.40)
+
+
+def test_entity_boost_does_not_lift_a_memory_over_the_dense_threshold():
+    a = rec("global")
+    assert score_and_rank(fuse([(a, 0.25)], {}, entity_memory_ids={a.id}), None, 10, NOW) == []
