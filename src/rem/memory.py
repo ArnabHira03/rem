@@ -81,14 +81,19 @@ class Memory:
             if stored and stored != slug:
                 raise EmbedderMismatchError(
                     f"stored memories use {stored}; configured embedder is {slug}. "
-                    "Run `rem reembed` (coming in M6) or change the config back."
+                    "Run `rem reembed` to move them, or change the config back."
                 )
             self.vectors = vector_store or create_vector_store(cfg)
+            self.col = f"rem_memories__{slug}"
+            if self.vectors.col_exists(self.col) and not self.vectors.col_has_sparse(self.col):
+                # created before M6: keyword search would silently be off, so refuse before writing anything
+                raise EmbedderMismatchError(
+                    f"{self.col} was created before BM25 search existed; run `rem reembed` to rebuild it."
+                )
         except BaseException:
             self.db.close()
             raise
         self.db.set_meta(ACTIVE_EMBEDDER_KEY, slug)
-        self.col = f"rem_memories__{slug}"
         self.vectors.create_col(self.col, self.embedder.dims, sparse=True)
 
     # ---- reads -------------------------------------------------------------

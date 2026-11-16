@@ -169,3 +169,16 @@ def test_update_refreshes_bm25_slot(mem):
     mem.update(r.id, "uses Postgres for storage", actor="cli")
     (p,) = mem.vectors.get(mem.col, [r.id], with_vectors=True)
     assert p.sparse == mem.sparse_embedder.embed_docs(["uses Postgres for storage"])[0]
+
+
+def test_dense_only_collection_is_refused_before_writing(cfg):
+    from rem.embed.base import collection_slug
+    from rem.embed.hashing import HashingEmbedder
+    from rem.storage.sqlite import RemDB
+
+    e = HashingEmbedder(64)
+    vs = InMemoryVectorStore()
+    vs.create_col(f"rem_memories__{collection_slug(e.model_id, e.dims)}", e.dims)  # M5 layout: no BM25 slot
+    with pytest.raises(EmbedderMismatchError, match="rem reembed"):
+        Memory(cfg, vector_store=vs, embedder=e)
+    assert RemDB(cfg.db_path).get_meta("active_embedder") is None
