@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 
 from pydantic import BaseModel, ValidationError
@@ -95,7 +96,7 @@ def build_prompt(
     turns: list[Turn], context: list[Turn], related: list[MemoryRecord]
 ) -> tuple[str, str]:
     existing = "\n".join(
-        f"[{i}] ({m.scope.value}, {m.status.value}) {redact(m.text)}" for i, m in enumerate(related)
+        f"[{i}] ({m.scope.value}, {m.status.value}) {' '.join(redact(m.text).split())}" for i, m in enumerate(related)
     )
     earlier = "\n".join(render_turn(t) for t in context)
     new = "\n".join(render_turn(t) for t in turns)
@@ -206,7 +207,8 @@ def build_confirm_prompt(turns: list[Turn], context: list[Turn], pending: list[M
     last_user = max(i for i, t in enumerate(turns) if t.role == "user")
     shown = ([before] if before is not None else []) + turns[: last_user + 1]
     convo = "\n".join(render_turn(t) for t in shown)
-    facts = "\n".join(f"[{i}] {redact(m.text)}" for i, m in enumerate(pending))
+    # as JSON strings: a fact (agent-written) can't add lines or sections to the prompt
+    facts = "\n".join(f"[{i}] {json.dumps(redact(m.text), ensure_ascii=False)}" for i, m in enumerate(pending))
     return CONFIRM_SYSTEM_PROMPT, f"## Conversation\n{convo}\n\n## Facts awaiting the user's confirmation\n{facts}\n"
 
 

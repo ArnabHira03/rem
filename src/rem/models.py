@@ -149,5 +149,5 @@ class Confirmation(BaseModel):
 
     memory_id: str
     hash: str
-    requested_at: str
+    requested_at: str = ""  # "" never matches a request, so a confirmation cached without it fails safe
     quote: str

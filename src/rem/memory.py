@@ -36,7 +36,7 @@ from rem.retrieve import overfetch, rank
 from rem.storage.sqlite import RemDB
 from rem.storage.vector.base import VectorPoint, VectorStore
 from rem.storage.vector.factory import create_vector_store
-from rem.trust import Action, assign_trust, decide, quote_in_user_turns
+from rem.trust import Action, assign_trust, decide, quote_in_user_turns, user_states
 
 log = logging.getLogger(__name__)
 
@@ -380,6 +380,7 @@ class Memory:
         source: str,
         restate_min_similarity: float,
         has_user_turn: bool,
+        user_texts: list[str] | None = None,
     ) -> ApplyResult:
         """Write a job's extracted candidates, in order, so later ones see earlier writes.
 
@@ -389,7 +390,10 @@ class Memory:
         value or a contradiction has no such memory, so it is added rather than corroborating.
 
         Without a user turn in the job, nothing can be user-asserted: "user" origins are
-        downgraded to "assistant" (unverified).
+        downgraded to "assistant" (unverified). Given the job's user_texts (the daemon always passes
+        them), a "user" fact must also be named by a sentence the user actually wrote
+        (trust.user_states); otherwise it is downgraded too, so the LLM's say-so that the user said
+        it (perhaps misled by an assistant reply) never makes a fact verified on its own.
 
         Replaying the same job_key is idempotent: memory ids are deterministic, its own ADDs are
         re-taken (repairing a missing ADD row) and its own corroborations only complete history.
@@ -397,6 +401,10 @@ class Memory:
         result = ApplyResult()
         if not has_user_turn:
             candidates = [c.model_copy(update={"origin": "assistant"}) if c.origin == "user" else c
+                          for c in candidates]
+        elif user_texts is not None:
+            candidates = [c.model_copy(update={"origin": "assistant"})
+                          if c.origin == "user" and not user_states(c.text, user_texts) else c
                           for c in candidates]
         kept, collapsed = _collapse_duplicates(candidates)
         result.skipped += collapsed

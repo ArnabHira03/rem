@@ -94,6 +94,7 @@ class ExtractionHandler:
             source=job.source,
             restate_min_similarity=self.settings.restate_min_similarity,
             has_user_turn=bool(user_texts),
+            user_texts=user_texts,
         )
         log.info(
             "job %s (%s): %d candidate(s), added %d, corroborated %d, skipped %d, dropped %d; confirmed %d of %d",

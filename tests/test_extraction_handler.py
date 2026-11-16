@@ -247,7 +247,7 @@ async def test_users_reply_confirms_a_requested_memory(svc):
     await _exchange(svc, "Yes, remember tabs.", "Saved.", [m.id])
     await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
     assert m.text not in llm.calls[0][1]  # the extraction prompt never sees the agent's claim
-    assert "[0] Prefers tabs over spaces" in llm.calls[1][1] and "user: Yes, remember tabs." in llm.calls[1][1]
+    assert "[0] \"Prefers tabs over spaces\"" in llm.calls[1][1] and "user: Yes, remember tabs." in llm.calls[1][1]
     got = await svc.get(m.id)
     assert got.status == S.VERIFIED and got.provenance == P.USER_CONFIRMED and got.corroborated_by == "job:1"
     assert [(h.event, h.actor) for h in await svc.history(m.id)] == [
