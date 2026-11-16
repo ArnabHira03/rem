@@ -3,7 +3,9 @@
 Current memory text lives in the vector store; SQLite only keeps history old/new values.
 """
 
+import contextlib
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 from rem.errors import RemError
@@ -114,6 +116,18 @@ class RemDB:
     @property
     def conn(self) -> sqlite3.Connection:
         return self._conn
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Run the block's writes as one transaction: all commit together, or none on an exception.
+        The connection is autocommit, so statements inside (set_meta, delete_meta...) never commit alone."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
 
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()

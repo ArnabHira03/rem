@@ -231,3 +231,27 @@ def test_entity_boost_still_works_after_finalize(mem):
     plain = {r.record.id: r.score for r in mem.search("tabs")}
     assert scores[a.id] == pytest.approx(plain[a.id] + ENTITY_BOOST)
     assert scores.get(b.id) == plain.get(b.id)
+
+
+def test_finalize_meta_writes_are_one_transaction(mem, monkeypatch):
+    add(mem, "uses tabs")
+    reembed.run(mem, "hash-32")
+    keys = [reembed.ACTIVE_COLLECTION_KEY, reembed.ACTIVE_ENTITY_COLLECTION_KEY, reembed.ACTIVE_EMBEDDER_KEY,
+            reembed.ACTIVE_MODEL_KEY, reembed.TARGET_KEY]
+    before = {k: mem.db.get_meta(k) for k in keys}
+    old_col, old_entity = mem.col, mem.entity_col
+    real = mem.db.delete_meta
+
+    def crash(key):
+        raise RuntimeError("crash")
+
+    monkeypatch.setattr(mem.db, "delete_meta", crash)  # the last meta write of finalize
+    with pytest.raises(RuntimeError):
+        reembed.finalize(mem)
+    assert {k: mem.db.get_meta(k) for k in keys} == before  # nothing was switched in the store
+    assert (mem.col, mem.entity_col) == (old_col, old_entity)  # nor in this process
+    assert mem.vectors.col_exists(old_col) and mem.vectors.col_exists(old_entity)
+    monkeypatch.setattr(mem.db, "delete_meta", real)
+    col = reembed.finalize(mem)  # the pending target is still there: finalize simply runs again
+    assert mem.col == col and mem.db.get_meta(reembed.TARGET_KEY) is None
+    assert [r.record.text for r in mem.search("uses tabs")] == ["uses tabs"]

@@ -141,11 +141,14 @@ def finalize(mem: Memory) -> str:
         mem.db.set_meta(TARGET_KEY, json.dumps({**pending, "entity_collection": entity_col}))
     mem.vectors.create_col(entity_col, target.dims, sparse=False)
     _sync(mem, old_entity, entity_col, lambda pts: _embed_entities_into(mem, target, entity_col, pts))
-    mem.db.set_meta(ACTIVE_COLLECTION_KEY, col)
-    mem.db.set_meta(ACTIVE_ENTITY_COLLECTION_KEY, entity_col)
-    mem.db.set_meta(ACTIVE_EMBEDDER_KEY, pending["slug"])
-    mem.db.set_meta(ACTIVE_MODEL_KEY, pending["model"])
-    mem.db.delete_meta(TARGET_KEY)
+    # one transaction: a crash midway must not leave the store half switched (e.g. a new collection with
+    # the old embedder) or the target dropped before the switch; until it commits, finalize can rerun
+    with mem.db.transaction():
+        mem.db.set_meta(ACTIVE_COLLECTION_KEY, col)
+        mem.db.set_meta(ACTIVE_ENTITY_COLLECTION_KEY, entity_col)
+        mem.db.set_meta(ACTIVE_EMBEDDER_KEY, pending["slug"])
+        mem.db.set_meta(ACTIVE_MODEL_KEY, pending["model"])
+        mem.db.delete_meta(TARGET_KEY)
     mem.set_active(col, target)
     mem.set_entity_col(entity_col)
     mem.vectors.delete_col(old)
