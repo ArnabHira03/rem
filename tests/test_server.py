@@ -42,9 +42,12 @@ def test_ingested_job_stays_pending_without_llm(daemon_env):
 
     p = spawn_daemon(daemon_env)
     wait_for_socket(daemon_env.sock)
+    deadline = time.monotonic() + 10
+    while "extraction disabled" not in (daemon_env.log.read_text() if daemon_env.log.exists() else ""):
+        assert time.monotonic() < deadline, "daemon never logged 'extraction disabled'"
+        time.sleep(0.05)
     c = uds_client(daemon_env.sock)
     c.post("/ingest", json={"source": "cli", "session_id": "s", "turns": [{"role": "user", "content": "hi"}]})
-    time.sleep(0.6)  # past the 0.2s debounce: a running worker would have claimed the job by now
     status = c.get("/status").json()
     assert status["jobs"]["pending"] == 1 and status["jobs"]["done"] == 0
     assert status["llm"] == {"provider": "none"}
@@ -161,11 +164,11 @@ from rem.spool import write_spool
 MODE = sys.argv[1]
 real_drain, real_close, calls = server.drain_spool, RemService.close, []
 
-def drain(data_dir, ingest):
+def drain(data_dir, ingest, failures=None):
     calls.append(1)
     if MODE == "raise":
         raise OSError("disk gone")
-    n = real_drain(data_dir, ingest)
+    n = real_drain(data_dir, ingest, failures)
     if len(calls) == 1:  # a hook spools while we are still starting up
         write_spool(data_dir, {"source": "claude-code", "session_id": "late", "cwd": None,
                                "turns": [{"role": "user", "content": "late turn"}], "enqueue": True})

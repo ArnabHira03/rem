@@ -61,7 +61,7 @@ class InMemoryVectorStore(VectorStore):
         for i in ids:
             self._cols[col].pop(i, None)
 
-    def list_points(self, col, filters=None, limit=10_000):
+    def list_points(self, col, filters=None, limit=None):
         return [
             VectorPoint(p.id, list(p.vector or []), dict(p.payload))
             for p in self._cols[col].values()

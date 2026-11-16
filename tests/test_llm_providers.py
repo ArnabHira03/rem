@@ -237,3 +237,10 @@ def test_ollama_live():
     cfg = LLMConfig(provider="ollama", model=os.environ["REM_TEST_OLLAMA_MODEL"], timeout_seconds=300, think=False)
     ex = extract(create_llm(cfg), [Turn("user", "I always use uv instead of pip.")], [], [], max_candidates=20)
     assert any(c.origin == "user" for c in ex.candidates), ex.candidates
+
+
+def test_openai_compat_close_closes_client():
+    llm = OpenAICompatLLM(LLMConfig(provider="ollama", model="m"), transport=httpx.MockTransport(lambda r: None))
+    assert not llm.client.is_closed
+    llm.close()
+    assert llm.client.is_closed

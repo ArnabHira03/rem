@@ -170,6 +170,7 @@ def run_eval(llm: LLM, embedder: Embedder, cases: list[dict], cfg: RemConfig) ->
                     candidates, job_key=f"job:eval:{case['id']}", project_id=project_id,
                     session_id=None, source="eval", restate_min_similarity=settings.restate_min_similarity,
                     has_user_turn=any(t.role == "user" for t in turns),
+                    user_texts=[t.content for t in turns if t.role == "user"],
                 )
                 if case.get("expect_corroborate"):
                     dedup_cases += 1

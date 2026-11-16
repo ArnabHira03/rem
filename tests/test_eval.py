@@ -145,3 +145,16 @@ def test_cli_eval_without_api_key_exits_3(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert main(["eval", "extraction"]) == 3
     assert "set ANTHROPIC_API_KEY" in capsys.readouterr().err
+
+
+def test_eval_never_contacts_daemon(cfg, hashing, monkeypatch, tmp_path):
+    import rem.client
+
+    monkeypatch.setenv("REM_SOCKET", str(tmp_path / "nope.sock"))
+
+    def boom(*a, **k):
+        raise AssertionError("eval contacted the daemon")
+
+    monkeypatch.setattr(rem.client.RemClient, "__init__", boom)
+    r = run_eval(FakeLLM([said(FISH)]), hashing, [CASE_FISH], cfg)
+    assert r.cases == 1

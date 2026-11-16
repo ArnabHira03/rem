@@ -57,8 +57,9 @@ class VectorStore(ABC):
 
     @abstractmethod
     def list_points(
-        self, col: str, filters: Filters | None = None, limit: int = 10_000
-    ) -> list[VectorPoint]: ...
+        self, col: str, filters: Filters | None = None, limit: int | None = None
+    ) -> list[VectorPoint]:
+        """Every point matching filters; limit=None means all of them."""
 
     def keyword_search(
         self, col: str, query: str, limit: int, filters: Filters | None = None

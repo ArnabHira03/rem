@@ -11,7 +11,6 @@ import sys
 import time
 
 from rem.client import RemClient
-from rem.daemon.lock import InstanceLock
 
 from .conftest import _stop_daemon, spawn_daemon, wait_for_socket
 
@@ -89,19 +88,18 @@ def test_spooled_when_daemon_down_then_drained(daemon_env, tmp_path):
     work.mkdir()
     spool = env.root / "spool"
 
-    # While we hold the instance lock the daemon the hook auto-starts exits at once (code 2), so the
-    # spool file can't be drained behind our back.
-    lock = InstanceLock(env.lock)
-    lock.acquire()
-    try:
-        assert run_hook(env, payload("UserPromptSubmit", work, prompt_id="p9", prompt="remember the spool")) == ""
-        files = list(spool.glob("*.json"))
-        assert len(files) == 1
-        body = json.loads(files[0].read_text())
-        assert body["source"] == "claude-code" and body["session_id"] == "sess-e2e"
-        assert [t["content"] for t in body["turns"]] == ["remember the spool"]
-    finally:
-        lock.release()
+    # A fresh start stamp makes the hook back off, so it spools without spawning a daemon.
+    stamp = env.root / "daemon-start.stamp"
+    stamp.touch()
+    before = stamp.stat().st_mtime_ns
+    assert run_hook(env, payload("UserPromptSubmit", work, prompt_id="p9", prompt="remember the spool")) == ""
+    files = list(spool.glob("*.json"))
+    assert len(files) == 1
+    body = json.loads(files[0].read_text())
+    assert body["source"] == "claude-code" and body["session_id"] == "sess-e2e"
+    assert [t["content"] for t in body["turns"]] == ["remember the spool"]
+    assert stamp.stat().st_mtime_ns == before  # no daemon was spawned
+    assert not env.sock.exists()
 
     proc = spawn_daemon(env)
     try:

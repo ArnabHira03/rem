@@ -28,10 +28,16 @@ class AddBody(BaseModel):
 class UpdateBody(BaseModel):
     text: str
     actor: str = "cli"
+    unverify: bool = False
 
 
 class ActorBody(BaseModel):
     actor: str = "cli"
+
+
+class RequestConfirmationBody(BaseModel):
+    actor: str = "mcp"
+    cwd: str | None = None
 
 
 class SearchBody(BaseModel):
@@ -90,10 +96,13 @@ def build_app(service: RemService) -> Starlette:
 
     async def list_memories(request: Request):
         q = request.query_params
+        if q.get("cwd") and q.get("project_id"):
+            raise ValueError("give cwd or project_id, not both")
         rec = await service.list(
             scope=Scope(q["scope"]) if q.get("scope") else None,
             status=Status(q["status"]) if q.get("status") else None,
             project_id=int(q["project_id"]) if q.get("project_id") else None,
+            cwd=_path(q.get("cwd")),
         )
         return _json(rec)
 
@@ -106,7 +115,7 @@ def build_app(service: RemService) -> Starlette:
 
     async def update(request: Request):
         b = await _body(request, UpdateBody)
-        return _json(await service.update(request.path_params["id"], b.text, actor=b.actor))
+        return _json(await service.update(request.path_params["id"], b.text, actor=b.actor, unverify=b.unverify))
 
     async def delete(request: Request):
         await service.delete(request.path_params["id"], actor=request.query_params.get("actor", "cli"))
@@ -115,6 +124,10 @@ def build_app(service: RemService) -> Starlette:
     async def confirm(request: Request):
         b = await _body(request, ActorBody)
         return _json(await service.confirm(request.path_params["id"], actor=b.actor))
+
+    async def request_confirmation(request: Request):
+        b = await _body(request, RequestConfirmationBody)
+        return _json(await service.request_confirmation(request.path_params["id"], actor=b.actor, cwd=_path(b.cwd)))
 
     async def history(request: Request):
         return _json(await service.history(request.path_params["id"]))
@@ -159,6 +172,7 @@ def build_app(service: RemService) -> Starlette:
             Route("/memories/{id}", update, methods=["PATCH"]),
             Route("/memories/{id}", delete, methods=["DELETE"]),
             Route("/memories/{id}/confirm", confirm, methods=["POST"]),
+            Route("/memories/{id}/request-confirmation", request_confirmation, methods=["POST"]),
             Route("/memories/{id}/history", history, methods=["GET"]),
             Route("/search", search, methods=["POST"]),
             Route("/context", context, methods=["POST"]),

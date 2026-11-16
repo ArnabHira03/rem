@@ -16,6 +16,7 @@ from rem.embed.factory import create_embedder
 from rem.errors import EmbedderMismatchError, MemoryNotFound
 from rem.models import (
     Candidate,
+    Confirmation,
     HistoryEvent,
     REM_NAMESPACE,
     HistoryRow,
@@ -30,22 +31,24 @@ from rem.models import (
     text_hash,
     utcnow,
 )
-from rem.projects import resolve_project
+from rem.projects import ProjectInfo, project_root, resolve_project
 from rem.retrieve import overfetch, rank
 from rem.storage.sqlite import RemDB
 from rem.storage.vector.base import VectorPoint, VectorStore
 from rem.storage.vector.factory import create_vector_store
-from rem.trust import Action, assign_trust, decide
+from rem.trust import Action, assign_trust, decide, quote_in_user_turns, user_states
 
 log = logging.getLogger(__name__)
 
 ACTIVE_EMBEDDER_KEY = "active_embedder"
+MAX_PENDING_CONFIRMATIONS = 10  # requests one job checks, newest first
 
 
 @dataclass
 class ApplyResult:
     added: list[str] = field(default_factory=list)
     corroborated: list[str] = field(default_factory=list)
+    confirmed: list[str] = field(default_factory=list)
     skipped: int = 0
     dropped: int = 0
 
@@ -103,6 +106,29 @@ class Memory:
         records = [MemoryRecord.from_payload(p.payload) for p in self.vectors.list_points(self.col, filters)]
         return sorted(records, key=lambda r: r.created_at, reverse=True)
 
+    def list_for(self, cwd: Path, *, scope: Scope | None = None, status: Status | None = None) -> list[MemoryRecord]:
+        """Like list(), but project memories only from cwd's project (its git root), never another
+        repository's. A directory rem knows no project for has no project memories. Read-only."""
+        current = self.db.find_project(str(project_root(cwd)))
+        if scope == Scope.PROJECT:
+            return [] if current is None else self.list(scope=scope, project_id=current, status=status)
+        return [r for r in self.list(scope=scope, status=status)
+                if r.scope != Scope.PROJECT or (current is not None and r.project_id == current)]
+
+    def pending_confirmations(self, since: str, until: str, project_id: int | None) -> list[MemoryRecord]:
+        """Unverified memories an agent in project_id asked to confirm in (since, until], newest first.
+
+        The window is one job's exchange (IngestStore.job_window): an agent asks for confirmation
+        after the user's reply, before that exchange's job is enqueued, so an older request (or one
+        from a later exchange) is never matched against this user's words. A request from another
+        project's session is never offered either.
+        """
+        recs = [r for r in self.list(status=Status.UNVERIFIED)
+                if r.confirm_requested_at and since < r.confirm_requested_at <= until
+                and r.confirm_request_project_id == project_id]
+        recs.sort(key=lambda r: r.confirm_requested_at or "", reverse=True)
+        return recs[:MAX_PENDING_CONFIRMATIONS]
+
     def search(
         self,
         query: str,
@@ -114,7 +140,7 @@ class Memory:
         normalize_text(query)  # rejects empty queries
         current = None
         if cwd is not None:  # search never registers new projects
-            current = self.db.find_project(resolve_project(cwd).root_path)
+            current = self.db.find_project(str(project_root(cwd)))
         hits = self.vectors.search(
             self.col,
             self.embedder.embed_query(query),
@@ -126,7 +152,7 @@ class Memory:
 
     def context(self, cwd: Path | None, max_chars: int) -> ContextResult:
         """Verified memories for SessionStart: current project, then system, then global; read-only."""
-        current = self.db.find_project(resolve_project(cwd).root_path) if cwd is not None else None
+        current = self.db.find_project(str(project_root(cwd))) if cwd is not None else None
         verified = self.list(status=Status.VERIFIED)
         sections: list[tuple[str, list[MemoryRecord]]] = []
         if current is not None:
@@ -160,7 +186,9 @@ class Memory:
     def related(self, text: str, project_id: int | None, limit: int) -> list[MemoryRecord]:
         """Memories across all scopes related to text, ranked with project_id as the current project."""
         hits = self.vectors.search(self.col, self.embedder.embed_query(text), overfetch(limit))
-        candidates = [(MemoryRecord.from_payload(h.payload), h.score) for h in hits]
+        candidates = [(r, h.score) for h in hits
+                      # a memory awaiting the user's confirmation is only ever shown to confirm_pending
+                      if not (r := MemoryRecord.from_payload(h.payload)).confirm_requested_at]
         return [r.record for r in rank(candidates, project_id, limit, datetime.now(UTC))]
 
     def similarity(self, text: str, id: str, scope: Scope, project_id: int | None) -> tuple[MemoryRecord, float] | None:
@@ -185,6 +213,7 @@ class Memory:
         *,
         scope: Scope,
         cwd: Path | None = None,
+        project: ProjectInfo | None = None,
         provenance: Provenance,
         status: Status,
         source: str,
@@ -193,6 +222,7 @@ class Memory:
         session_id: str | None = None,
         project_id: int | None = None,
         evidence_source: str | None = None,
+        agent_claim: bool = False,
     ) -> MemoryRecord:
         normalize_text(text)  # rejects empty text
         text = text.strip()
@@ -204,8 +234,8 @@ class Memory:
             if project is None:
                 raise ValueError(f"unknown project id {project_id}")
             project_name = project[1]
-        elif cwd is not None:
-            info = resolve_project(cwd)
+        elif project is not None or cwd is not None:
+            info = project if project is not None else resolve_project(cwd)
             project_id = self.db.upsert_project(info.root_path, info.name, info.git_remote)
             project_name = info.name
         else:
@@ -227,21 +257,27 @@ class Memory:
         record = MemoryRecord(
             id=mid, text=text, hash=text_hash(text), scope=scope, project_id=project_id,
             project_name=project_name, provenance=provenance, status=status, evidence_source=evidence_source,
-            observed_at=None, source=source, session_id=session_id, job_id=job_id,
+            observed_at=None, source=source, session_id=session_id, job_id=job_id, agent_claim=agent_claim,
             created_at=now, updated_at=now,
         )
         self.vectors.upsert(self.col, [VectorPoint(mid, self.embedder.embed([text])[0], record.to_payload())])
         self.db.add_history(TargetKind.MEMORY, mid, HistoryEvent.ADD, None, text, actor, job_id)
         return record
 
-    def update(self, id: str, text: str, *, actor: str) -> MemoryRecord:
+    def update(self, id: str, text: str, *, actor: str, unverify: bool = False) -> MemoryRecord:
+        """Change a memory's text. With ``unverify`` (an agent's edit) the record also becomes
+        assistant-generated and unverified, in the same upsert, until the user confirms it."""
         normalize_text(text)
         text = text.strip()
         old = self._require(id)
         other = self._find_by_text(text, old.scope, old.project_id)
         if other is not None and other.id != id:
             raise ValueError(f"another memory already has this text: {other.id}")
-        record = old.model_copy(update={"text": text, "hash": text_hash(text), "updated_at": utcnow()})
+        # an edit withdraws any confirmation request: the user never saw the new text
+        changes = {"text": text, "hash": text_hash(text), "updated_at": utcnow(), "confirm_requested_at": None}
+        if unverify:
+            changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED, "agent_claim": True}
+        record = old.model_copy(update=changes)
         self.vectors.upsert(self.col, [VectorPoint(id, self.embedder.embed([text])[0], record.to_payload())])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)
         return record
@@ -251,12 +287,65 @@ class Memory:
         if old.provenance == Provenance.USER_CONFIRMED and old.status == Status.VERIFIED:
             return old
         confirmed = old.model_copy(
-            update={"provenance": Provenance.USER_CONFIRMED, "status": Status.VERIFIED, "updated_at": utcnow()}
+            update={"provenance": Provenance.USER_CONFIRMED, "status": Status.VERIFIED, "updated_at": utcnow(),
+                    "confirm_requested_at": None}
         )
         payload = confirmed.to_payload()
-        self.vectors.update_payload(self.col, id, {k: payload[k] for k in ("provenance", "status", "updated_at")})
+        self.vectors.update_payload(
+            self.col, id, {k: payload[k] for k in ("provenance", "status", "updated_at", "confirm_requested_at")}
+        )
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.CONFIRM, str(old.status), str(Status.VERIFIED), actor)
         return confirmed
+
+    def request_confirmation(self, id: str, *, actor: str, cwd: Path | None = None) -> MemoryRecord:
+        """Record that an agent working in cwd says the user confirmed this memory. It does NOT verify
+        it: the memory stays unverified until apply_confirmations finds the user's own words, in a job
+        of the same project, confirming it."""
+        old = self._require(id)
+        if old.status == Status.VERIFIED:
+            return old
+        project_id = self.db.find_project(str(project_root(cwd))) if cwd is not None else None
+        record = old.model_copy(update={"confirm_requested_at": utcnow(), "confirm_request_project_id": project_id})
+        self.vectors.update_payload(self.col, id, {"confirm_requested_at": record.confirm_requested_at,
+                                                   "confirm_request_project_id": project_id})
+        self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.CONFIRM_REQUEST, None, None, actor)
+        return record
+
+    def apply_confirmations(
+        self, confirmations: list[Confirmation], *, user_texts: list[str], job_key: str
+    ) -> list[str]:
+        """Verify the memories a job's extraction says the user confirmed, where that holds up.
+
+        Each needs the same pending request and text the LLM was shown (requested_at, hash), and a
+        quote that is the user's own words in this job and about this fact (quote_in_user_turns);
+        otherwise the memory stays unverified.
+        Replaying the job only fills in a missing CONFIRM history row.
+        """
+        done: list[str] = []
+        for c in confirmations:
+            rec = self.get(c.memory_id)
+            if rec is None:
+                continue
+            replay = (rec.status == Status.VERIFIED and rec.corroborated_by == job_key
+                      and rec.provenance == Provenance.USER_CONFIRMED)
+            if not replay:
+                if (rec.status != Status.UNVERIFIED or rec.confirm_requested_at != c.requested_at
+                        or rec.hash != c.hash):
+                    continue
+                if not quote_in_user_turns(c.quote, user_texts, rec.text):
+                    log.info("not confirming %s (%s): the quote is not in the user's messages", rec.id, job_key)
+                    continue
+                rec = rec.model_copy(update={
+                    "provenance": Provenance.USER_CONFIRMED, "status": Status.VERIFIED, "corroborated_by": job_key,
+                    "confirm_requested_at": None, "updated_at": utcnow(),
+                })
+                payload = rec.to_payload()
+                self.vectors.update_payload(self.col, rec.id, {k: payload[k] for k in (
+                    "provenance", "status", "corroborated_by", "confirm_requested_at", "updated_at")})
+            self.db.add_history(TargetKind.MEMORY, rec.id, HistoryEvent.CONFIRM, str(Status.UNVERIFIED),
+                                str(Status.VERIFIED), "extractor", job_key)
+            done.append(rec.id)
+        return done
 
     def corroborate(self, id: str, *, provenance: Provenance, job_id: str, actor: str) -> MemoryRecord:
         """Mark an unverified memory verified because a trusted origin restated it.
@@ -291,6 +380,7 @@ class Memory:
         source: str,
         restate_min_similarity: float,
         has_user_turn: bool,
+        user_texts: list[str] | None = None,
     ) -> ApplyResult:
         """Write a job's extracted candidates, in order, so later ones see earlier writes.
 
@@ -300,7 +390,10 @@ class Memory:
         value or a contradiction has no such memory, so it is added rather than corroborating.
 
         Without a user turn in the job, nothing can be user-asserted: "user" origins are
-        downgraded to "assistant" (unverified).
+        downgraded to "assistant" (unverified). Given the job's user_texts (the daemon always passes
+        them), a "user" fact must also be named by a sentence the user actually wrote
+        (trust.user_states); otherwise it is downgraded too, so the LLM's say-so that the user said
+        it (perhaps misled by an assistant reply) never makes a fact verified on its own.
 
         Replaying the same job_key is idempotent: memory ids are deterministic, its own ADDs are
         re-taken (repairing a missing ADD row) and its own corroborations only complete history.
@@ -308,6 +401,10 @@ class Memory:
         result = ApplyResult()
         if not has_user_turn:
             candidates = [c.model_copy(update={"origin": "assistant"}) if c.origin == "user" else c
+                          for c in candidates]
+        elif user_texts is not None:
+            candidates = [c.model_copy(update={"origin": "assistant"})
+                          if c.origin == "user" and not user_states(c.text, user_texts) else c
                           for c in candidates]
         kept, collapsed = _collapse_duplicates(candidates)
         result.skipped += collapsed
@@ -325,6 +422,11 @@ class Memory:
             else:
                 record, similarity = self._comparison_target(c, pid, own, restate_min_similarity)
                 action = decide(trust, record, similarity, restate_min_similarity, job_key)
+                if action == Action.CORROBORATE and record is not None and (
+                        record.agent_claim or record.confirm_requested_at):
+                    # an agent wrote it (or asked to confirm it): the extractor's word that the user
+                    # said it is not enough; only the user's quoted words or `rem confirm` verify it
+                    action = Action.SKIP
             if action == Action.ADD:
                 added = self.add(
                     c.text, scope=c.scope, project_id=pid, provenance=trust.provenance, status=trust.status,

@@ -62,15 +62,36 @@ def _quarantine(path: Path) -> None:
     os.replace(path, bad / path.name)
 
 
-def drain_spool(data_dir: Path, ingest: Callable[[dict], None]) -> int:
+def prune_bad(data_dir: Path, keep: int = 100) -> int:
+    """Delete the oldest spool/bad files beyond `keep` (names are time-ordered); returns how many."""
+    bad = data_dir / "spool" / "bad"
+    try:
+        files = sorted(bad.glob("*.json"))
+    except OSError:
+        return 0
+    removed = 0
+    for path in files[: max(0, len(files) - keep)]:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def drain_spool(data_dir: Path, ingest: Callable[[dict], None],
+                failures: dict[str, int] | None = None, max_failures: int = 3) -> int:
     """Ingest every spooled body in name order; returns how many were ingested.
 
     Unparseable files and bodies `ingest` rejects with ValueError move to spool/bad/.
-    Any other error stops the drain, leaving the rest for the next start.
+    Any other error stops the drain, leaving the rest for the next round, and counts against
+    that file in `failures`; at `max_failures` the file is quarantined and the drain continues.
     """
     d = data_dir / "spool"
     if not d.is_dir():
         return 0
+    if failures is None:
+        failures = {}
     done = 0
     for path in sorted(d.glob("*.json")):
         try:
@@ -80,11 +101,20 @@ def drain_spool(data_dir: Path, ingest: Callable[[dict], None]) -> int:
             ingest(body)
         except ValueError as e:  # includes json.JSONDecodeError, UnicodeDecodeError, pydantic ValidationError
             log.warning("bad spool file %s: %s", path.name, type(e).__name__)
+            failures.pop(path.name, None)
             _quarantine(path)
             continue
         except Exception as e:
+            failures[path.name] = failures.get(path.name, 0) + 1
+            if failures[path.name] >= max_failures:
+                log.warning("bad spool file %s: %s (failed %d times)", path.name, type(e).__name__, failures[path.name])
+                failures.pop(path.name, None)
+                _quarantine(path)
+                continue
             log.error("spool drain stopped at %s: %s", path.name, type(e).__name__)
             break
+        failures.pop(path.name, None)
         path.unlink(missing_ok=True)
         done += 1
+    prune_bad(data_dir)
     return done

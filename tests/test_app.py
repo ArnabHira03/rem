@@ -101,3 +101,90 @@ def test_store_calls_run_on_one_thread(cfg):
     asyncio.run(go())
     svc.close()
     assert len(names) == 1 and next(iter(names)).startswith("rem-store")
+
+
+async def test_store_thread_never_runs_git(cfg, tmp_path, monkeypatch):
+    import subprocess as sp
+
+    import rem.projects as projects
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", str(repo)], check=True)
+    sp.run(["git", "-C", str(repo), "remote", "add", "origin", "https://example.com/r.git"], check=True)
+    real_run, names = sp.run, []
+
+    def recorder(*a, **k):
+        names.append(threading.current_thread().name)
+        return real_run(*a, **k)
+
+    monkeypatch.setattr(projects.subprocess, "run", recorder)
+    svc = RemService(cfg)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(svc)), base_url="http://rem") as c:
+            r = await c.post("/memories", json={"text": "Uses ruff here", "scope": "project", "cwd": str(repo)})
+            assert r.status_code == 201
+            assert (await c.post("/search", json={"query": "ruff", "cwd": str(repo)})).status_code == 200
+            assert (await c.post("/context", json={"cwd": str(repo)})).status_code == 200
+            body = {"source": "claude-code", "session_id": "s1", "cwd": str(repo),
+                    "turns": [{"role": "user", "content": "hi", "message_id": "m1"}]}
+            assert (await c.post("/ingest", json=body)).status_code == 202
+    finally:
+        svc.close()
+    assert names and not any(n.startswith("rem-store") for n in names)
+
+
+async def test_patch_passes_unverify(api):
+    mid = (await api.post("/memories", json={"text": "Prefers uv over pip"})).json()["id"]
+    r = (await api.patch(f"/memories/{mid}", json={"text": "Prefers uv"})).json()
+    assert r["status"] == "verified" and r["provenance"] == "user_confirmed"
+    r = (await api.patch(f"/memories/{mid}", json={"text": "Prefers pip", "unverify": True, "actor": "mcp"})).json()
+    assert r["status"] == "unverified" and r["provenance"] == "assistant_generated"
+    assert (await api.patch(f"/memories/{mid}", json={"text": "x", "unverify": "maybe"})).status_code == 400
+
+
+def test_client_update_sends_unverify():
+    from rem.client import RemClient
+
+    sent = []
+
+    def handler(request):
+        import json as _json
+
+        sent.append(_json.loads(request.content))
+        return httpx.Response(200, json={"id": "m"})
+
+    c = RemClient.__new__(RemClient)
+    c.socket_path = "x"
+    c._http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://rem")
+    c.update("m", "t")
+    c.update("m", "t", actor="mcp", unverify=True)
+    assert sent == [{"text": "t", "actor": "cli", "unverify": False}, {"text": "t", "actor": "mcp", "unverify": True}]
+
+
+async def test_request_confirmation_route_keeps_memory_unverified(api):
+    mid = (await api.post("/memories", json={"text": "Uses tabs", "provenance": "assistant_generated",
+                                             "status": "unverified", "actor": "mcp"})).json()["id"]
+    r = await api.post(f"/memories/{mid}/request-confirmation", json={"actor": "mcp"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "unverified" and r.json()["confirm_requested_at"]
+    missing = await api.post("/memories/00000000-0000-0000-0000-000000000000/request-confirmation", json={})
+    assert missing.status_code == 404
+
+
+async def test_list_by_cwd_keeps_only_that_projects_memories(api, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        (d / ".git").mkdir(parents=True)
+        await api.post("/memories", json={"text": f"Convention of {d.name}", "scope": "project", "cwd": str(d)})
+    await api.post("/memories", json={"text": "Prefers uv"})
+
+    def texts(r):
+        return sorted(m["text"] for m in r.json())
+
+    assert texts(await api.get("/memories", params={"cwd": str(a)})) == ["Convention of a", "Prefers uv"]
+    assert texts(await api.get("/memories", params={"cwd": str(b), "scope": "project"})) == ["Convention of b"]
+    assert texts(await api.get("/memories", params={"cwd": str(tmp_path), "scope": "project"})) == []
+    assert len((await api.get("/memories")).json()) == 3
+    r = await api.get("/memories", params={"cwd": str(a), "project_id": "1"})
+    assert r.status_code == 400

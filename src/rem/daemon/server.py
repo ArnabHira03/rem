@@ -22,6 +22,7 @@ from rem.daemon.extraction import ExtractionHandler
 from rem.daemon.worker import JobHandler, Worker
 from rem.errors import RemError
 from rem.llm.factory import create_llm
+from rem.projects import resolve_project
 from rem.spool import drain_spool, spool_count
 
 EXIT_OK, EXIT_ALREADY_RUNNING, EXIT_CONFIG = 0, 2, 3
@@ -58,6 +59,7 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         # We hold the lock, so any socket file here was left by a crashed daemon.
         sock.unlink(missing_ok=True)
         sock.parent.mkdir(parents=True, exist_ok=True)
+        llm = None
         try:
             if handler is None:
                 llm = create_llm(cfg.llm)  # raises before any network call if remote is not allowed
@@ -75,6 +77,8 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
             asyncio.run(_serve(service, cfg, handler))
         finally:
             service.close()
+            if llm is not None:
+                llm.close()
             sock.unlink(missing_ok=True)
         log.info("stopped")
         return EXIT_OK
@@ -82,15 +86,20 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         lock.release()
 
 
+_spool_failures: dict[str, int] = {}  # per-file ingest failure counts, kept for the daemon process's lifetime
+
+
 def _drain(service: RemService, cfg: RemConfig) -> None:
     """Ingest turns that hooks spooled while the daemon was down (blocking; runs the ingest on the store thread)."""
 
     def ingest(body: dict) -> None:
         b = IngestBody.model_validate(body)  # same validation as POST /ingest; ValueError -> spool/bad/
-        service.store.call(service.ingest_store.ingest, b.source, b.session_id, b.cwd_path(),
-                           b.turns_for_ingest(), b.enqueue)
+        cwd = b.cwd_path()
+        project = resolve_project(cwd) if cwd is not None else None  # git runs here, not on the store thread
+        service.store.call(service.ingest_store.ingest, b.source, b.session_id, cwd,
+                           b.turns_for_ingest(), b.enqueue, project)
 
-    drained = drain_spool(cfg.data_dir, ingest)
+    drained = drain_spool(cfg.data_dir, ingest, _spool_failures)
     if drained:
         log.info("drained %d spooled ingest(s)", drained)
 

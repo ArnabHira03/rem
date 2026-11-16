@@ -27,6 +27,13 @@ def _claude_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_claude(monkeypatch):
+    """No test may reach the real `claude` CLI (it would edit ~/.claude.json): `_install` looks it up
+    through ic.shutil.which at call time, so make it absent here. MCP tests inject their own fakes."""
+    monkeypatch.setattr(ic.shutil, "which", lambda name: None)
+
+
 @pytest.fixture
 def path(tmp_path):
     return tmp_path / "claude" / "settings.json"
@@ -169,7 +176,8 @@ def test_permissions_preserved(path):
 def test_dry_run_writes_nothing(path, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main(["install", "claude-code", "--dry-run"]) == 0
-    assert set(json.loads(capsys.readouterr().out)["hooks"]) == EVENTS
+    out = capsys.readouterr().out
+    assert set(json.JSONDecoder().raw_decode(out)[0]["hooks"]) == EVENTS
     assert not path.exists()
     path.parent.mkdir(parents=True)
     path.write_text('{"model": "x"}')
@@ -266,20 +274,24 @@ def test_uninstall_without_backup_says_nothing_about_it(path):
 TIP = "tip: run 'rem install-service --enable' so the daemon is up before your first Claude Code session"
 
 
+NO_CLAUDE_ADD = ("claude CLI not found; to add rem's MCP server run: "
+                 + " ".join(["claude", "mcp", "add", "--scope", "user", "rem", "--", *ic.mcp_command()]))
+
+
 def test_cli_install_tips_systemd_unit_only_when_missing(path, tmp_path, monkeypatch, capsys):
     from rem.systemd import unit_path
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.chdir(tmp_path)
     assert main(["install", "claude-code"]) == 0
-    assert capsys.readouterr().out.splitlines() == [f"installed rem hooks in {path}", TIP]
+    assert capsys.readouterr().out.splitlines() == [f"installed rem hooks in {path}", NO_CLAUDE_ADD, TIP]
     for extra in (["--dry-run"], ["--uninstall"], ["--uninstall", "--dry-run"]):
         assert main(["install", "claude-code", *extra]) == 0
         assert TIP not in capsys.readouterr().out
     unit_path().parent.mkdir(parents=True)
     unit_path().write_text("[Unit]\n")
     assert main(["install", "claude-code"]) == 0
-    assert capsys.readouterr().out.splitlines() == [f"installed rem hooks in {path}"]
+    assert capsys.readouterr().out.splitlines() == [f"installed rem hooks in {path}", NO_CLAUDE_ADD]
 
 
 @pytest.mark.parametrize("extra", [[], ["--uninstall"]])
@@ -290,3 +302,134 @@ def test_cli_install_ignores_broken_rem_config(path, tmp_path, monkeypatch, caps
     monkeypatch.chdir(tmp_path)
     assert main(["install", "claude-code", *extra]) == 0
     assert capsys.readouterr().err == ""
+
+
+def test_symlink_loop_is_a_clean_error(tmp_path, capsys):
+    loop = tmp_path / "claude"
+    loop.mkdir()
+    (loop / "settings.json").symlink_to(loop / "settings.json")
+    assert main(["install", "claude-code"]) == 1
+    assert capsys.readouterr().err.startswith("rem: ")
+
+
+# --- MCP registration (fake run / which: the real claude CLI is never called) -------------------
+CLAUDE = "/fake/bin/claude"
+
+
+class FakeRun:
+    def __init__(self, returncodes=(0, 0), stderr=""):
+        self.calls, self.rcs, self.stderr = [], list(returncodes), stderr
+
+    def __call__(self, argv, **kw):
+        self.calls.append((argv, kw))
+        rc = self.rcs.pop(0) if self.rcs else 0
+        return subprocess.CompletedProcess(argv, rc, "", self.stderr if rc else "")
+
+
+def fake_which(name):
+    return CLAUDE if name == "claude" else None
+
+
+def test_mcp_command():
+    assert ic.MCP_NAME == "rem"
+    assert ic.mcp_command() == [sys.executable, "-m", "rem", "mcp"]
+
+
+def test_register_runs_remove_then_add_user_scope(tmp_path):
+    run = FakeRun()
+    msg = ic.register_mcp("user", tmp_path, run=run, which=fake_which)
+    assert msg == "registered rem MCP server (user scope)"
+    assert [c[0] for c in run.calls] == [
+        [CLAUDE, "mcp", "remove", "--scope", "user", "rem"],
+        [CLAUDE, "mcp", "add", "--scope", "user", "rem", "--", sys.executable, "-m", "rem", "mcp"],
+    ]
+    assert all(c[1]["cwd"] == tmp_path and c[1]["timeout"] == 30 for c in run.calls)
+
+
+def test_remove_failure_is_ignored(tmp_path):
+    run = FakeRun(returncodes=(1, 0))
+    assert ic.register_mcp("user", tmp_path, run=run, which=fake_which).startswith("registered")
+    assert len(run.calls) == 2
+
+
+def test_project_uses_local_scope_and_git_root_cwd(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.chdir(repo / "sub")
+    run = FakeRun()
+    monkeypatch.setattr(ic.subprocess, "run", run)
+    monkeypatch.setattr(ic.shutil, "which", fake_which)
+    assert main(["install", "claude-code", "--project"]) == 0
+    assert "registered rem MCP server (local scope)" in capsys.readouterr().out
+    assert [c[0][3:5] for c in run.calls] == [["--scope", "local"]] * 2
+    assert all(c[1]["cwd"] == repo.resolve() for c in run.calls)
+
+
+def test_default_cli_install_uses_user_scope_and_uninstall_removes(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    run = FakeRun()
+    monkeypatch.setattr(ic.subprocess, "run", run)
+    monkeypatch.setattr(ic.shutil, "which", fake_which)
+    assert main(["install", "claude-code"]) == 0
+    assert [c[0][2] for c in run.calls] == ["remove", "add"]
+    run.calls.clear()
+    assert main(["install", "claude-code", "--uninstall"]) == 0
+    assert [c[0] for c in run.calls] == [[CLAUDE, "mcp", "remove", "--scope", "user", "rem"]]
+    assert "removed rem's MCP server (user scope)" in capsys.readouterr().out
+
+
+def test_no_claude_cli_prints_manual_command(tmp_path):
+    run = FakeRun()
+    msg = ic.register_mcp("user", tmp_path, run=run, which=lambda n: None)
+    assert msg == NO_CLAUDE_ADD
+    assert run.calls == []
+    assert ic.unregister_mcp("user", tmp_path, run=run, which=lambda n: None) == (
+        "claude CLI not found; to remove rem's MCP server run: claude mcp remove --scope user rem")
+
+
+def test_dry_run_runs_nothing(tmp_path):
+    run = FakeRun()
+    msg = ic.register_mcp("local", tmp_path, dry_run=True, run=run, which=fake_which)
+    assert run.calls == []
+    assert f"{CLAUDE} mcp remove --scope local rem" in msg
+    assert f"{CLAUDE} mcp add --scope local rem -- {sys.executable} -m rem mcp" in msg
+    assert ic.unregister_mcp("user", tmp_path, dry_run=True, run=run, which=fake_which)
+    assert run.calls == []
+
+
+def test_uninstall_removes(tmp_path):
+    run = FakeRun()
+    assert ic.unregister_mcp("user", tmp_path, run=run, which=fake_which) == (
+        "removed rem's MCP server (user scope)")
+    assert [c[0] for c in run.calls] == [[CLAUDE, "mcp", "remove", "--scope", "user", "rem"]]
+
+
+def test_uninstall_not_found_is_not_a_failure(tmp_path):
+    for msg in ("No MCP server found with name: rem", "Error: server Not Found", "no mcp server named rem"):
+        run = FakeRun(returncodes=(1,), stderr=msg)
+        assert ic.unregister_mcp("local", tmp_path, run=run, which=fake_which) == (
+            "no rem MCP server registered (local scope)")
+    run = FakeRun(returncodes=(1,), stderr="permission denied")
+    assert ic.unregister_mcp("user", tmp_path, run=run, which=fake_which) == (
+        "could not remove rem's MCP server: permission denied")
+
+
+def test_add_failure_reported_not_raised(tmp_path, monkeypatch, capsys):
+    run = FakeRun(returncodes=(0, 1), stderr="boom\nsecond line")
+    assert ic.register_mcp("user", tmp_path, run=run, which=fake_which) == "could not add rem's MCP server: boom"
+
+    def raising(argv, **kw):
+        raise OSError("nope")
+
+    assert ic.register_mcp("user", tmp_path, run=raising, which=fake_which).startswith("could not add rem's MCP server:")
+
+    def slow(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 30)
+
+    assert ic.register_mcp("user", tmp_path, run=slow, which=fake_which).startswith("could not add rem's MCP server:")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ic.subprocess, "run", FakeRun(returncodes=(0, 1), stderr="boom"))
+    monkeypatch.setattr(ic.shutil, "which", fake_which)
+    assert main(["install", "claude-code"]) == 0  # an MCP failure never changes the exit code
+    assert "could not add rem's MCP server: boom" in capsys.readouterr().out

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from rem.config import DaemonConfig
 from rem.models import utcnow
-from rem.projects import resolve_project
+from rem.projects import ProjectInfo, resolve_project
 from rem.redact import redact
 from rem.storage.sqlite import RemDB
 
@@ -61,9 +61,10 @@ class IngestStore:
     # ---- ingest -------------------------------------------------------------
 
     def ingest(self, source: str, session_id: str, cwd: Path | None, turns: list[Turn],
-               enqueue: bool = True) -> IngestResult:
+               enqueue: bool = True, project: ProjectInfo | None = None) -> IngestResult:
         project_id = None
-        if cwd is not None:
+        info = project
+        if cwd is not None and info is None:
             info = resolve_project(cwd)
         now, stamp = self.clock(), utcnow()
         self.conn.execute("BEGIN IMMEDIATE")
@@ -111,20 +112,38 @@ class IngestStore:
                     if row:
                         job_id = row[0]
                         self.conn.execute(
-                            "UPDATE jobs SET not_before = ?, updated_at = ? WHERE id = ?",
-                            (not_before, stamp, job_id),
+                            "UPDATE jobs SET not_before = ?, updated_at = ?, enqueued_at = ? WHERE id = ?",
+                            (not_before, stamp, stamp, job_id),
                         )
                     else:
                         job_id = self.conn.execute(
-                            "INSERT INTO jobs (session_pk, status, not_before, created_at, updated_at) "
-                            "VALUES (?, 'pending', ?, ?, ?)",
-                            (session_pk, not_before, stamp, stamp),
+                            "INSERT INTO jobs (session_pk, status, not_before, created_at, updated_at, enqueued_at) "
+                            "VALUES (?, 'pending', ?, ?, ?, ?)",
+                            (session_pk, not_before, stamp, stamp, stamp),
                         ).lastrowid
             self.conn.execute("COMMIT")
         except BaseException:
             self.conn.execute("ROLLBACK")
             raise
         return IngestResult(session_pk, accepted, len(turns) - accepted, job_id)
+
+    def job_window(self, job_id: int) -> tuple[str, str]:
+        """(since, until): from the session's previous job's last enqueue (or its first turn) to this job's.
+
+        This is the exchange the job covers: the user's message, then the assistant's turn that ends
+        with the Stop ingest enqueueing the job. Fixed once the job is claimed (enqueued_at only moves
+        when turns are added), so a retry, even days later, checks the same window. ISO timestamps,
+        comparable with utcnow().
+        """
+        row = self.conn.execute(
+            "SELECT j.session_pk, COALESCE(j.enqueued_at, j.created_at), s.first_seen "
+            "FROM jobs j JOIN sessions s ON s.id = j.session_pk WHERE j.id = ?", (job_id,),
+        ).fetchone()
+        prev = self.conn.execute(
+            "SELECT MAX(COALESCE(enqueued_at, created_at)) FROM jobs WHERE session_pk = ? AND id < ?", (row[0], job_id)
+        ).fetchone()[0]
+        # first_seen is the session's first ingest, the user's opening prompt: nothing before it counts
+        return (prev or row[2], row[1])
 
     def session_project(self, session_pk: int) -> int | None:
         row = self.conn.execute("SELECT project_id FROM sessions WHERE id = ?", (session_pk,)).fetchone()

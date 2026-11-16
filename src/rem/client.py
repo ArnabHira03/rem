@@ -61,21 +61,27 @@ class RemClient:
     def context(self, cwd, max_chars=1600) -> str:
         return self._call("POST", "/context", json={"cwd": str(cwd) if cwd else None, "max_chars": max_chars})["text"]
 
-    def list(self, scope=None, status=None) -> list[dict]:
-        params = {k: v for k, v in {"scope": scope, "status": status}.items() if v}
+    def list(self, scope=None, status=None, cwd=None) -> list[dict]:
+        """All memories, or with cwd only that directory's project's project memories (plus global/system)."""
+        params = {k: v for k, v in {"scope": scope, "status": status, "cwd": str(cwd) if cwd else None}.items() if v}
         return self._call("GET", "/memories", params=params)
 
     def get(self, id) -> dict:
         return self._call("GET", f"/memories/{id}", ref=id)
 
-    def update(self, id, text, actor="cli") -> dict:
-        return self._call("PATCH", f"/memories/{id}", ref=id, json={"text": text, "actor": actor})
+    def update(self, id, text, actor="cli", unverify=False) -> dict:
+        return self._call("PATCH", f"/memories/{id}", ref=id,
+                          json={"text": text, "actor": actor, "unverify": unverify})
 
     def delete(self, id, actor="cli") -> None:
         return self._call("DELETE", f"/memories/{id}", ref=id, params={"actor": actor})
 
     def confirm(self, id, actor="cli") -> dict:
         return self._call("POST", f"/memories/{id}/confirm", ref=id, json={"actor": actor})
+
+    def request_confirmation(self, id, actor="mcp", cwd=None) -> dict:
+        return self._call("POST", f"/memories/{id}/request-confirmation", ref=id,
+                          json={"actor": actor, "cwd": str(cwd) if cwd else None})
 
     def history(self, id) -> list[dict]:
         return self._call("GET", f"/memories/{id}/history", ref=id)
@@ -118,7 +124,7 @@ def start_daemon_background(cfg: RemConfig) -> bool:
     """
     stamp = cfg.data_dir / "daemon-start.stamp"
     try:
-        if time.time() - stamp.stat().st_mtime < START_BACKOFF_SECONDS:
+        if 0 <= time.time() - stamp.stat().st_mtime < START_BACKOFF_SECONDS:  # a future stamp (clock stepped back) doesn't block
             return False
     except FileNotFoundError:
         pass
