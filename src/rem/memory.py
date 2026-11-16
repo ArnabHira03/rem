@@ -530,7 +530,9 @@ class Memory:
                 result.skipped += 1
                 if own is not None:  # the same fact is already stored: it still gets the mentions
                     linked = own.id
-                elif action == Action.CORROBORATE and record is not None:  # corroborated earlier in this job
+                elif record is not None:
+                    # the memory it restates (same scope and project, checked by _comparison_target), whether
+                    # skipped, an agent's claim, or corroborated earlier in this job: it gets the mentions
                     linked = record.id
             if linked is not None and c.entities:
                 result.entities += self._link_mentions(linked, c.entities, c.scope, pid, job_key, "extractor")

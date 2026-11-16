@@ -363,3 +363,32 @@ def test_update_converges_after_a_crash_following_the_unlink(mem, monkeypatch):
     assert len([h for h in mem.db.get_history(ent.id) if h.event == HistoryEvent.DELETE]) == 1
     mem.delete(rec.id, actor="cli")  # a delete after the crash converges too
     assert mem.get(rec.id) is None and mem.list_entities() == []
+
+
+# ---- a candidate that restates an existing memory links its entities to it ----
+
+def apply_restating(mem, cands, job_key="job:2"):
+    return mem.apply_candidates(
+        cands, job_key=job_key, project_id=None, session_id=None, source="cli",
+        restate_min_similarity=0.0, has_user_turn=True, user_texts=[c.text for c in cands],
+    )
+
+
+def test_restating_a_verified_memory_links_the_entities_to_it(mem):
+    target = add(mem, "Prefers uv over pip")  # verified: a restatement is skipped
+    c = cand("Likes uv better than pip", "uv", "pip").model_copy(update={"restates": target.id})
+    res = apply_restating(mem, [c])
+    assert res.added == [] and res.corroborated == [] and res.skipped == 1
+    ents = mem.list_entities()
+    assert {e.name for e in ents} == {"uv", "pip"} and all(e.memory_ids == [target.id] for e in ents)
+    assert mem.get(target.id).entity_ids == sorted(e.id for e in ents)
+
+
+def test_restating_an_agent_claim_links_the_entities_without_verifying_it(mem):
+    target = mem.add("Prefers uv over pip", scope=Scope.GLOBAL, provenance="assistant_generated",
+                     status="unverified", source="mcp", actor="mcp", agent_claim=True)
+    c = cand("Likes uv better than pip", "uv").model_copy(update={"restates": target.id})
+    res = apply_restating(mem, [c])
+    assert res.corroborated == [] and mem.get(target.id).status == "unverified"
+    (ent,) = mem.list_entities()
+    assert ent.memory_ids == [target.id] and mem.get(target.id).entity_ids == [ent.id]
