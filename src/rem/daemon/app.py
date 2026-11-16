@@ -12,7 +12,9 @@ from starlette.routing import Route
 from rem.daemon.schemas import IngestBody, ReembedBody
 from rem.daemon.service import RemService
 from rem.errors import MemoryNotFound, RemError
-from rem.models import EntityRecord, HistoryRow, MemoryRecord, Provenance, Scope, SearchResult, Status
+from rem.models import (
+    EntityRecord, HistoryRow, MemoryRecord, Provenance, RelationResult, Scope, SearchResult, Status,
+)
 
 
 class AddBody(BaseModel):
@@ -64,7 +66,7 @@ def _json(value, status: int = 200) -> JSONResponse:
             return {**v.record.to_payload(), "score": v.score, "semantic": v.semantic}
         if isinstance(v, (MemoryRecord, EntityRecord)):
             return v.to_payload()
-        if isinstance(v, HistoryRow):
+        if isinstance(v, (HistoryRow, RelationResult)):
             return v.model_dump(mode="json")
         return v
 
@@ -108,6 +110,17 @@ def build_app(service: RemService) -> Starlette:
 
     async def list_entities(request: Request):
         return _json(await service.list_entities())
+
+    async def relations(request: Request):
+        q = request.query_params
+        try:
+            limit = int(q.get("limit", 10))
+        except ValueError:
+            raise ValueError("limit must be an integer") from None
+        return _json(await service.relations(
+            query=q.get("query"), entity=q.get("entity") or None,
+            scope=Scope(q["scope"]) if q.get("scope") else None, limit=limit, cwd=_path(q.get("cwd")),
+        ))
 
     async def get(request: Request):
         mid = request.path_params["id"]
@@ -182,6 +195,7 @@ def build_app(service: RemService) -> Starlette:
             Route("/memories", add, methods=["POST"]),
             Route("/memories", list_memories, methods=["GET"]),
             Route("/entities", list_entities, methods=["GET"]),
+            Route("/relations", relations, methods=["GET"]),
             Route("/memories/{id}", get, methods=["GET"]),
             Route("/memories/{id}", update, methods=["PATCH"]),
             Route("/memories/{id}", delete, methods=["DELETE"]),

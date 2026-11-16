@@ -10,7 +10,7 @@ from pathlib import Path
 
 from rem.config import load_config
 from rem.errors import RemError
-from rem.format import history_line, memory_line, search_line
+from rem.format import history_line, memory_line, relation_line, search_line
 from rem.models import Scope, Status
 
 SCOPES = [s.value for s in Scope]
@@ -42,6 +42,12 @@ def _parser() -> argparse.ArgumentParser:
     ls.add_argument("--status", choices=STATUSES)
 
     cmd("entities", "list entities")
+
+    r = cmd("relations", "list relations between entities, or search them with --query")
+    r.add_argument("--query")
+    r.add_argument("--entity", help="only relations of this entity")
+    r.add_argument("--scope", choices=SCOPES)
+    r.add_argument("--limit", type=int, default=10, help="with --query only")
 
     for name, help_ in [("get", "show one memory"), ("delete", "delete a memory"),
                         ("confirm", "mark a memory as confirmed by you"), ("history", "show a memory's history")]:
@@ -93,6 +99,8 @@ def _emit(args, value) -> None:
     for v in value if isinstance(value, list) else [value]:
         if "memory_ids" in v:
             print(f"{v['id']}  {v['name']}  {v['type']}  {len(v['memory_ids'])} memories")
+        elif "source" in v and "target" in v:
+            print(relation_line(v))
         elif "event" in v:
             print(history_line(v))
         elif "score" in v:
@@ -115,6 +123,9 @@ def _memory_command(args, cfg):
             return c.list(args.scope, args.status)
         case "entities":
             return c.list_entities()
+        case "relations":
+            return c.relations(query=args.query, entity=args.entity, scope=args.scope, limit=args.limit,
+                               cwd=cwd if args.query else None)
         case "get":
             return c.get(args.id)
         case "update":

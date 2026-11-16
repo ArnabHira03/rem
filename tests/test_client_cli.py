@@ -174,3 +174,30 @@ def test_cli_entities_lists_lines_and_json(daemon_env, capsys, monkeypatch):
     assert capsys.readouterr().out.splitlines() == ["e1  uv  tool  2 memories", "e2  Rem  project  1 memories"]
     assert main(["--json", "entities"]) == 0
     assert json.loads(capsys.readouterr().out) == ents
+
+
+def test_cli_relations_lines_and_json(daemon_env, capsys, monkeypatch):
+    base = {"source": "uv", "type": "preferred_over", "target": "pip", "status": "verified", "scope": "global",
+            "project_name": None, "evidence": 2, "score": None}
+    rels = [{**base, "id": "r1"},
+            {**base, "id": "r2", "scope": "project", "project_name": "rem", "score": 0.834}]
+    monkeypatch.setattr(RemClient, "relations", lambda self, **kw: rels)
+    assert main(["relations"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "r1  uv —preferred_over→ pip  [verified, global, 2 evidence]",
+        "r2  uv —preferred_over→ pip  [verified, project rem, 2 evidence]  0.83",
+    ]
+    assert main(["--json", "relations"]) == 0
+    assert json.loads(capsys.readouterr().out) == rels
+    assert main(["relations", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == rels
+
+
+def test_cli_relations_passes_query_entity_scope(daemon_env, monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(RemClient, "relations", lambda self, **kw: seen.append(kw) or [])
+    monkeypatch.chdir(tmp_path)
+    assert main(["relations"]) == 0
+    assert main(["relations", "--query", "uv", "--entity", "pip", "--scope", "global", "--limit", "4"]) == 0
+    assert seen[0] == {"query": None, "entity": None, "scope": None, "limit": 10, "cwd": None}
+    assert seen[1] == {"query": "uv", "entity": "pip", "scope": "global", "limit": 4, "cwd": tmp_path}
