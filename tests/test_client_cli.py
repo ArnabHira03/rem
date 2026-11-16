@@ -147,3 +147,13 @@ def test_slow_first_start_says_still_starting(daemon_env, monkeypatch):
     from tests.conftest import wait_for_socket
 
     wait_for_socket(daemon_env.sock)
+
+
+def test_cli_reembed_and_finalize(daemon_env, capsys):
+    assert main(["reembed", "--model", "hash-32", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["count"] == 0 and out["collection"].endswith("hash-32_32")
+    assert main(["reembed", "--status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["model"] == "hash-32"
+    assert main(["reembed", "--finalize"]) == 0
+    assert "switched" in capsys.readouterr().out

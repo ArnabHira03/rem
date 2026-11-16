@@ -16,6 +16,10 @@ class EmbedderMismatchError(RemError):
     """The configured embedder differs from the one the stored memories use."""
 
 
+class ReembedError(RemError):
+    """A reembed cannot start, or cannot finish, in the state the store is in."""
+
+
 class EmbedderUnavailableError(RemError):
     """The embedding model could not be loaded."""
 

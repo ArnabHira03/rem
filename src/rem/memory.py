@@ -42,6 +42,7 @@ from rem.trust import Action, assign_trust, decide, quote_in_user_turns, user_st
 log = logging.getLogger(__name__)
 
 ACTIVE_EMBEDDER_KEY = "active_embedder"
+ACTIVE_COLLECTION_KEY = "active_collection"  # set once a reembed is finalized; default is rem_memories__<slug>
 MAX_PENDING_CONFIRMATIONS = 10  # requests one job checks, newest first
 
 
@@ -72,6 +73,7 @@ class Memory:
         embedder: Embedder | None = None,
         sparse_embedder: SparseEmbedder | None = None,
     ):
+        self.cfg = cfg
         self.db = RemDB(cfg.db_path)
         try:
             self.embedder = embedder or create_embedder(cfg.embedder)
@@ -81,10 +83,11 @@ class Memory:
             if stored and stored != slug:
                 raise EmbedderMismatchError(
                     f"stored memories use {stored}; configured embedder is {slug}. "
-                    "Run `rem reembed` to move them, or change the config back."
+                    f"Move them with `rem reembed --model {self.embedder.model_id}` while the old config is in place, "
+                    "then `rem reembed --finalize`; or change the config back."
                 )
             self.vectors = vector_store or create_vector_store(cfg)
-            self.col = f"rem_memories__{slug}"
+            self.col = self.db.get_meta(ACTIVE_COLLECTION_KEY) or f"rem_memories__{slug}"
             if self.vectors.col_exists(self.col) and not self.vectors.col_has_sparse(self.col):
                 # created before M6: keyword search would silently be off, so refuse before writing anything
                 raise EmbedderMismatchError(
@@ -474,6 +477,11 @@ class Memory:
         old = self._require(id)
         self.vectors.delete(self.col, [id])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.DELETE, old.text, None, actor)
+
+    def set_active(self, col: str, embedder: Embedder) -> None:
+        """Switch this process to a finalized reembed target (the store records the switch in the same call)."""
+        self.col = col
+        self.embedder = embedder
 
     def _point(self, id: str, text: str, record: MemoryRecord) -> VectorPoint:
         """The point for a memory: dense vector, BM25 sparse vector and the payload that is the record."""

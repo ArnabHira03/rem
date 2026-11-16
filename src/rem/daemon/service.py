@@ -11,6 +11,7 @@ from rem.embed.base import collection_slug
 from rem.llm.factory import describe_llm
 from rem.memory import Memory
 from rem.models import Provenance, Scope, Status
+from rem import reembed as reembed_mod
 from rem.projects import resolve_project
 from rem.storage.queue import IngestStore, Turn
 from rem.daemon.store_thread import StoreThread
@@ -71,6 +72,17 @@ class RemService:
                      enqueue: bool = True):
         project = await asyncio.to_thread(resolve_project, cwd) if cwd is not None else None
         return await self.store.run(self.ingest_store.ingest, source, session_id, cwd, turns, enqueue, project)
+
+    # reembed (store thread: one call, so no write lands between the copy and the switch)
+    async def reembed(self, model: str) -> dict:
+        res = await self.store.run(reembed_mod.run, self.memory, model)
+        return {"collection": res.collection, "count": res.count}
+
+    async def reembed_finalize(self) -> dict:
+        return {"collection": await self.store.run(reembed_mod.finalize, self.memory)}
+
+    async def reembed_status(self) -> dict | None:
+        return await self.store.run(reembed_mod.status, self.memory)
 
     async def retry_failed(self) -> int:
         return await self.store.run(self.ingest_store.retry_failed)

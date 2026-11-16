@@ -27,3 +27,7 @@ class IngestBody(BaseModel):
 
     def cwd_path(self) -> Path | None:
         return Path(self.cwd) if self.cwd else None
+
+
+class ReembedBody(BaseModel):
+    model: str = Field(min_length=1)
