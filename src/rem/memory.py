@@ -685,16 +685,19 @@ class Memory:
             self._apply_trust(existing, actor, job_key)
         return added
 
-    def _evidence(self, rec: RelationRecord) -> list[MemoryRecord]:
-        """The evidence memories of a relation that still exist."""
-        found = self.vectors.get(self.col, rec.memory_ids) if rec.memory_ids else []
+    def _evidence(self, rec: RelationRecord, exclude: str | None = None) -> list[MemoryRecord]:
+        """The evidence memories of a relation that still exist (never `exclude`, a memory about to go)."""
+        ids = [m for m in rec.memory_ids if m != exclude]
+        found = self.vectors.get(self.col, ids) if ids else []
         return [MemoryRecord.from_payload(p.payload) for p in found]
 
-    def _apply_trust(self, rec: RelationRecord, actor: str, job_id: str | None) -> RelationRecord | None:
+    def _apply_trust(
+        self, rec: RelationRecord, actor: str, job_id: str | None, exclude: str | None = None
+    ) -> RelationRecord | None:
         """Recompute a relation's status and provenance from its evidence. With no evidence left the
         point is deleted (DELETE row) and None returned. A status change writes the payload first, then
         its CORROBORATE or UPDATE row; otherwise the payload is written only if it differs."""
-        evidence = self._evidence(rec)
+        evidence = self._evidence(rec, exclude)
         if not evidence:
             self.vectors.delete(self.relation_col, [rec.id])
             self.db.add_history(TargetKind.RELATION, rec.id, HistoryEvent.DELETE, rec.sentence, None, actor, job_id)
@@ -725,9 +728,9 @@ class Memory:
         """Remove a memory from the evidence of its relations; one left with none is deleted.
         Repeat-safe: relations that no longer list the memory are not returned by relations_for."""
         for rel in self.relations_for(memory_id, scope, project_id):
-            remaining = [m for m in rel.memory_ids if m != memory_id]
-            self.vectors.update_payload(self.relation_col, rel.id, {"memory_ids": remaining, "updated_at": utcnow()})
-            self._apply_trust(rel.model_copy(update={"memory_ids": remaining}), actor, None)
+            # memory_ids is written only inside _apply_trust, together with status and provenance, so a
+            # crash before that write leaves the id in place and a retry finds this relation again
+            self._apply_trust(rel, actor, None, exclude=memory_id)
 
     def _resolve_entity(
         self, mention: EntityMention, scope: Scope, project_id: int | None, now: str

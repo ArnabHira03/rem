@@ -338,3 +338,37 @@ def test_apply_confirmations_verifies_relation(mem):
     (r2,) = mem.list_relations()
     assert (r2.status, r2.provenance) == ("verified", "user_confirmed")
     assert rhist(mem, r.id)[-1] == (TargetKind.RELATION, HistoryEvent.CORROBORATE, "job:9")
+
+
+@pytest.mark.parametrize("how", ["delete", "update"])
+def test_unlink_crash_never_leaves_relation_over_verified(mem, monkeypatch, how):
+    rel = [("uv", "uses", "Python")]
+    apply(mem, [rcand("uv runs Python scripts", ["uv", "Python"], rel, origin="assistant")], job_key="job:1")
+    apply(mem, [rcand("uv is a Python tool", ["uv", "Python"], rel)], job_key="job:2")
+    (r,) = mem.list_relations()
+    assert r.status == "verified" and r.evidence == 2
+    verified = next(m for m in mem.list() if m.status == "verified")
+    other = next(m for m in mem.list() if m.status == "unverified")
+    real = mem.vectors.update_payload
+    state = {"boom": True}
+
+    def flaky(col, id, payload):
+        if col == mem.relation_col and "status" in payload and state["boom"]:
+            state["boom"] = False
+            raise RuntimeError("crash")
+        return real(col, id, payload)
+
+    monkeypatch.setattr(mem.vectors, "update_payload", flaky)
+
+    def act():
+        if how == "delete":
+            mem.delete(verified.id, actor="cli")
+        else:
+            mem.update(verified.id, "Something else entirely", actor="cli")
+
+    with pytest.raises(RuntimeError):
+        act()
+    assert verified.id in mem.get_relation(r.id).memory_ids  # nothing was written: a retry finds it
+    act()
+    rec = mem.get_relation(r.id)
+    assert rec.memory_ids == [other.id] and rec.status == Status.UNVERIFIED
