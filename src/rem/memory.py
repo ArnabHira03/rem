@@ -575,17 +575,16 @@ class Memory:
     ) -> tuple[EntityRecord, EntityAction]:
         """The entity `mention` names in (scope, project_id)'s bucket, created or merged into as needed.
 
-        Same normalized name or alias: that entity (a new spelling becomes an alias). Else the nearest
+        Same normalized name or alias: that entity, unchanged (a spelling that differs only in case or
+        spacing is the same name, not an alias). Else the nearest
         entity in the bucket if its name embeds at cosine >= ENTITY_MERGE_MIN (the spelling becomes an
         alias). Else a new entity with a deterministic id.
         """
         scope, project_id = bucket(scope, project_id)
         normalized = normalize_name(mention.name)
         found = self.find_entity(normalized, scope, project_id)
-        if found is not None:
-            if mention.name == found.name or mention.name in found.aliases:
-                return found, EntityAction.NONE
-            return self._add_alias(found, mention.name, now), EntityAction.MERGE
+        if found is not None:  # find_entity matched the normalized name or an alias's
+            return found, EntityAction.NONE
         vector = self.embedder.embed([normalized])[0]
         hits = self.vectors.search(self.entity_col, vector, 1, {"scope": str(scope), "project_id": project_id})
         if hits and hits[0].score >= ENTITY_MERGE_MIN:

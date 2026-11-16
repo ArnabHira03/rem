@@ -186,19 +186,33 @@ def test_replay_after_a_crash_before_entity_history_repairs_the_add_row(mem, mon
     assert entity_history(mem, ent.id) == [(TargetKind.ENTITY, HistoryEvent.ADD, "job:1")]
 
 
-def test_case_and_space_variants_merge(mem):  # Review Focus 3
+def test_case_and_space_variants_are_one_entity_without_aliases(mem):  # Review Focus 3
     apply(mem, [cand("Prefers Python", "Python")], job_key="job:1")
     res2 = apply(mem, [cand("Writes Python daily", " python ")], job_key="job:2")
     res3 = apply(mem, [cand("Knows Python well", "PYTHON"), cand("Teaches Python", "python", "Python")],
                  job_key="job:3")
     (ent,) = mem.list_entities()
-    assert ent.name == "Python" and ent.aliases == ["python", "PYTHON"]
+    assert ent.name == "Python" and ent.aliases == []  # a case-only spelling is the same name, not an alias
     assert len(ent.memory_ids) == 4 == len(mem.list())
-    assert res2.entities == 1 and res3.entities == 1  # "python" is already an alias in job 3
+    assert res2.entities == 0 and res3.entities == 0
     assert [(h.event, h.job_id, h.new_value) for h in mem.db.get_history(ent.id)] == [
-        (HistoryEvent.ADD, "job:1", "Python"), (HistoryEvent.MERGE, "job:2", "python"),
-        (HistoryEvent.MERGE, "job:3", "PYTHON"),
-    ]
+        (HistoryEvent.ADD, "job:1", "Python")]
+
+
+def test_uv_spellings_are_one_entity_with_no_aliases(mem):
+    apply(mem, [cand("Uses uv", "uv"), cand("Installs with UV", "UV"), cand("Pins Uv", "Uv")])
+    (ent,) = mem.list_entities()
+    assert ent.name == "uv" and ent.aliases == [] and len(ent.memory_ids) == 3
+    assert [h.event for h in mem.db.get_history(ent.id)] == [HistoryEvent.ADD]
+
+
+def test_case_only_variant_of_an_alias_is_not_another_alias(mem):
+    apply(mem, [cand("Uses Node.js", "Node.js")], job_key="job:1")
+    apply(mem, [cand("Deploys with node js", "node js")], job_key="job:2")  # cosine merge: a real alias
+    apply(mem, [cand("Runs NODE JS", "NODE JS")], job_key="job:3")
+    (ent,) = mem.list_entities()
+    assert ent.aliases == ["node js"] and len(ent.memory_ids) == 3
+    assert [h.event for h in mem.db.get_history(ent.id)] == [HistoryEvent.ADD, HistoryEvent.MERGE]
 
 
 def test_same_spelling_again_is_none_and_only_links(mem):
@@ -212,10 +226,11 @@ def test_same_spelling_again_is_none_and_only_links(mem):
 
 
 def test_two_merges_of_one_entity_in_one_job_do_not_raise(mem):
-    apply(mem, [cand("Prefers Python", "Python")], job_key="job:1")
-    apply(mem, [cand("Writes python", "python"), cand("Knows PYTHON", "PYTHON")], job_key="job:2")
+    # the hashing embedder is bag-of-words: these spellings embed like "Node.js" but normalize differently
+    apply(mem, [cand("Uses Node.js", "Node.js")], job_key="job:1")
+    apply(mem, [cand("Deploys node js", "node js"), cand("Runs node-js", "node-js")], job_key="job:2")
     (ent,) = mem.list_entities()
-    assert ent.aliases == ["python", "PYTHON"]
+    assert ent.aliases == ["node js", "node-js"]
     assert [h.event for h in mem.db.get_history(ent.id)] == [HistoryEvent.ADD, HistoryEvent.MERGE]
 
 

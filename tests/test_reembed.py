@@ -189,7 +189,7 @@ def test_finalize_syncs_entities_changed_after_the_copy(mem):
     b = with_entities(mem, "Uses Qdrant", "Qdrant", job_key="job:2")
     reembed.run(mem, "hash-32")
     with_entities(mem, "Uses ruff", "ruff", job_key="job:3")      # new entity
-    with_entities(mem, "Uses UV everywhere", "UV", job_key="job:4")  # alias + memory_ids change on uv
+    with_entities(mem, "Uses UV everywhere", "UV", job_key="job:4")  # memory_ids change on uv (no alias: F6)
     mem.delete(b.id, actor="cli")                                  # drops the Qdrant entity
     expected = points(mem, mem.entity_col)
     assert len(expected) == 2
@@ -197,7 +197,7 @@ def test_finalize_syncs_entities_changed_after_the_copy(mem):
     assert points(mem, mem.entity_col) == expected
     assert all(len(v) == 32 for v in vectors(mem, mem.entity_col).values())
     (uv,) = [e for e in mem.list_entities() if e.normalized == "uv"]
-    assert uv.aliases == ["UV"] and a.id in uv.memory_ids and len(uv.memory_ids) == 2
+    assert uv.aliases == [] and a.id in uv.memory_ids and len(uv.memory_ids) == 2
 
 
 def test_finalize_of_a_reembed_pending_from_before_m7_copies_entities(mem):
