@@ -263,3 +263,49 @@ def test_candidate_without_entities_writes_the_memory_only(mem):
     res = apply(mem, [cand("Uses uv")])
     (rec,) = mem.list()
     assert rec.entity_ids == [] and mem.list_entities() == [] and res.entities == 0
+
+
+def test_deleting_last_memory_deletes_its_entity(mem):  # Review Focus 4
+    apply(mem, [cand("Uses uv", "uv")])
+    (ent,) = mem.list_entities()
+    (rec,) = mem.list()
+    mem.delete(rec.id, actor="cli")
+    assert mem.list_entities() == [] and mem.get_entity(ent.id) is None
+    rows = [h for h in mem.db.get_history(ent.id) if h.event == HistoryEvent.DELETE]
+    assert len(rows) == 1
+    assert rows[0].target_kind == TargetKind.ENTITY and rows[0].old_value == "uv"
+    assert rows[0].new_value is None and rows[0].actor == "cli"
+
+
+def test_deleting_one_of_two_keeps_the_entity(mem):  # Review Focus 4
+    apply(mem, [cand("Uses uv", "uv"), cand("Installs tools with uv", "uv")])
+    (ent,) = mem.list_entities()
+    a, b = mem.list()
+    assert sorted(ent.memory_ids) == sorted([a.id, b.id])
+    mem.delete(a.id, actor="cli")
+    (kept,) = mem.list_entities()
+    assert kept.id == ent.id and kept.memory_ids == [b.id]
+    assert not [h for h in mem.db.get_history(ent.id) if h.event == HistoryEvent.DELETE]
+
+
+def test_delete_is_safe_to_repeat_after_a_crash_following_the_unlink(mem, monkeypatch):
+    apply(mem, [cand("Uses uv", "uv")])
+    (ent,) = mem.list_entities()
+    (rec,) = mem.list()
+    real = mem.vectors.delete
+    calls = []
+
+    def flaky(col, ids):
+        if col == mem.col and not calls:
+            calls.append(1)
+            raise RuntimeError("crash")
+        return real(col, ids)
+
+    monkeypatch.setattr(mem.vectors, "delete", flaky)
+    with pytest.raises(RuntimeError):
+        mem.delete(rec.id, actor="cli")
+    assert mem.get_entity(ent.id) is None and mem.get(rec.id) is not None
+    mem.delete(rec.id, actor="cli")
+    assert mem.get(rec.id) is None and mem.list_entities() == []
+    entity_deletes = [h for h in mem.db.get_history(ent.id) if h.event == HistoryEvent.DELETE]
+    assert len(entity_deletes) == 1

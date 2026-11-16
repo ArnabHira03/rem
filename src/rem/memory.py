@@ -615,8 +615,24 @@ class Memory:
 
     def delete(self, id: str, *, actor: str) -> None:
         old = self._require(id)
+        self._unlink(id, old.entity_ids, actor)
         self.vectors.delete(self.col, [id])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.DELETE, old.text, None, actor)
+
+    def _unlink(self, memory_id: str, entity_ids: list[str], actor: str) -> None:
+        """Remove a memory from its entities; an entity left with no memories is deleted (DELETE row).
+        Repeat-safe: a missing entity is skipped and an absent memory id changes nothing."""
+        now = utcnow()
+        for eid in entity_ids:
+            ent = self.get_entity(eid)
+            if ent is None or memory_id not in ent.memory_ids:
+                continue
+            remaining = [m for m in ent.memory_ids if m != memory_id]
+            if remaining:
+                self.vectors.update_payload(self.entity_col, eid, {"memory_ids": remaining, "updated_at": now})
+            else:
+                self.vectors.delete(self.entity_col, [eid])
+                self.db.add_history(TargetKind.ENTITY, eid, HistoryEvent.DELETE, ent.name, None, actor)
 
     def set_active(self, col: str, embedder: Embedder) -> None:
         """Switch this process to a finalized reembed target (the store records the switch in the same call)."""
