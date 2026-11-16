@@ -428,3 +428,19 @@ def test_collapse_merges_mentions_without_touching_the_input():
     kept, dropped = _collapse_duplicates([a, b])
     assert dropped == 1 and [m.name for m in kept[0].entities] == ["uv", "pip"]
     assert [m.name for m in a.entities] == ["uv"] and [m.name for m in b.entities] == ["pip"]
+
+
+def test_collapsed_duplicates_pool_relations():
+    from rem.memory import _collapse_duplicates
+
+    def rc(text, *rels):
+        return Candidate(text=text, scope="global", origin="user",
+                         relations=[{"source": s, "type": t, "target": g} for s, t, g in rels])
+
+    a = rc("Prefers uv over pip", ("uv", "preferred_over", "pip"))
+    b = rc("prefers uv over pip", ("UV", "preferred_over", "Pip"), ("uv", "uses", "pip"))
+    kept, dropped = _collapse_duplicates([a, b])
+    assert dropped == 1
+    assert [(r.source, r.type, r.target) for r in kept[0].relations] == [
+        ("uv", "preferred_over", "pip"), ("uv", "uses", "pip")]
+    assert len(a.relations) == 1 and len(b.relations) == 2

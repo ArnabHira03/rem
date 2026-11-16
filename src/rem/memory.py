@@ -27,6 +27,7 @@ from rem.models import (
     HistoryRow,
     MemoryRecord,
     Provenance,
+    RelationMention,
     SearchResult,
     Scope,
     Status,
@@ -690,7 +691,8 @@ def _collapse_duplicates(candidates: list[Candidate]) -> tuple[list[Candidate], 
     """Keep one candidate per (normalized text, scope): the most trusted, at the group's first position.
 
     The kept candidate carries every copy's entity mentions: its own first, then the dropped copies' in
-    order, de-duped by normalized name (the first spelling wins)."""
+    order, de-duped by normalized name (the first spelling wins). Relations pool the same way, de-duped
+    by (normalized source, type, normalized target)."""
     kept: dict[tuple[str, Scope], Candidate] = {}
     groups: dict[tuple[str, Scope], list[Candidate]] = {}
     for c in candidates:
@@ -710,5 +712,11 @@ def _collapse_duplicates(candidates: list[Candidate]) -> tuple[list[Candidate], 
             if (norm := normalize_name(m.name)) not in seen:
                 seen.add(norm)
                 mentions.append(m)
-        kept[key] = best.model_copy(update={"entities": mentions})
+        seen_rel: set[tuple[str, str, str]] = set()
+        relations: list[RelationMention] = []
+        for r in [*best.relations, *(r for c in groups[key] if c is not best for r in c.relations)]:
+            if (rk := (normalize_name(r.source), r.type, normalize_name(r.target))) not in seen_rel:
+                seen_rel.add(rk)
+                relations.append(r)
+        kept[key] = best.model_copy(update={"entities": mentions, "relations": relations})
     return list(kept.values()), len(candidates) - len(kept)

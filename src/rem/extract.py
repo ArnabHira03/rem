@@ -6,7 +6,18 @@ from pydantic import BaseModel, ValidationError
 
 from rem.errors import LLMError
 from rem.llm.base import LLM
-from rem.models import ENTITY_TYPES, Candidate, Confirmation, EntityMention, MemoryRecord, Origin, Scope  # noqa: F401  (re-exported)
+from rem.entities import normalize_name
+from rem.models import (  # noqa: F401  (re-exported)
+    ENTITY_TYPES,
+    RELATION_TYPES,
+    Candidate,
+    Confirmation,
+    EntityMention,
+    MemoryRecord,
+    Origin,
+    RelationMention,
+    Scope,
+)
 from rem.redact import redact
 from rem.storage.queue import Turn
 
@@ -38,8 +49,21 @@ EXTRACTION_SCHEMA: dict = {
                             "additionalProperties": False,
                         },
                     },
+                    "relations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source": {"type": "string"},
+                                "type": {"type": "string"},
+                                "target": {"type": "string"},
+                            },
+                            "required": ["source", "type", "target"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
-                "required": ["text", "scope", "origin", "restates", "entities"],
+                "required": ["text", "scope", "origin", "restates", "entities", "relations"],
                 "additionalProperties": False,
             },
         }
@@ -80,9 +104,14 @@ If there is nothing durable, return {"facts": []}.
 8. Set "entities" to the named people, tools, projects, languages, organizations, places or \
 concepts a fact is about, each with a short "type" (""" + ", ".join(ENTITY_TYPES) + """); use the \
 name as written in the conversation. A fact about nothing in particular has "entities": [].
+9. Set "relations" to the typed links between two entities of the SAME fact, each as \
+{"source": ..., "type": ..., "target": ...}, using the names exactly as listed in that fact's \
+"entities". "type" is one of: """ + ", ".join(RELATION_TYPES) + """. The user is not an entity, so a fact \
+only about the user and one thing has "relations": []. Most facts have none.
 
 Respond with JSON: {"facts": [{"text": ..., "scope": ..., "origin": ..., "restates": ..., \
-"entities": [{"name": ..., "type": ...}]}]}"""
+"entities": [{"name": ..., "type": ...}], \
+"relations": [{"source": ..., "type": ..., "target": ...}]}]}"""
 
 
 MAX_TURN_CHARS = 4000  # per turn sent to the LLM: a pasted log or file must not blow up the prompt
@@ -139,16 +168,18 @@ def extract(
             log.warning("dropping extracted fact #%d: not an object", n)
             continue
         try:
-            cand = Candidate.model_validate({k: v for k, v in item.items() if k not in ("restates", "entities")})
+            cand = Candidate.model_validate({k: v for k, v in item.items() if k not in ("restates", "entities", "relations")})
         except ValidationError as e:
             err = e.errors()[0]
             log.warning("dropping invalid extracted fact #%d (%s): %s: %s", n, _fingerprint(item.get("text")),
                         ".".join(str(p) for p in err["loc"]), err["msg"])
             continue
         # The schema requires "restates", but a lenient provider may omit it: missing means null.
+        mentions = _mentions(item.get("entities"), n)
         candidates.append(cand.model_copy(update={
             "restates": _resolve(item.get("restates"), related, n),
-            "entities": _mentions(item.get("entities"), n),
+            "entities": mentions,
+            "relations": _relations(item.get("relations"), mentions, n),
         }))
     if len(candidates) > max_candidates:
         log.warning(
@@ -170,6 +201,32 @@ def _mentions(raw, n: int) -> list[EntityMention]:
             out.append(EntityMention.model_validate(m))
         except (ValidationError, ValueError) as e:
             log.warning("fact #%d: dropping invalid entity mention: %s", n, str(e).splitlines()[0])
+    return out
+
+
+def _relations(raw, mentions: list[EntityMention], n: int) -> list[RelationMention]:
+    """Valid relations of fact #n between its own entities; a missing key means none, a bad one is dropped alone."""
+    if not isinstance(raw, list):
+        return []
+    names = {normalize_name(m.name): m.name for m in mentions}
+    out: list[RelationMention] = []
+    seen: set[tuple[str, str, str]] = set()
+    for r in raw:
+        try:
+            if not isinstance(r, dict):
+                raise ValueError("not an object")
+            rel = RelationMention.model_validate(r)
+            src, dst = normalize_name(rel.source), normalize_name(rel.target)
+            if src not in names or dst not in names:
+                raise ValueError("an end is not an entity of the fact")
+            if src == dst:
+                raise ValueError("source and target are the same entity")
+            if (key := (src, rel.type, dst)) in seen:
+                raise ValueError("duplicate")
+            seen.add(key)
+            out.append(RelationMention(source=names[src], type=rel.type, target=names[dst]))
+        except (ValidationError, ValueError) as e:
+            log.warning("fact #%d: dropping invalid relation: %s", n, str(e).splitlines()[0])
     return out
 
 
