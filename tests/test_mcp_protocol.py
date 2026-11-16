@@ -214,3 +214,20 @@ def test_binary_stdout_is_utf8_regardless_of_text_encoding():
     lines = raw.getvalue().decode("utf-8").splitlines()
     assert json.loads(lines[0]) == {"jsonrpc": "2.0", "id": "ü", "result": {}}
     assert json.loads(lines[1])["id"] == "\ud800"
+
+
+def test_deeply_nested_line_is_parse_error_and_serving_continues():
+    out = run(["[" * 200000, req(1, "ping")])
+    assert len(out) == 2
+    assert out[0]["id"] is None
+    assert out[0]["error"]["code"] == -32700
+    assert out[1] == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+
+def test_huge_int_line_is_parse_error_and_serving_continues():
+    huge = '{"jsonrpc":"2.0","id":' + "9" * 5000 + ',"method":"ping"}'
+    out = run([huge, req(2, "ping")])
+    assert len(out) == 2
+    assert out[0]["id"] is None
+    assert out[0]["error"]["code"] == -32700
+    assert out[1] == {"jsonrpc": "2.0", "id": 2, "result": {}}

@@ -133,7 +133,7 @@ def serve(tools: list[Tool], stdin: TextIO, stdout: TextIO, *, instructions: str
             continue
         try:
             message = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):  # JSONDecodeError, int digit limit, deep nesting
             response = _error(None, PARSE_ERROR, "invalid JSON")
         else:
             response = handle(message, by_name, instructions)
