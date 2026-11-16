@@ -1,11 +1,11 @@
 import pytest
 
 from rem.memory import Memory
-from rem.models import Provenance, RelationRecord, Scope, Status, utcnow
+from rem.models import Candidate, Confirmation, HistoryEvent, Provenance, RelationRecord, Scope, Status, TargetKind, utcnow
 from rem.relations import relation_id, relation_sentence
 from rem.storage.vector.base import VectorPoint
 
-from tests.test_memory_entities import insert_entity
+from tests.test_memory_entities import apply, insert_entity
 
 
 def insert_relation(mem, src, type, dst, memory_ids=(), status=Status.UNVERIFIED,
@@ -74,10 +74,6 @@ def test_relations_for_memory(mem):
 
 # ---- writing relations from a job (apply_candidates) ----
 
-from rem.models import Candidate, HistoryEvent, TargetKind  # noqa: E402
-from tests.test_memory_entities import apply  # noqa: E402
-
-
 def rcand(text, names, rels, *, scope="global", origin="user", restates=None):
     return Candidate(
         text=text, scope=scope, origin=origin, restates=restates,
@@ -134,7 +130,8 @@ def test_replay_after_crash_before_add_row_repairs_it(mem, monkeypatch):
     assert rhist(mem, r.id) == []
     apply(mem, c)
     assert rhist(mem, r.id) == [(TargetKind.RELATION, HistoryEvent.ADD, "job:1")]
-    assert r.evidence == 1
+    (again,) = mem.list_relations()
+    assert again.evidence == 1
 
 
 def test_two_facts_same_edge_one_relation_two_evidence(mem):
@@ -143,6 +140,7 @@ def test_two_facts_same_edge_one_relation_two_evidence(mem):
                 rcand("uv is a Python tool", ["uv", "Python"], rel)])
     (r,) = mem.list_relations()
     assert r.evidence == 2 and len(mem.list()) == 2
+    assert [(k, e) for k, e, _ in rhist(mem, r.id)] == [(TargetKind.RELATION, HistoryEvent.ADD)]
 
 
 def test_second_fact_verifies_unverified_relation_with_corroborate_row(mem):
@@ -209,3 +207,134 @@ def test_apply_trust_deletes_relation_without_evidence(mem):
     assert mem._apply_trust(mem.get_relation(r.id), "t", None) is None
     assert mem.list_relations() == []
     assert rhist(mem, r.id)[-1][1] == HistoryEvent.DELETE
+
+
+def test_user_restating_unverified_memory_adds_no_relation(mem):
+    apply(mem, [rcand("Uses uv for Python", ["uv", "Python"], [], origin="assistant")], job_key="job:1")
+    (m,) = mem.list()
+    assert m.status == "unverified"
+    mem.apply_candidates(
+        [rcand("The user relies on uv for Python work", ["uv", "Python"], [("uv", "uses", "Python")],
+               restates=m.id)],
+        job_key="job:2", project_id=None, session_id=None, source="cli",
+        restate_min_similarity=0.0, has_user_turn=True, user_texts=["I rely on uv for Python work"],
+    )
+    (m2,) = mem.list()
+    assert m2.status == "verified"  # corroborated
+    assert mem.list_relations() == []
+
+
+# ---- trust refresh and lifecycle ----
+
+REL = [("uv", "uses", "Python")]
+
+
+def one_relation(mem, text="uv runs Python scripts", origin="assistant", job_key="job:1"):
+    apply(mem, [rcand(text, ["uv", "Python"], REL, origin=origin)], job_key=job_key)
+    (r,) = mem.list_relations()
+    return r
+
+
+def events(mem, rid):
+    return [e for _, e, _ in rhist(mem, rid)]
+
+
+def test_confirming_evidence_verifies_relation(mem):
+    r = one_relation(mem)
+    assert r.status == "unverified"
+    (m,) = mem.list()
+    mem.confirm(m.id, actor="cli")
+    (r2,) = mem.list_relations()
+    assert (r2.status, r2.provenance) == ("verified", "user_confirmed")
+    assert events(mem, r.id) == [HistoryEvent.ADD, HistoryEvent.CORROBORATE]
+
+
+def test_corroborating_evidence_verifies_relation_with_job(mem):
+    r = one_relation(mem)
+    (m,) = mem.list()
+    mem.corroborate(m.id, provenance=Provenance.USER_ASSERTED, job_id="job:2", actor="extractor")
+    (r2,) = mem.list_relations()
+    assert r2.status == "verified"
+    assert rhist(mem, r.id)[-1] == (TargetKind.RELATION, HistoryEvent.CORROBORATE, "job:2")
+
+
+def test_mcp_writes_never_verify_a_relation(mem):
+    r = one_relation(mem, origin="user")
+    assert r.status == "verified"
+    (m,) = mem.list()
+    mem.update(m.id, m.text, actor="mcp", unverify=True)
+    (r2,) = mem.list_relations()
+    assert r2.status == "unverified"
+    assert events(mem, r.id) == [HistoryEvent.ADD, HistoryEvent.UPDATE]
+
+
+def test_deleting_verified_evidence_leaves_unverified_relation(mem):
+    rel = [("uv", "uses", "Python")]
+    apply(mem, [rcand("uv runs Python scripts", ["uv", "Python"], rel, origin="assistant")], job_key="job:1")
+    apply(mem, [rcand("uv is a Python tool", ["uv", "Python"], rel)], job_key="job:2")
+    (r,) = mem.list_relations()
+    assert r.status == "verified" and r.evidence == 2
+    verified = next(m for m in mem.list() if m.status == "verified")
+    mem.delete(verified.id, actor="cli")
+    (r2,) = mem.list_relations()
+    assert (r2.status, r2.evidence) == ("unverified", 1)
+    assert events(mem, r.id)[-1] == HistoryEvent.UPDATE
+
+
+def test_deleting_last_evidence_deletes_relation_then_entities(mem):
+    r = one_relation(mem)
+    (m,) = mem.list()
+    mem.delete(m.id, actor="cli")
+    assert mem.list_relations() == [] and mem.list_entities() == []
+    row = mem.db.get_history(r.id)[-1]
+    assert (row.target_kind, row.event, row.old_value) == (TargetKind.RELATION, HistoryEvent.DELETE, "uv uses Python")
+
+
+def test_delete_converges_after_crash_between_relation_and_entity_unlink(mem, monkeypatch):
+    one_relation(mem)
+    (m,) = mem.list()
+    real = Memory._unlink
+    state = {"boom": True}
+
+    def flaky(self, *a, **kw):
+        if state["boom"]:
+            state["boom"] = False
+            raise RuntimeError("crash")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Memory, "_unlink", flaky)
+    with pytest.raises(RuntimeError):
+        mem.delete(m.id, actor="cli")
+    assert mem.list_relations() == [] and mem.get(m.id) is not None
+    mem.delete(m.id, actor="cli")
+    assert mem.list_relations() == [] and mem.list_entities() == [] and mem.list() == []
+
+
+def test_text_update_unlinks_relations(mem):
+    r = one_relation(mem)
+    (m,) = mem.list()
+    mem.update(m.id, "Something else entirely", actor="cli")
+    assert mem.list_relations() == [] and mem.list_entities() == []
+    assert events(mem, r.id)[-1] == HistoryEvent.DELETE
+
+
+def test_same_text_update_keeps_relations(mem):
+    r = one_relation(mem)
+    (m,) = mem.list()
+    mem.update(m.id, m.text, actor="cli")
+    (r2,) = mem.list_relations()
+    assert r2.id == r.id and r2.evidence == 1 and len(mem.list_entities()) == 2
+
+
+def test_apply_confirmations_verifies_relation(mem):
+    apply(mem, [rcand("Prefers uv over pip", ["uv", "pip"], [("uv", "preferred_over", "pip")],
+                      origin="assistant")], job_key="job:1")
+    (r,) = mem.list_relations()
+    assert r.status == "unverified"
+    (m,) = mem.list()
+    m = mem.request_confirmation(m.id, actor="mcp")
+    c = Confirmation(memory_id=m.id, hash=m.hash, requested_at=m.confirm_requested_at, quote="yes, uv over pip")
+    assert mem.apply_confirmations([c], user_texts=["yes, uv over pip"], job_key="job:9") == [m.id]
+    (r2,) = mem.list_relations()
+    assert (r2.status, r2.provenance) == ("verified", "user_confirmed")
+    assert rhist(mem, r.id)[-1] == (TargetKind.RELATION, HistoryEvent.CORROBORATE, "job:9")

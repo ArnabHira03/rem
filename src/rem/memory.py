@@ -410,6 +410,7 @@ class Memory:
             # the entities were named by the old text: unlink them first (an orphan is deleted), then clear
             # entity_ids in the upsert below. After a crash in between, a repeated update or a delete
             # converges, since _unlink skips links that are already gone.
+            self._unlink_relations(id, old.scope, old.project_id, actor)
             self._unlink(id, old.entity_ids, actor)
             changes["entity_ids"] = []
         if unverify:
@@ -417,6 +418,8 @@ class Memory:
         record = old.model_copy(update=changes)
         self.vectors.upsert(self.col, [self._point(id, text, record)])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)
+        if unverify and "entity_ids" not in changes:
+            self._refresh_relations(id, record.scope, record.project_id, actor)
         return record
 
     def confirm(self, id: str, *, actor: str) -> MemoryRecord:
@@ -432,6 +435,7 @@ class Memory:
             self.col, id, {k: payload[k] for k in ("provenance", "status", "updated_at", "confirm_requested_at")}
         )
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.CONFIRM, str(old.status), str(Status.VERIFIED), actor)
+        self._refresh_relations(id, confirmed.scope, confirmed.project_id, actor)
         return confirmed
 
     def request_confirmation(self, id: str, *, actor: str, cwd: Path | None = None) -> MemoryRecord:
@@ -481,6 +485,7 @@ class Memory:
                     "provenance", "status", "corroborated_by", "confirm_requested_at", "updated_at")})
             self.db.add_history(TargetKind.MEMORY, rec.id, HistoryEvent.CONFIRM, str(Status.UNVERIFIED),
                                 str(Status.VERIFIED), "extractor", job_key)
+            self._refresh_relations(rec.id, rec.scope, rec.project_id, "extractor", job_key)
             done.append(rec.id)
         return done
 
@@ -505,6 +510,7 @@ class Memory:
         self.db.add_history(
             TargetKind.MEMORY, id, HistoryEvent.CORROBORATE, str(Status.UNVERIFIED), str(Status.VERIFIED), actor, job_id
         )
+        self._refresh_relations(id, record.scope, record.project_id, actor, job_id)
         return record
 
     def apply_candidates(
@@ -708,6 +714,21 @@ class Memory:
                 TargetKind.RELATION, rec.id, event, str(rec.status), str(status), actor, job_id)
         return new
 
+    def _refresh_relations(
+        self, memory_id: str, scope: Scope, project_id: int | None, actor: str, job_id: str | None = None
+    ) -> None:
+        """Recompute the trust of every relation this memory evidences (after its own payload changed)."""
+        for rel in self.relations_for(memory_id, scope, project_id):
+            self._apply_trust(rel, actor, job_id)
+
+    def _unlink_relations(self, memory_id: str, scope: Scope, project_id: int | None, actor: str) -> None:
+        """Remove a memory from the evidence of its relations; one left with none is deleted.
+        Repeat-safe: relations that no longer list the memory are not returned by relations_for."""
+        for rel in self.relations_for(memory_id, scope, project_id):
+            remaining = [m for m in rel.memory_ids if m != memory_id]
+            self.vectors.update_payload(self.relation_col, rel.id, {"memory_ids": remaining, "updated_at": utcnow()})
+            self._apply_trust(rel.model_copy(update={"memory_ids": remaining}), actor, None)
+
     def _resolve_entity(
         self, mention: EntityMention, scope: Scope, project_id: int | None, now: str
     ) -> tuple[EntityRecord, EntityAction]:
@@ -769,6 +790,7 @@ class Memory:
 
     def delete(self, id: str, *, actor: str) -> None:
         old = self._require(id)
+        self._unlink_relations(id, old.scope, old.project_id, actor)
         self._unlink(id, old.entity_ids, actor)
         self.vectors.delete(self.col, [id])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.DELETE, old.text, None, actor)
