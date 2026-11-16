@@ -55,7 +55,7 @@ Read the design spec for the details. These are the invariants that span modules
   - **M5 backlog invariants:**
     - Projects are resolved off the store thread (`project_root` has no subprocess).
     - `list_points(limit=None)` returns every match.
-    - A spool file that fails to drain 3 times is quarantined in `spool/bad/`, which keeps 100 files.
+    - A spool file that fails to drain 3 times within one daemon run is quarantined in `spool/bad/`, which keeps 100 files; to recover, move the files from `spool/bad/` back to `spool/`, then restart the daemon or wait for the next drain.
     - `hook.log` rotates at 1 MB to `hook.log.1`.
   - Exit codes: 2 means already running, 3 means a config error. The systemd unit doesn't restart on either.
   - Socket paths must stay ≤ 100 bytes, so tests use `/tmp/rem-*` directories (the `short_dir` and `daemon_env` fixtures).

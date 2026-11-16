@@ -405,6 +405,16 @@ def test_uninstall_removes(tmp_path):
     assert [c[0] for c in run.calls] == [[CLAUDE, "mcp", "remove", "--scope", "user", "rem"]]
 
 
+def test_uninstall_not_found_is_not_a_failure(tmp_path):
+    for msg in ("No MCP server found with name: rem", "Error: server Not Found", "no mcp server named rem"):
+        run = FakeRun(returncodes=(1,), stderr=msg)
+        assert ic.unregister_mcp("local", tmp_path, run=run, which=fake_which) == (
+            "no rem MCP server registered (local scope)")
+    run = FakeRun(returncodes=(1,), stderr="permission denied")
+    assert ic.unregister_mcp("user", tmp_path, run=run, which=fake_which) == (
+        "could not remove rem's MCP server: permission denied")
+
+
 def test_add_failure_reported_not_raised(tmp_path, monkeypatch, capsys):
     run = FakeRun(returncodes=(0, 1), stderr="boom\nsecond line")
     assert ic.register_mcp("user", tmp_path, run=run, which=fake_which) == "could not add rem's MCP server: boom"

@@ -246,8 +246,7 @@ class Memory:
             raise ValueError(f"another memory already has this text: {other.id}")
         changes = {"text": text, "hash": text_hash(text), "updated_at": utcnow()}
         if unverify:
-            changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED,
-                        "corroborated_by": None}
+            changes |= {"provenance": Provenance.ASSISTANT_GENERATED, "status": Status.UNVERIFIED}
         record = old.model_copy(update=changes)
         self.vectors.upsert(self.col, [VectorPoint(id, self.embedder.embed([text])[0], record.to_payload())])
         self.db.add_history(TargetKind.MEMORY, id, HistoryEvent.UPDATE, old.text, text, actor)

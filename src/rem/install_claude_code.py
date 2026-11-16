@@ -225,6 +225,9 @@ def unregister_mcp(scope: Literal["user", "local"], cwd: Path, *, dry_run=False,
     except (OSError, subprocess.SubprocessError) as e:
         return f"could not remove rem's MCP server: {e}"
     if r.returncode != 0:
+        out = f"{r.stderr or ''}\n{r.stdout or ''}".lower()
+        if "not found" in out or "no mcp server" in out:
+            return f"no rem MCP server registered ({scope} scope)"
         return f"could not remove rem's MCP server: {_first_line(r.stderr)}"
     return f"removed rem's MCP server ({scope} scope)"
 
