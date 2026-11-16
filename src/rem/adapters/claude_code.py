@@ -99,13 +99,22 @@ def handle_hook(payload: dict, cfg: RemConfig, client_factory=RemClient) -> str:
     return ""
 
 
+HOOK_LOG_MAX_BYTES = 1_000_000
+
+
 def _log_line(cfg: RemConfig, event, what: str) -> None:
     """Append one line to hook.log: never prompt, reply or argv text, only fixed strings and class names."""
     try:
         name = event if isinstance(event, str) and event in _EVENTS else "unknown"
         ensure_private_dir(cfg.data_dir)
         line = f"{datetime.now(timezone.utc).isoformat()} {name} {what}\n"
-        fd = os.open(cfg.data_dir / "hook.log", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        path = cfg.data_dir / "hook.log"
+        try:
+            if path.stat().st_size >= HOOK_LOG_MAX_BYTES:
+                os.replace(path, cfg.data_dir / "hook.log.1")
+        except OSError:
+            pass
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(fd, "a") as f:
             f.write(line)
     except Exception:

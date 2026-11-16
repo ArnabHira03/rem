@@ -545,3 +545,17 @@ def test_capture_rejected_as_invalid_is_not_spooled(hcfg, starts):
     with pytest.raises(ValueError):
         handle_hook(payload("SessionEnd"), hcfg, client_factory=Fake(ValueError("invalid")))
     assert spooled(hcfg) == [] and starts == []
+
+
+def test_hook_log_rotates(hcfg):
+    import stat
+
+    from rem.adapters.claude_code import HOOK_LOG_MAX_BYTES, _log_line
+
+    hcfg.data_dir.mkdir(parents=True)
+    log = hcfg.data_dir / "hook.log"
+    log.write_text("x" * HOOK_LOG_MAX_BYTES)
+    _log_line(hcfg, "Stop", "ok")
+    assert (hcfg.data_dir / "hook.log.1").read_text() == "x" * HOOK_LOG_MAX_BYTES
+    assert len(log.read_text().splitlines()) == 1
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600

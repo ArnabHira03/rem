@@ -86,6 +86,9 @@ def run_daemon(cfg: RemConfig, handler: JobHandler | None = None) -> int:
         lock.release()
 
 
+_spool_failures: dict[str, int] = {}  # per-file ingest failure counts, kept for the daemon process's lifetime
+
+
 def _drain(service: RemService, cfg: RemConfig) -> None:
     """Ingest turns that hooks spooled while the daemon was down (blocking; runs the ingest on the store thread)."""
 
@@ -96,7 +99,7 @@ def _drain(service: RemService, cfg: RemConfig) -> None:
         service.store.call(service.ingest_store.ingest, b.source, b.session_id, cwd,
                            b.turns_for_ingest(), b.enqueue, project)
 
-    drained = drain_spool(cfg.data_dir, ingest)
+    drained = drain_spool(cfg.data_dir, ingest, _spool_failures)
     if drained:
         log.info("drained %d spooled ingest(s)", drained)
 

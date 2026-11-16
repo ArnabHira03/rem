@@ -125,3 +125,35 @@ def test_existing_data_dir_mode_is_left_alone(tmp_path):
     os.chmod(data, 0o750)
     write_spool(data, body("a"))
     assert stat.S_IMODE(data.stat().st_mode) == 0o750
+
+
+def test_poison_file_is_quarantined_after_three_failures(tmp_path):
+    first = write_spool(tmp_path, body("poison"))
+    second = write_spool(tmp_path, body("ok"))
+    seen = []
+
+    def ingest(b):
+        if b["session_id"] == "poison":
+            raise RuntimeError("boom")
+        seen.append(b["session_id"])
+
+    failures: dict[str, int] = {}
+    assert drain_spool(tmp_path, ingest, failures) == 0
+    assert drain_spool(tmp_path, ingest, failures) == 0
+    assert first.exists() and second.exists()
+    assert drain_spool(tmp_path, ingest, failures) == 1
+    assert not first.exists() and (tmp_path / "spool" / "bad" / first.name).exists()
+    assert not second.exists() and seen == ["ok"]
+
+
+def test_prune_bad_keeps_newest(tmp_path):
+    from rem.spool import prune_bad
+
+    bad = tmp_path / "spool" / "bad"
+    bad.mkdir(parents=True)
+    names = [f"{i:04d}.json" for i in range(105)]
+    for n in names:
+        (bad / n).write_text("{}")
+    assert prune_bad(tmp_path) == 5
+    left = sorted(p.name for p in bad.glob("*.json"))
+    assert left == names[5:]
