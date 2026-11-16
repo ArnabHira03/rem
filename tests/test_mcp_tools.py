@@ -47,7 +47,9 @@ def test_tool_names_and_schemas(tmp_path):
     by = {t.name: t for t in tools}
     assert by["add_memory"].input_schema["properties"]["scope"]["enum"] == ["global", "system", "project"]
     assert by["list_memories"].input_schema["properties"]["status"]["enum"] == ["verified", "unverified"]
-    assert "never to verify your own claims" in by["confirm_memory"].description
+    assert "This does not verify it by itself" in by["confirm_memory"].description
+    assert "Never use it for your own claims" in by["confirm_memory"].description
+    assert "only the current git repository's" in by["list_memories"].description
     assert "unverified until the user confirms it" in by["add_memory"].description
     assert by["update_memory"].description == (
         "Change a memory's text. The memory becomes unverified until the user confirms it.")
@@ -86,18 +88,76 @@ def test_search_and_list_text(client, tmp_path):
     assert len(call(tools, "list_memories", limit=1).text.splitlines()) == 1
 
 
-def test_confirm_then_history_shows_confirm_by_mcp(client, tmp_path):
+def test_confirm_memory_only_requests_confirmation(client, tmp_path):
     tools = tools_for(client, tmp_path)
     mid = added_id(call(tools, "add_memory", text="Prefers uv over pip"))
     r = call(tools, "confirm_memory", id=mid)
     assert not r.is_error
-    assert r.text == f"Confirmed: {mid}  [global] verified  Prefers uv over pip"
+    assert r.text == (f"Confirmation requested (still unverified): {mid}  [global] unverified  Prefers uv over pip\n"
+                      "rem verifies it only if the user's own message in this conversation confirms it, which it "
+                      "checks after this turn ends; otherwise it stays unverified.")
+    m = client.get(mid)
+    assert m["status"] == "unverified" and m["provenance"] == "assistant_generated"
+    assert m["confirm_requested_at"]
     h = call(tools, "memory_history", id=mid)
     assert not h.is_error
     rows = h.text.splitlines()
     assert len(rows) == 2
-    assert "CONFIRM" in rows[1] and "mcp" in rows[1]
-    assert [(x["event"], x["actor"]) for x in client.history(mid)] == [("ADD", "mcp"), ("CONFIRM", "mcp")]
+    assert "CONFIRM_REQUEST" in rows[1] and "mcp" in rows[1]
+    assert [(x["event"], x["actor"]) for x in client.history(mid)] == [("ADD", "mcp"), ("CONFIRM_REQUEST", "mcp")]
+
+
+def test_confirm_memory_of_verified_memory_changes_nothing(client, tmp_path):
+    tools = tools_for(client, tmp_path)
+    mid = client.add("Uses fish shell")["id"]  # user-confirmed via the CLI
+    r = call(tools, "confirm_memory", id=mid)
+    assert r.text == f"Already verified: {mid}  [global] verified  Uses fish shell"
+    assert [x["event"] for x in client.history(mid)] == ["ADD"]
+
+
+def _repo(root: Path, name: str) -> Path:
+    d = root / name
+    (d / ".git").mkdir(parents=True)
+    return d
+
+
+def _texts(tools, **args):
+    r = call(tools, "list_memories", **args)
+    assert not r.is_error, r.text
+    return [] if r.text == "No memories found." else [line.split("  ", 2)[2] for line in r.text.splitlines()]
+
+
+def test_list_memories_shows_only_the_current_repositorys_project_memories(client, tmp_path):
+    a, b = _repo(tmp_path, "repo-a"), _repo(tmp_path, "repo-b")
+    (b / "sub").mkdir()
+    ta, tb = tools_for(client, a), tools_for(client, b / "sub")
+    added_id(call(ta, "add_memory", text="Uses tabs in repo A", scope="project"))
+    added_id(call(tb, "add_memory", text="Uses nox in repo B", scope="project"))
+    client.add("Prefers uv over pip")  # global
+
+    assert _texts(ta, scope="project") == ["Uses tabs in repo A"]
+    assert _texts(tb, scope="project") == ["Uses nox in repo B"]
+    assert sorted(_texts(ta)) == ["Prefers uv over pip", "Uses tabs in repo A"]
+    assert sorted(_texts(tb)) == ["Prefers uv over pip", "Uses nox in repo B"]
+    assert _texts(ta, scope="global") == ["Prefers uv over pip"]
+    assert _texts(ta, scope="project", status="verified") == []
+    # a repository rem has never stored anything for has no project memories
+    assert _texts(tools_for(client, _repo(tmp_path, "repo-c")), scope="project") == []
+    assert len(client.list()) == 3  # the CLI view is unchanged
+
+
+def test_list_memories_outside_a_repository_exposes_no_project_memories(client, tmp_path):
+    a = _repo(tmp_path, "repo-a")
+    added_id(call(tools_for(client, a), "add_memory", text="Uses tabs in repo A", scope="project"))
+    client.add("Prefers uv over pip")
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    tools = tools_for(client, plain)
+    r = call(tools, "list_memories", scope="project")
+    assert r.is_error
+    assert r.text == (f"no project detected: rem mcp is running in {plain}, which is not in a git repository; "
+                      "only the current repository's project memories can be listed")
+    assert _texts(tools) == ["Prefers uv over pip"]
 
 
 def test_update_and_delete(client, tmp_path):
@@ -122,7 +182,7 @@ def test_update_of_confirmed_memory_makes_it_unverified(client, tmp_path):
     assert m["text"] == "Prefers pip"
     assert m["status"] == "unverified" and m["provenance"] == "assistant_generated"
     assert not call(tools, "confirm_memory", id=mid).is_error
-    assert client.get(mid)["status"] == "verified"
+    assert client.get(mid)["status"] == "unverified"  # only the user's own words can verify it again
 
 
 def test_unknown_id_is_error_result(client, tmp_path):
@@ -190,7 +250,7 @@ def test_run_mcp_client_cache_retries_after_daemon_unavailable(monkeypatch):
         def __init__(self, fail):
             self.fail = fail
 
-        def list(self, scope=None, status=None):
+        def list(self, scope=None, status=None, cwd=None):
             if self.fail:
                 raise DaemonUnavailable("down")
             return []

@@ -160,3 +160,31 @@ def test_client_update_sends_unverify():
     c.update("m", "t")
     c.update("m", "t", actor="mcp", unverify=True)
     assert sent == [{"text": "t", "actor": "cli", "unverify": False}, {"text": "t", "actor": "mcp", "unverify": True}]
+
+
+async def test_request_confirmation_route_keeps_memory_unverified(api):
+    mid = (await api.post("/memories", json={"text": "Uses tabs", "provenance": "assistant_generated",
+                                             "status": "unverified", "actor": "mcp"})).json()["id"]
+    r = await api.post(f"/memories/{mid}/request-confirmation", json={"actor": "mcp"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "unverified" and r.json()["confirm_requested_at"]
+    missing = await api.post("/memories/00000000-0000-0000-0000-000000000000/request-confirmation", json={})
+    assert missing.status_code == 404
+
+
+async def test_list_by_cwd_keeps_only_that_projects_memories(api, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        (d / ".git").mkdir(parents=True)
+        await api.post("/memories", json={"text": f"Convention of {d.name}", "scope": "project", "cwd": str(d)})
+    await api.post("/memories", json={"text": "Prefers uv"})
+
+    def texts(r):
+        return sorted(m["text"] for m in r.json())
+
+    assert texts(await api.get("/memories", params={"cwd": str(a)})) == ["Convention of a", "Prefers uv"]
+    assert texts(await api.get("/memories", params={"cwd": str(b), "scope": "project"})) == ["Convention of b"]
+    assert texts(await api.get("/memories", params={"cwd": str(tmp_path), "scope": "project"})) == []
+    assert len((await api.get("/memories")).json()) == 3
+    r = await api.get("/memories", params={"cwd": str(a), "project_id": "1"})
+    assert r.status_code == 400

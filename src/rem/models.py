@@ -32,6 +32,7 @@ class HistoryEvent(StrEnum):
     UPDATE = "UPDATE"
     DELETE = "DELETE"
     CONFIRM = "CONFIRM"
+    CONFIRM_REQUEST = "CONFIRM_REQUEST"
     CORROBORATE = "CORROBORATE"
     MERGE = "MERGE"
     REEMBED = "REEMBED"
@@ -81,6 +82,9 @@ class MemoryRecord(BaseModel):
     job_id: str | None
     entity_ids: list[str] = []
     corroborated_by: str | None = None
+    # Set when an agent asked (over MCP) for this memory to be confirmed. It stays unverified until an
+    # extraction job finds the user's own words confirming it; see Memory.apply_confirmations.
+    confirm_requested_at: str | None = None
     created_at: str
     updated_at: str
 
@@ -129,3 +133,15 @@ class Candidate(BaseModel):
         if not v:
             raise ValueError("text must not be empty")
         return v
+
+
+class Confirmation(BaseModel):
+    """An extraction's claim that the user's own message confirms a memory awaiting confirmation.
+
+    memory_id and hash pin the memory as it was shown to the LLM; quote must be words the user
+    actually wrote in the job's turns, which apply_confirmations checks without the LLM.
+    """
+
+    memory_id: str
+    hash: str
+    quote: str

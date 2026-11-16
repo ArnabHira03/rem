@@ -61,8 +61,9 @@ class RemClient:
     def context(self, cwd, max_chars=1600) -> str:
         return self._call("POST", "/context", json={"cwd": str(cwd) if cwd else None, "max_chars": max_chars})["text"]
 
-    def list(self, scope=None, status=None) -> list[dict]:
-        params = {k: v for k, v in {"scope": scope, "status": status}.items() if v}
+    def list(self, scope=None, status=None, cwd=None) -> list[dict]:
+        """All memories, or with cwd only that directory's project's project memories (plus global/system)."""
+        params = {k: v for k, v in {"scope": scope, "status": status, "cwd": str(cwd) if cwd else None}.items() if v}
         return self._call("GET", "/memories", params=params)
 
     def get(self, id) -> dict:
@@ -77,6 +78,9 @@ class RemClient:
 
     def confirm(self, id, actor="cli") -> dict:
         return self._call("POST", f"/memories/{id}/confirm", ref=id, json={"actor": actor})
+
+    def request_confirmation(self, id, actor="mcp") -> dict:
+        return self._call("POST", f"/memories/{id}/request-confirmation", ref=id, json={"actor": actor})
 
     def history(self, id) -> list[dict]:
         return self._call("GET", f"/memories/{id}/history", ref=id)

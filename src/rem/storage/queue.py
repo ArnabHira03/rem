@@ -127,6 +127,22 @@ class IngestStore:
             raise
         return IngestResult(session_pk, accepted, len(turns) - accepted, job_id)
 
+    def job_window(self, job_id: int) -> tuple[str, str]:
+        """(since, until): from the session's previous job (or its first turn) to this job's last enqueue.
+
+        This is the exchange the job covers: the user's message, then the assistant's turn that ends
+        with the Stop ingest enqueueing the job. ISO timestamps, comparable with utcnow().
+        """
+        row = self.conn.execute(
+            "SELECT j.session_pk, j.updated_at, s.first_seen FROM jobs j JOIN sessions s ON s.id = j.session_pk "
+            "WHERE j.id = ?", (job_id,),
+        ).fetchone()
+        prev = self.conn.execute(
+            "SELECT MAX(created_at) FROM jobs WHERE session_pk = ? AND id < ?", (row[0], job_id)
+        ).fetchone()[0]
+        # first_seen is the session's first ingest, the user's opening prompt: nothing before it counts
+        return (prev or row[2], row[1])
+
     def session_project(self, session_pk: int) -> int | None:
         row = self.conn.execute("SELECT project_id FROM sessions WHERE id = ?", (session_pk,)).fetchone()
         return row[0] if row else None

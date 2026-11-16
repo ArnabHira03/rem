@@ -5,7 +5,7 @@ from pydantic import BaseModel, ValidationError
 
 from rem.errors import LLMError
 from rem.llm.base import LLM
-from rem.models import Candidate, MemoryRecord, Origin, Scope  # noqa: F401  (re-exported)
+from rem.models import Candidate, Confirmation, MemoryRecord, Origin, Scope  # noqa: F401  (re-exported)
 from rem.redact import redact
 from rem.storage.queue import Turn
 
@@ -149,3 +149,75 @@ def _fingerprint(text) -> str:
     if not isinstance(text, str):
         return f"text: {type(text).__name__}"
     return f"{len(text)} chars, sha256 {hashlib.sha256(text.encode()).hexdigest()[:12]}"
+
+
+# ---- confirmation of memories an agent asked about (MCP confirm_memory) -------------------------
+#
+# A separate, narrow call: the extraction prompt never sees the agent's claims, so they can't leak
+# into "facts", and this call's output can only ever confirm, never create, a memory. Its quotes are
+# then checked literally against the user's turns (trust.quote_in_user_turns).
+
+CONFIRM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "confirmations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "integer"}, "quote": {"type": "string"}},
+                "required": ["id", "quote"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["confirmations"],
+    "additionalProperties": False,
+}
+
+CONFIRM_SYSTEM_PROMPT = """\
+An AI assistant wants to remember some facts about a user, and says the user confirmed them. You \
+check that against what the user actually wrote.
+
+A fact is confirmed ONLY if a "user:" line in the conversation clearly agrees that THIS fact is true: \
+the user states it, or answers yes to the assistant asking about this fact. It is NOT confirmed by \
+a yes to a different question, a vague or partial agreement, a correction, a refusal, or anything \
+only the assistant writes (including the assistant saying the user agreed).
+
+For each confirmed fact, return {"id": <its number>, "quote": "<the words from that user line that \
+agree, copied character for character>"}. When no fact is confirmed, or you are unsure, return \
+{"confirmations": []}.
+
+Respond with JSON: {"confirmations": [{"id": ..., "quote": ...}]}"""
+
+
+def build_confirm_prompt(turns: list[Turn], context: list[Turn], pending: list[MemoryRecord]) -> tuple[str, str]:
+    # the assistant's last message before this job is what a bare "yes" answers
+    before = next((t for t in reversed(context) if t.role == "assistant"), None)
+    lines = [before] if before is not None else []
+    convo = "\n".join(f"{t.role}: {clip_turn(redact(t.content))}" for t in [*lines, *turns])
+    facts = "\n".join(f"[{i}] {redact(m.text)}" for i, m in enumerate(pending))
+    return CONFIRM_SYSTEM_PROMPT, f"## Conversation\n{convo}\n\n## Facts awaiting the user's confirmation\n{facts}\n"
+
+
+def confirm_pending(
+    llm: LLM, turns: list[Turn], context: list[Turn], pending: list[MemoryRecord]
+) -> list[Confirmation]:
+    """Ask the LLM which pending memories the user's own words confirm; each comes back with the
+    memory's hash (as shown) and the user's quote, for Memory.apply_confirmations to check."""
+    if not pending or not any(t.role == "user" for t in turns):
+        return []
+    system, user = build_confirm_prompt(turns, context, pending)
+    out = llm.complete_json(system, user, CONFIRM_SCHEMA)
+    items = out.get("confirmations") if isinstance(out, dict) else None
+    if not isinstance(items, list):
+        raise LLMError("confirmation response has no 'confirmations' list")
+    found: dict[str, Confirmation] = {}
+    for n, item in enumerate(items):
+        index = item.get("id") if isinstance(item, dict) else None
+        quote = item.get("quote") if isinstance(item, dict) else None
+        if type(index) is not int or not 0 <= index < len(pending) or not isinstance(quote, str) or not quote.strip():
+            log.warning("dropping invalid confirmation #%d", n)
+            continue
+        m = pending[index]
+        found.setdefault(m.id, Confirmation(memory_id=m.id, hash=m.hash, quote=quote.strip()))
+    return list(found.values())

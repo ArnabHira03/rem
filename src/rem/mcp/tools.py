@@ -1,7 +1,9 @@
 """rem's seven MCP memory tools, and `rem mcp` (serve them over stdio).
 
 The tools talk to the daemon through `RemClient` only. Facts an agent adds are stored as
-assistant-generated and unverified; every write is recorded with actor "mcp".
+assistant-generated and unverified; every write is recorded with actor "mcp". An agent cannot verify
+a memory: confirm_memory only requests it, and the extractor verifies the memory only when the user's
+own message confirms it. list_memories never shows another repository's project memories.
 """
 
 from __future__ import annotations
@@ -27,6 +29,9 @@ INSTRUCTIONS = (
 SCOPES = ["global", "system", "project"]
 STATUSES = ["verified", "unverified"]
 NONE_FOUND = "No memories found."
+CONFIRM_PENDING_NOTE = (
+    "rem verifies it only if the user's own message in this conversation confirms it, which it checks "
+    "after this turn ends; otherwise it stays unverified.")
 
 _SCOPE = {"type": "string", "enum": SCOPES}
 _ID = {"type": "string", "description": "The memory id."}
@@ -96,18 +101,29 @@ def build_tools(get_client: Callable[[], RemClient], cwd: Path) -> list[Tool]:
         scope = a.str("scope", choices=SCOPES)
         return _lines([search_line(m) for m in get_client().search(query, cwd, limit, scope)])
 
+    def in_project() -> bool:
+        return (project_root(cwd) / ".git").exists()
+
     def list_memories(args: dict) -> str:
         a = _Args(args, {"scope", "status", "limit"})
         scope = a.str("scope", choices=SCOPES)
         status = a.str("status", choices=STATUSES)
         limit = a.int("limit", lo=1, hi=200, default=50)
-        return _lines([memory_line(m) for m in get_client().list(scope, status)[:limit]])
+        has_project = in_project()
+        if scope == "project" and not has_project:
+            raise ValueError(f"no project detected: rem mcp is running in {cwd}, which is not in a git repository; "
+                             "only the current repository's project memories can be listed")
+        # the daemon keeps only cwd's project's project memories; outside a repository there are none
+        rows = get_client().list(scope, status, cwd=cwd)
+        if not has_project:
+            rows = [m for m in rows if m["scope"] != "project"]
+        return _lines([memory_line(m) for m in rows[:limit]])
 
     def add_memory(args: dict) -> str:
         a = _Args(args, {"text", "scope"})
         text = a.str("text", required=True)
         scope = a.str("scope", choices=SCOPES, default="global")
-        if scope == "project" and not (project_root(cwd) / ".git").exists():
+        if scope == "project" and not in_project():
             # the server's cwd may be / or $HOME: never invent a project from it
             raise ValueError(f"project scope needs a git repository; rem mcp is running in {cwd}")
         m = get_client().add(text, scope, cwd, provenance="assistant_generated", status="unverified",
@@ -116,7 +132,11 @@ def build_tools(get_client: Callable[[], RemClient], cwd: Path) -> list[Tool]:
 
     def confirm_memory(args: dict) -> str:
         id_ = _Args(args, {"id"}).str("id", required=True)
-        return "Confirmed: " + memory_line(get_client().confirm(id_, actor="mcp"))
+        # never POST /confirm: an agent's word is not the user's, so this only asks the extractor to check
+        m = get_client().request_confirmation(id_, actor="mcp")
+        if m["status"] == "verified":
+            return "Already verified: " + memory_line(m)
+        return ("Confirmation requested (still unverified): " + memory_line(m) + "\n" + CONFIRM_PENDING_NOTE)
 
     def update_memory(args: dict) -> str:
         a = _Args(args, {"id", "text"})
@@ -146,7 +166,8 @@ def build_tools(get_client: Callable[[], RemClient], cwd: Path) -> list[Tool]:
              }, ["query"]),
              guarded(search_memory)),
         Tool("list_memories",
-             "List stored memories, newest first, optionally filtered by scope and status.",
+             "List stored memories, newest first, optionally filtered by scope and status. Project memories "
+             "are only the current git repository's.",
              _schema({
                  "scope": _SCOPE,
                  "status": {"type": "string", "enum": STATUSES},
@@ -164,8 +185,10 @@ def build_tools(get_client: Callable[[], RemClient], cwd: Path) -> list[Tool]:
              }, ["text"]),
              guarded(add_memory)),
         Tool("confirm_memory",
-             "Mark a memory as confirmed true. Only call this when the user has explicitly confirmed the fact "
-             "in this conversation; never to verify your own claims.",
+             "Ask rem to verify a memory the user has just confirmed in this conversation (for example by "
+             "answering yes when you asked about it). This does not verify it by itself: rem verifies it only if "
+             "the user's own message confirms it, and otherwise it stays unverified. Never use it for your own "
+             "claims.",
              _schema({"id": _ID}, ["id"]),
              guarded(confirm_memory)),
         Tool("update_memory",

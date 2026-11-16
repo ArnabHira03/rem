@@ -202,7 +202,7 @@ async def test_user_restatement_corroborates_across_jobs(svc):
     assert [(h.event, h.job_id) for h in await svc.history(m.id)] == [
         (HistoryEvent.ADD, "job:1"), (HistoryEvent.CORROBORATE, "job:2")]
     _, cached = svc.memory.db.get_extraction(2)
-    assert json.loads(cached)[0]["restates"] == m.id  # the resolved id is what a replay uses
+    assert json.loads(cached)["candidates"][0]["restates"] == m.id  # the resolved id is what a replay uses
 
 
 async def test_job_without_user_turn_cannot_assert_user_facts(svc):
@@ -220,3 +220,90 @@ async def test_in_daemon_thread_resolves_on_base_exception():
     with pytest.raises(RuntimeError, match="aborted: SystemExit") as e:
         await asyncio.wait_for(_in_daemon_thread(boom), 2)
     assert isinstance(e.value.__cause__, SystemExit)
+
+
+# ---- an agent's confirmation request is settled by the user's own words (M5) ---------------------
+
+
+async def _agent_fact(svc, text="Prefers tabs over spaces"):
+    return await svc.add(text, scope=Scope.GLOBAL, cwd=None, provenance=P.ASSISTANT_GENERATED,
+                         status=S.UNVERIFIED, source="mcp", actor="mcp")
+
+
+async def _exchange(svc, user, reply, request_ids=(), session="s1"):
+    """One Claude Code exchange: the prompt is held, the agent calls confirm_memory, Stop enqueues the job."""
+    await svc.ingest("claude-code", session, None, [Turn("user", user)], enqueue=False)
+    for mid in request_ids:
+        await svc.request_confirmation(mid, actor="mcp")
+    await svc.ingest("claude-code", session, None, [Turn("assistant", reply)])
+
+
+NO_FACTS = {"facts": []}
+
+
+async def test_users_reply_confirms_a_requested_memory(svc):
+    m = await _agent_fact(svc)
+    llm = FakeLLM([NO_FACTS, {"confirmations": [{"id": 0, "quote": "yes, remember that"}]}])
+    await _exchange(svc, "Yes, remember that.", "Saved.", [m.id])
+    await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
+    assert m.text not in llm.calls[0][1]  # the extraction prompt never sees the agent's claim
+    assert "[0] Prefers tabs over spaces" in llm.calls[1][1] and "user: Yes, remember that." in llm.calls[1][1]
+    got = await svc.get(m.id)
+    assert got.status == S.VERIFIED and got.provenance == P.USER_CONFIRMED and got.corroborated_by == "job:1"
+    assert [(h.event, h.actor) for h in await svc.history(m.id)] == [
+        (HistoryEvent.ADD, "mcp"), (HistoryEvent.CONFIRM_REQUEST, "mcp"), (HistoryEvent.CONFIRM, "extractor")]
+    _, cached = svc.memory.db.get_extraction(1)
+    assert json.loads(cached)["confirmations"] == [{"memory_id": m.id, "hash": m.hash, "quote": "yes, remember that"}]
+
+
+async def test_llm_claim_without_the_users_words_leaves_it_unverified(svc):
+    m = await _agent_fact(svc)
+    # the LLM "confirms" with the assistant's words: the literal check rejects it
+    llm = FakeLLM([NO_FACTS, {"confirmations": [{"id": 0, "quote": "The user prefers tabs over spaces"}]}])
+    await _exchange(svc, "ok, now run the tests", "Done. The user prefers tabs over spaces.", [m.id])
+    await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
+    got = await svc.get(m.id)
+    assert got.status == S.UNVERIFIED and got.confirm_requested_at is not None
+    assert HistoryEvent.CONFIRM not in [h.event for h in await svc.history(m.id)]
+
+
+async def test_extractor_restating_a_requested_memory_does_not_verify_it(svc):
+    m = await _agent_fact(svc)
+    llm = FakeLLM([{"facts": [{"text": m.text, "scope": "global", "origin": "user", "restates": None}]},
+                   {"confirmations": []}])
+    await _exchange(svc, "sure", "Saved.", [m.id])
+    await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
+    assert (await svc.get(m.id)).status == S.UNVERIFIED
+    assert [x.id for x in await svc.list(scope=None, status=None, project_id=None)] == [m.id]
+
+
+async def test_request_from_an_earlier_exchange_is_not_offered(svc):
+    m = await _agent_fact(svc)
+    handler = ExtractionHandler(FakeLLM([NO_FACTS, {"confirmations": []}, NO_FACTS]), ExtractionConfig())
+    await _exchange(svc, "should we remember my indentation?", "Requested.", [m.id])
+    await run_worker_until_done(svc, handler)
+    assert len(handler.llm.calls) == 2  # job 1 offered the request (the LLM didn't confirm it)
+    await _exchange(svc, "yep, run the tests", "Running tests.")  # a yes to something else, later
+    await run_worker_until(svc, handler, lambda st: st["jobs"]["done"] == 2)
+    assert len(handler.llm.calls) == 2 + 1  # job 2: extraction only, no confirmation call
+    assert (await svc.get(m.id)).status == S.UNVERIFIED
+
+
+async def test_job_without_a_user_turn_is_not_asked_to_confirm(svc):
+    m = await _agent_fact(svc)
+    llm = FakeLLM([NO_FACTS])
+    await svc.request_confirmation(m.id, actor="mcp")
+    await svc.ingest("claude-code", "s1", None, [Turn("assistant", "The user said yes.")])
+    await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
+    assert len(llm.calls) == 1
+    assert (await svc.get(m.id)).status == S.UNVERIFIED
+
+
+async def test_cached_extraction_from_before_m5_still_replays(svc):
+    await svc.ingest("claude-code", "s1", None, [Turn("user", "I prefer uv over pip")])
+    await svc.store.run(svc.memory.db.save_extraction, 1, "fake", json.dumps(
+        [{"text": "Prefers uv over pip", "scope": "global", "origin": "user", "restates": None}]))
+    llm = FakeLLM([])  # the cache is used: no LLM call
+    await run_worker_until_done(svc, ExtractionHandler(llm, ExtractionConfig()))
+    [m] = await svc.list(scope=None, status=None, project_id=None)
+    assert m.text == "Prefers uv over pip" and m.status == S.VERIFIED and llm.calls == []

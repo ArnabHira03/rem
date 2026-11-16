@@ -41,7 +41,10 @@ class RemService:
     async def context(self, cwd: Path | None, max_chars: int):
         return await self.store.run(self.memory.context, cwd, max_chars)
 
-    async def list(self, *, scope: Scope | None, status: Status | None, project_id: int | None):
+    async def list(self, *, scope: Scope | None, status: Status | None, project_id: int | None,
+                   cwd: Path | None = None):
+        if cwd is not None:  # only cwd's project's memories (project_root is filesystem-only)
+            return await self.store.run(self.memory.list_for, cwd, scope=scope, status=status)
         return await self.store.run(self.memory.list, scope=scope, status=status, project_id=project_id)
 
     async def get(self, id: str):
@@ -55,6 +58,9 @@ class RemService:
 
     async def confirm(self, id: str, *, actor: str):
         return await self.store.run(self.memory.confirm, id, actor=actor)
+
+    async def request_confirmation(self, id: str, *, actor: str):
+        return await self.store.run(self.memory.request_confirmation, id, actor=actor)
 
     async def history(self, id: str):
         return await self.store.run(self.memory.history, id)
