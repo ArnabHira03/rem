@@ -30,12 +30,12 @@ def rel(id, src, dst, *, type="uses", scope="global", project_id=None, status="v
             "status": status, "scope": scope, "project_id": project_id, "created_at": "t", "updated_at": "t"}
 
 
-def mem(id, text="some fact", *, scope="global", project_id=None, status="verified", entity_ids=()):
+def mem(id, text="some fact", *, scope="global", project_id=None, status="verified", entity_ids=(), job_id=None):
     names = {1: "one", 2: "two"}
     return {"id": id, "text": text, "scope": scope, "project_id": project_id,
             "project_name": names.get(project_id), "provenance": "user_asserted", "status": status,
             "agent_claim": False, "entity_ids": list(entity_ids), "source": "extraction",
-            "created_at": "t", "updated_at": "t"}
+            "job_id": job_id, "created_at": "t", "updated_at": "t"}
 
 
 def view(s, project="all", scopes=ALL, show_memories=False):
@@ -360,3 +360,14 @@ def test_relation_identity_scope_and_other_entity_id():
     m2 = next(m for m in all_members(v) if m["entity_id"] == "e2")
     assert m2["relations"][0]["other_entity_id"] == "e3"
     assert {e["id"]: e["scope"] for e in v["edges"]} == {"rel:r1": "project", "rel:r2": "global"}
+
+
+def test_memory_nodes_and_entries_carry_job_id():
+    s = snap(entities=[ent("e1", "uv")],
+             memories=[mem("m1", entity_ids=["e1"], job_id="job:7"), mem("m2", entity_ids=["e1"])])
+    v = view(s, show_memories=True)
+    n = nodes_by_id(v)
+    assert n["mem:m1"]["job_id"] == "job:7"
+    assert n["mem:m2"]["job_id"] is None
+    assert {m["id"]: m["job_id"] for m in n["ent:uv"]["memories"]} == {"m1": "job:7", "m2": None}
+    assert {m["id"]: m["job_id"] for m in n["ent:uv"]["members"][0]["memories"]} == {"m1": "job:7", "m2": None}

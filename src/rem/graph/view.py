@@ -89,7 +89,7 @@ def build_view(
         return {"id": m["id"], "text": m["text"], "status": m["status"], "provenance": m["provenance"],
                 "scope": m["scope"], "project_id": m.get("project_id"),
                 # prefer the memory's own stored project name
-                "project_name": m.get("project_name") or pname(m)}
+                "project_name": m.get("project_name") or pname(m), "job_id": m.get("job_id")}
 
     mem_nodes: dict[str, set[str]] = {mid: set() for mid in memories}
     for mid, eid in links:
@@ -132,7 +132,7 @@ def build_view(
                 "verified": m["status"] == "verified", "status": m["status"], "provenance": m["provenance"],
                 "scope": m["scope"], "project_id": m.get("project_id"),
                 # prefer the memory's own stored project name
-                "project_name": m.get("project_name") or pname(m),
+                "project_name": m.get("project_name") or pname(m), "job_id": m.get("job_id"),
                 "entity_nodes": sorted(mem_nodes[mid]),
             })
         for mid, node_ids in mem_nodes.items():

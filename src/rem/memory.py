@@ -86,7 +86,7 @@ CONTEXT_HEADER = "Facts rem remembers from earlier sessions (verified):"
 
 
 MEMORY_GRAPH_FIELDS = ("id", "text", "scope", "project_id", "project_name", "provenance", "status", "agent_claim",
-                       "entity_ids", "source", "created_at", "updated_at")
+                       "entity_ids", "source", "job_id", "created_at", "updated_at")
 
 
 class Memory:

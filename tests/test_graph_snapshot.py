@@ -26,6 +26,7 @@ def test_graph_snapshot_returns_stored_records_verbatim(mem):
     for m in snap["memories"]:
         assert set(m) == set(MEMORY_GRAPH_FIELDS)
         assert m == {k: stored[m["id"]][k] for k in MEMORY_GRAPH_FIELDS}
+        assert m["job_id"] == "job:1"  # the graph links a memory to the run that extracted it
 
 
 def test_graph_snapshot_lists_projects_and_current_project(mem, tmp_path):

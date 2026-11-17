@@ -151,12 +151,53 @@ def test_api_rejects_bad_filters():
             api.view(bad)
 
 
-def test_api_exposes_only_its_three_methods():
+def test_api_exposes_only_read_methods():
     from rem.graph.window import Api
 
     api = Api(FakeClient([snapshot()]), cwd=None)
-    public = sorted(n for n in dir(api) if not n.startswith("_"))
-    assert public == ["initial", "refresh", "view"]
+    public = {n for n in dir(api) if not n.startswith("_")}
+    assert public == {"initial", "view", "refresh", "jobs", "job"}
+
+
+class FakeJobsClient:
+    def __init__(self):
+        self.calls = []
+
+    def jobs(self, **kwargs):
+        self.calls.append(("jobs", kwargs))
+        return {"runs": [], "next_before": None}
+
+    def job(self, id):
+        self.calls.append(("job", id))
+        return {"run": {"id": id}}
+
+
+def test_api_jobs_and_job():
+    from rem.graph.window import Api
+
+    client = FakeJobsClient()
+    api = Api(client, cwd=None)
+    assert api.jobs({"project": "3", "status": "pending", "flagged": True, "before": None}) == \
+        {"runs": [], "next_before": None}
+    assert client.calls[-1] == ("jobs", {"project_id": 3, "status": "pending", "flagged": True, "before": None})
+    api.jobs({"project": "all", "status": "all", "flagged": False, "before": 40})
+    assert client.calls[-1] == ("jobs", {"project_id": None, "status": None, "flagged": False, "before": 40})
+    assert api.job("12") == {"run": {"id": 12}}
+    assert client.calls[-1] == ("job", 12)
+    api.job(5)
+    assert client.calls[-1] == ("job", 5)
+
+    n = len(client.calls)
+    base = {"project": "all", "status": "all", "flagged": False, "before": None}
+    for bad in ({**base, "extra": 1}, {"project": "all"}, {**base, "status": "processing"}, {**base, "status": None},
+                {**base, "flagged": "yes"}, {**base, "before": "7"}, {**base, "before": True},
+                {**base, "project": "x"}, "nope"):
+        with pytest.raises(ValueError):
+            api.jobs(bad)
+    for bad in ("x", "", None, True, 1.5, "-3"):
+        with pytest.raises(ValueError):
+            api.job(bad)
+    assert len(client.calls) == n  # nothing invalid reaches the client
 
 
 def test_window_module_imports_without_qt():
