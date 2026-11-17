@@ -127,6 +127,36 @@ def build_app(service: RemService) -> Starlette:
     async def graph(request: Request):
         return _json(await service.graph(_path(request.query_params.get("cwd"))))
 
+    async def jobs(request: Request):
+        q = request.query_params
+
+        def integer(name: str) -> int | None:
+            try:
+                return int(q[name]) if q.get(name) else None
+            except ValueError:
+                raise ValueError(f"{name} must be an integer") from None
+
+        limit = integer("limit") if q.get("limit") else 50
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        status = q.get("status") or None
+        if status not in (None, "done", "failed", "pending"):
+            raise ValueError("status must be done, failed or pending")
+        if q.get("flagged", "false") not in ("true", "false"):
+            raise ValueError("flagged must be true or false")
+        return _json(await service.jobs(project_id=integer("project_id"), status=status,
+                                        flagged=q.get("flagged") == "true", limit=limit, before=integer("before")))
+
+    async def job(request: Request):
+        try:
+            job_id = int(request.path_params["id"])
+        except ValueError:
+            raise ValueError("job id must be an integer") from None
+        run = await service.job(job_id)
+        if run is None:
+            raise MemoryNotFound(f"job {job_id}")
+        return _json(run)
+
     async def get(request: Request):
         mid = request.path_params["id"]
         rec = await service.get(mid)
@@ -202,6 +232,8 @@ def build_app(service: RemService) -> Starlette:
             Route("/entities", list_entities, methods=["GET"]),
             Route("/relations", relations, methods=["GET"]),
             Route("/graph", graph, methods=["GET"]),
+            Route("/jobs", jobs, methods=["GET"]),
+            Route("/jobs/{id}", job, methods=["GET"]),
             Route("/memories/{id}", get, methods=["GET"]),
             Route("/memories/{id}", update, methods=["PATCH"]),
             Route("/memories/{id}", delete, methods=["DELETE"]),

@@ -1,7 +1,7 @@
 """The `rem graph` window: one self-contained HTML page in a pywebview (Qt) window, fed by a read-only `Api`.
 
 Lazy imports only: importing this module never imports webview, qtpy or PySide6 (the optional `graph` extra).
-The `Api` only reads (`RemClient.graph`) and builds views; nothing here writes to rem.
+The `Api` only reads (`RemClient.graph`, `jobs`, `job`) and builds views; nothing here writes to rem.
 """
 
 import os
@@ -15,6 +15,8 @@ from rem.graph.view import ALL_SCOPES, build_view, default_filters
 
 TITLE = "rem — graph"
 _FILTER_KEYS = {"project", "scopes", "show_memories"}
+_JOB_FILTER_KEYS = {"project", "status", "flagged", "before"}
+_JOB_STATUSES = ("all", "done", "failed", "pending")
 
 
 def _static_text(*parts: str) -> str:
@@ -74,8 +76,33 @@ def _filters(raw: Any) -> dict:
     return {"project": _project(raw["project"]), "scopes": list(scopes), "show_memories": raw["show_memories"]}
 
 
+def _job_id(value: Any) -> int:
+    """A job id as an int. The page may hand it over as a string."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    raise ValueError(f"invalid job id: {value!r}")
+
+
+def _job_filters(raw: Any) -> dict:
+    if not isinstance(raw, dict) or set(raw) != _JOB_FILTER_KEYS:
+        raise ValueError(f"job filters must have exactly the keys {sorted(_JOB_FILTER_KEYS)}")
+    if raw["status"] not in _JOB_STATUSES:
+        raise ValueError(f"invalid status: {raw['status']!r}")
+    if not isinstance(raw["flagged"], bool):
+        raise ValueError(f"invalid flagged: {raw['flagged']!r}")
+    before = raw["before"]
+    if before is not None and (not isinstance(before, int) or isinstance(before, bool)):
+        raise ValueError(f"invalid before: {before!r}")
+    project = _project(raw["project"])
+    return {"project_id": None if project == "all" else project,
+            "status": None if raw["status"] == "all" else raw["status"],
+            "flagged": raw["flagged"], "before": before}
+
+
 class Api:
-    """The js_api object: pywebview exposes its public attributes to the page, so only the three methods are public."""
+    """The js_api object: pywebview exposes its public attributes to the page, so only the read methods are public."""
 
     def __init__(self, client, cwd: Path | None):
         self._client = client
@@ -109,6 +136,14 @@ class Api:
         if f["project"] != "all" and f["project"] not in {p["id"] for p in snap.get("projects", [])}:
             f["project"] = "all"
         return self._payload(snap, f)
+
+    def jobs(self, filters: dict) -> dict:
+        """One page of extraction runs (the `/jobs` body)."""
+        return self._client.jobs(**_job_filters(filters))
+
+    def job(self, job_id) -> dict:
+        """One extraction run in full (the `/jobs/{id}` body)."""
+        return self._client.job(_job_id(job_id))
 
 
 def import_webview():

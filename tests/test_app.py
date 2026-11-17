@@ -262,3 +262,21 @@ async def test_graph_endpoint(api):
     body = r.json()
     assert set(body) == {"generated_at", "current_project_id", "projects", "entities", "relations", "memories"}
     assert body["entities"] == body["relations"] == body["memories"] == []
+
+
+async def test_jobs_routes(api):
+    r = await api.get("/jobs")
+    assert r.status_code == 200 and r.json() == {"runs": [], "next_before": None}
+    for bad in ({"limit": "0"}, {"limit": "201"}, {"limit": "x"}, {"before": "x"}, {"project_id": "x"},
+                {"status": "bogus"}, {"status": "processing"}, {"flagged": "maybe"}):
+        assert (await api.get("/jobs", params=bad)).status_code == 400, bad
+    ok = {"limit": "200", "status": "pending", "flagged": "true", "before": "5", "project_id": "1"}
+    assert (await api.get("/jobs", params=ok)).status_code == 200
+    r = await api.get("/jobs/999999")
+    assert r.status_code == 404 and r.json()["error"] == "not_found"
+    assert (await api.get("/jobs/abc")).status_code == 400
+    await api.post("/ingest", json={"source": "cli", "session_id": "s", "turns": [{"role": "user", "content": "hi"}]})
+    (item,) = (await api.get("/jobs")).json()["runs"]
+    detail = (await api.get(f"/jobs/{item['id']}")).json()
+    assert set(detail) == {"run", "turns", "context_turns", "facts", "confirmations", "writes", "other_memory_writes"}
+    assert detail["run"]["id"] == item["id"]

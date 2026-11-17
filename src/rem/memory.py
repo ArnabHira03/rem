@@ -86,7 +86,7 @@ CONTEXT_HEADER = "Facts rem remembers from earlier sessions (verified):"
 
 
 MEMORY_GRAPH_FIELDS = ("id", "text", "scope", "project_id", "project_name", "provenance", "status", "agent_claim",
-                       "entity_ids", "source", "created_at", "updated_at")
+                       "entity_ids", "source", "job_id", "created_at", "updated_at")
 
 
 class Memory:
@@ -176,6 +176,17 @@ class Memory:
         points = self.vectors.list_points(self.relation_col, {"scope": str(scope), "project_id": project_id})
         recs = [RelationRecord.from_payload(p.payload) for p in points]
         return [r for r in recs if memory_id in r.memory_ids]
+
+    def relation_ids_by_memory(self, scope: Scope, project_id: int | None) -> dict[str, list[str]]:
+        """{memory_id: ids of the relations citing it} for one (scope, project) bucket, in a single scan."""
+        scope, project_id = bucket(scope, project_id)
+        points = self.vectors.list_points(self.relation_col, {"scope": str(scope), "project_id": project_id})
+        out: dict[str, list[str]] = {}
+        for p in points:
+            rec = RelationRecord.from_payload(p.payload)
+            for mid in rec.memory_ids:
+                out.setdefault(mid, []).append(rec.id)
+        return out
 
     def list_relations(
         self, *, scope: Scope | None = None, project_id: int | None = None, entity: str | None = None

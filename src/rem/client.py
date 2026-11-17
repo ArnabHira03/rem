@@ -76,6 +76,14 @@ class RemClient:
     def graph(self, cwd=None) -> dict:
         return self._call("GET", "/graph", params={"cwd": str(cwd)} if cwd else {})
 
+    def jobs(self, project_id=None, status=None, flagged=False, limit=50, before=None) -> dict:
+        params = {"project_id": project_id, "status": status, "flagged": "true" if flagged else None,
+                  "limit": limit, "before": before}
+        return self._call("GET", "/jobs", params={k: v for k, v in params.items() if v is not None})
+
+    def job(self, id: int) -> dict:
+        return self._call("GET", f"/jobs/{id}", ref=id)
+
     def get(self, id) -> dict:
         return self._call("GET", f"/memories/{id}", ref=id)
 

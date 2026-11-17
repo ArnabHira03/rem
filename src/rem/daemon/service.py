@@ -14,6 +14,7 @@ from rem.models import Provenance, Scope, Status
 from rem import reembed as reembed_mod
 from rem.projects import resolve_project
 from rem.storage.queue import IngestStore, Turn
+from rem.daemon import runs
 from rem.daemon.store_thread import StoreThread
 
 
@@ -62,6 +63,12 @@ class RemService:
 
     async def graph(self, cwd: Path | None):
         return await self.store.run(self.memory.graph_snapshot, cwd)
+
+    async def jobs(self, **filters) -> dict:
+        return await self.store.run(runs.list_runs, self.memory, self.ingest_store, **filters)
+
+    async def job(self, id: int) -> dict | None:
+        return await self.store.run(runs.get_run, self.memory, self.ingest_store, id)
 
     async def get(self, id: str):
         return await self.store.run(self.memory.get, id)

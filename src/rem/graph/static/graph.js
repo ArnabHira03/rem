@@ -1,4 +1,4 @@
-/* rem graph window. Read-only: it only calls api.initial / api.view / api.refresh.
+/* rem graph window. Read-only: it only calls api.initial / api.view / api.refresh / api.jobs / api.job.
  * Every piece of text from data enters the page through textContent or createElement, never as markup. */
 (function () {
   "use strict";
@@ -355,6 +355,13 @@
     body.appendChild(el("div", "fulltext", n.text));
     body.appendChild(kv([["status", mark(n.status) + " " + n.status], ["provenance", n.provenance],
                          ["scope", n.scope], ["project", projectText(n)], ["id", copyId(n.id.replace(/^mem:/, ""))]]));
+    var job = /^job:(\d+)$/.exec(n.job_id || "");
+    if (job) {
+      var go = el("button", "link", "show the run that extracted this");
+      go.type = "button";
+      go.addEventListener("click", function () { showRun(Number(job[1])); });
+      body.appendChild(go);
+    }
     body.appendChild(el("h4", null, "linked entities"));
     body.appendChild(list(n.entity_nodes, function (nid) {
       var target = info.get(nid);
@@ -439,8 +446,270 @@
     }, fail);
   }
 
+
+  // ---------- tabs ----------
+  var tab = "graph";
+  var graphStale = false;   // the project changed while the graph was hidden
+  var extStale = true;      // the run list needs (re)loading when the Extraction tab shows
+  function switchTab(name) {
+    if (name !== "graph" && name !== "extraction") return;
+    tab = name;
+    document.body.dataset.tab = name;
+    document.querySelectorAll("button.tab").forEach(function (b) {
+      b.setAttribute("aria-selected", b.dataset.tab === name ? "true" : "false");
+    });
+    setStatus("");
+    if (name === "graph") {
+      cy.resize();
+      if (graphStale) { graphStale = false; update(); }
+    } else if (extStale) {
+      loadRuns();
+    }
+  }
+
+  // ---------- extraction runs ----------
+  var REASONS = {
+    duplicate: "duplicate of an earlier fact in this run",
+    no_project: "project fact in a session with no project",
+    existing_or_skipped: "matched an existing memory or skipped"
+  };
+  var nextBefore = null;
+  var selectedRun = null;
+  var runsSeq = 0, runSeq = 0;
+
+  function when(iso) {
+    var d = iso ? new Date(iso) : null;
+    return d && !isNaN(d) ? d.toLocaleString() : String(iso || "—");
+  }
+  function badge(rule, reason) {
+    var b = el("span", "badge", rule);
+    if (reason) b.title = reason;
+    return b;
+  }
+  function badges(flags) {
+    var wrap = el("div", "flags");
+    flags.forEach(function (f) { wrap.appendChild(badge(f.rule, f.reason)); });
+    return wrap;
+  }
+  function readJobFilters(before) {
+    return { project: $("project").value, status: $("run-status").value,
+             flagged: $("flagged-only").checked, before: before === undefined ? null : before };
+  }
+
+  function runItem(r) {
+    var li = el("li");
+    li.dataset.id = String(r.id);
+    if (r.id === selectedRun) li.className = "selected";
+    li.appendChild(el("span", "when", when(r.created_at)));
+    var counts = el("span", "counts", r.n_proposed + " → " + r.n_added);
+    counts.title = r.n_proposed + " proposed, " + r.n_added + " added";
+    if (r.flags && r.flags.length) {
+      var b = badge(String(r.flags.length), r.flags.join(", "));
+      counts.insertBefore(b, counts.firstChild);
+    }
+    li.appendChild(counts);
+    li.appendChild(el("span", "sub muted", projectText(r) + " · " + r.status + " · run #" + r.id));
+    li.addEventListener("click", function () { selectRun(r.id); });
+    return li;
+  }
+  function markSelected() {
+    document.querySelectorAll("#run-list li").forEach(function (li) {
+      li.classList.toggle("selected", li.dataset.id === String(selectedRun));
+    });
+  }
+
+  // Without `before`, replaces the list; with it, appends the next page.
+  function loadRuns(before) {
+    var append = before !== undefined && before !== null;
+    var mine = ++runsSeq;
+    extStale = false;
+    if (!append) {
+      // a new filter: drop the old cursor now, so "load more" can't append a page of the old filters
+      nextBefore = null;
+      $("load-more").hidden = true;
+    }
+    var filters = readJobFilters(append ? before : null);
+    setStatus("loading runs…");
+    api.jobs(filters).then(function (page) {
+      if (mine !== runsSeq) return;
+      setStatus("");
+      var ul = $("run-list");
+      if (!append) clear(ul);
+      page.runs.forEach(function (r) { ul.appendChild(runItem(r)); });
+      nextBefore = page.next_before === undefined ? null : page.next_before;
+      $("load-more").hidden = nextBefore === null;
+      var empty = $("runs-empty");
+      empty.hidden = ul.childNodes.length > 0;
+      empty.textContent = !filters.flagged ? "no extraction runs"
+        : nextBefore !== null ? "no flagged runs in the jobs scanned so far" : "no flagged runs";
+    }, fail);
+  }
+
+  function selectRun(id) {
+    var mine = ++runSeq;
+    selectedRun = id;
+    markSelected();
+    api.job(id).then(function (body) {
+      if (mine === runSeq) renderRun(body);
+    }, fail);
+  }
+
+  // From the graph: works even when the run isn't in the loaded list.
+  function showRun(id) {
+    switchTab("extraction");
+    selectRun(id);
+  }
+
+  function turnEl(t) {
+    var d = el("div", "turn");
+    var head = el("div");
+    head.appendChild(el("span", "role", t.role));
+    if (t.ts) head.appendChild(el("span", "ts", when(t.ts)));
+    d.appendChild(head);
+    d.appendChild(el("div", "fulltext", t.content));
+    return d;
+  }
+
+  function proposedCell(f) {
+    var c = el("div", "cell fact");
+    c.appendChild(el("div", "text", (f.index + 1) + ". " + f.text));
+    var origin = f.origin_proposed === f.origin_effective ? f.origin_effective
+      : f.origin_proposed + " → " + f.origin_effective;
+    c.appendChild(el("div", "meta", f.scope + " · " + origin + (f.restates ? " · restates " + f.restates : "")));
+    if (f.entities && f.entities.length) {
+      c.appendChild(el("div", "meta", "entities: " + f.entities.map(function (e) {
+        return e.name + " · " + e.type;
+      }).join(", ")));
+    }
+    if (f.relations && f.relations.length) {
+      var ul = el("ul", "meta");
+      f.relations.forEach(function (r) { ul.appendChild(el("li", null, r.source + " → " + r.type + " → " + r.target)); });
+      c.appendChild(ul);
+    }
+    if (f.flags && f.flags.length) c.appendChild(badges(f.flags));
+    return c;
+  }
+
+  function storedCell(f) {
+    var c = el("div", "cell");
+    var o = f.outcome || { kind: "none" };
+    var now = o.memory_now;
+    var line;
+    if (o.kind === "none") {
+      line = el("div", "outcome", "none");
+      c.appendChild(line);
+      c.appendChild(el("div", "meta", REASONS[o.reason] || o.reason || ""));
+      return c;
+    }
+    var label = o.kind === "added" ? "added" : "corroborated";
+    line = el("div", "outcome", now ? label + " " + mark(now.status) + " " + now.status : label + ", deleted since");
+    if (o.memory_id) line.title = "memory " + o.memory_id;
+    c.appendChild(line);
+    // no run's ADD or CORROBORATE makes a memory user_confirmed: only the user's confirmation does
+    if (now && now.provenance === "user_confirmed") c.appendChild(el("div", "meta", "confirmed since"));
+    if (now && String(now.text).trim() !== String(f.text).trim()) c.appendChild(el("div", "meta", "now: " + now.text));
+    return c;
+  }
+
+  function writesCell(body) {
+    var c = el("div", "cell");
+    var other = body.other_memory_writes || [];
+    if (other.length) {
+      // memory writes no fact accounts for: confirmations, and adds or corroborations not credited
+      c.appendChild(el("h3", null, "other memory writes"));
+      var mul = el("ul");
+      other.forEach(function (w) {
+        var now = w.memory_now;
+        var text = now ? now.text : (w.new_value || w.target_id);
+        var li = el("li", null, "memory " + w.event.toLowerCase() + " " + text + (now ? " " + mark(now.status) : ", deleted since"));
+        li.title = "memory " + w.target_id;
+        mul.appendChild(li);
+      });
+      c.appendChild(mul);
+    }
+    var confirmations = body.confirmations || [];
+    if (confirmations.length) {
+      var confirmed = {};
+      other.forEach(function (w) { if (w.event === "CONFIRM") confirmed[w.target_id] = true; });
+      c.appendChild(el("h3", null, "confirmations"));
+      var cul = el("ul");
+      confirmations.forEach(function (x) {
+        var id = x.memory_id || x.id || "?";
+        var li = el("li", null, "memory " + id + (confirmed[id] ? " · confirmed" : " · not applied"));
+        if (x.quote) li.appendChild(el("div", "meta fulltext", "user: \u201c" + x.quote + "\u201d"));
+        cul.appendChild(li);
+      });
+      c.appendChild(cul);
+    }
+    c.appendChild(el("h3", null, "entity and relation writes"));
+    var rows = (body.writes || []).filter(function (w) { return w.target_kind === "entity" || w.target_kind === "relation"; });
+    if (!rows.length) { c.appendChild(el("div", "meta", "none")); return c; }
+    var ul = el("ul");
+    rows.forEach(function (w) {
+      var li = el("li", null, w.target_kind + " " + w.event.toLowerCase() + " " + (w.new_value || w.target_id));
+      li.title = w.target_kind + " " + w.target_id;
+      ul.appendChild(li);
+    });
+    c.appendChild(ul);
+    return c;
+  }
+
+  function place(node, row, col, span) {
+    node.style.gridColumn = String(col);
+    node.style.gridRow = span ? row + " / span " + span : String(row);
+    return node;
+  }
+
+  function renderRun(body) {
+    var run = body.run;
+    var out = $("run-body");
+    clear(out);
+    $("run-empty").hidden = true;
+    out.appendChild(el("h2", null, "run #" + run.id));
+    var meta = [run.status, projectText(run), when(run.created_at)];
+    if (run.source) meta.push(run.source);
+    if (run.model) meta.push(run.model);
+    meta.push(run.n_proposed + " proposed · " + run.n_added + " added · " + run.n_corroborated + " corroborated");
+    out.appendChild(el("div", "meta", meta.join(" · ")));
+    if (run.run_flags && run.run_flags.length) out.appendChild(badges(run.run_flags));
+    if (run.error) out.appendChild(el("div", "error fulltext", "error: " + run.error));
+    if (run.status === "pending" && !body.turns.length) {
+      out.appendChild(el("div", "meta", "not run yet"));
+      $("run").scrollTop = 0;
+      return;
+    }
+
+    var facts = body.facts || [];
+    var grid = el("div", "cols");
+    var conv = el("div", "conversation");
+    conv.appendChild(el("h3", null, "conversation"));
+    if (body.context_turns && body.context_turns.length) {
+      var ctx = el("details", "context");
+      ctx.appendChild(el("summary", null, "earlier context (" + body.context_turns.length + ")"));
+      body.context_turns.forEach(function (t) { ctx.appendChild(turnEl(t)); });
+      conv.appendChild(ctx);
+    }
+    if (!body.turns.length) conv.appendChild(el("div", "meta", "no turns"));
+    body.turns.forEach(function (t) { conv.appendChild(turnEl(t)); });
+    var writesRow = Math.max(facts.length, 1) + 2;
+    grid.appendChild(place(conv, 1, 1, writesRow));
+
+    grid.appendChild(place(el("h3", null, "model proposed"), 1, 2));
+    grid.appendChild(place(el("h3", null, "stored"), 1, 3));
+    if (!facts.length) grid.appendChild(place(el("div", "meta", "no facts proposed"), 2, 2));
+    facts.forEach(function (f, i) {
+      grid.appendChild(place(proposedCell(f), i + 2, 2));
+      grid.appendChild(place(storedCell(f), i + 2, 3));
+    });
+    grid.appendChild(place(writesCell(body), writesRow, 3));
+    out.appendChild(grid);
+    $("run").scrollTop = 0;
+  }
+
   function wire() {
-    $("project").addEventListener("change", update);
+    $("project").addEventListener("change", function () {
+      if (tab === "graph") { update(); extStale = true; } else { loadRuns(); graphStale = true; }
+    });
     document.querySelectorAll("input.scope").forEach(function (c) { c.addEventListener("change", update); });
     $("show-memories").addEventListener("change", update);
     $("search").addEventListener("input", function () { applySearch(); });
@@ -449,7 +718,15 @@
       var hits = applySearch();
       if (hits && hits.nonempty()) cy.animate({ center: { eles: hits[0] }, duration: 200 });
     });
-    $("refresh").addEventListener("click", refresh);
+    $("refresh").addEventListener("click", function () {
+      if (tab === "graph") { refresh(); extStale = true; } else { loadRuns(); if (selectedRun !== null) selectRun(selectedRun); }
+    });
+    document.querySelectorAll("button.tab").forEach(function (b) {
+      b.addEventListener("click", function () { switchTab(b.dataset.tab); });
+    });
+    $("run-status").addEventListener("change", function () { loadRuns(); });
+    $("flagged-only").addEventListener("change", function () { loadRuns(); });
+    $("load-more").addEventListener("click", function () { if (nextBefore !== null) loadRuns(nextBefore); });
     $("panel-close").addEventListener("click", function () { cy.elements().unselect(); closePanel(); });
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") { cy.elements().unselect(); closePanel(); }
@@ -460,6 +737,7 @@
     if (started || !window.pywebview || !window.pywebview.api) return;
     started = true;
     api = window.pywebview.api;
+    document.body.dataset.tab = "graph";
     makeCy();
     wire();
     setStatus("loading…");

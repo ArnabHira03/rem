@@ -9,21 +9,34 @@
 <body>
 <header id="bar">
   <span class="brand">rem</span>
+  <span class="tabs" role="tablist">
+    <button type="button" class="tab" id="tab-graph" data-tab="graph" role="tab" aria-selected="true">Graph</button>
+    <button type="button" class="tab" id="tab-extraction" data-tab="extraction" role="tab" aria-selected="false">Extraction</button>
+  </span>
   <label>project
     <select id="project"><option value="all">all</option></select>
   </label>
-  <span class="group">
+  <span class="group graph-only">
     <label><input type="checkbox" class="scope" value="global" checked> global</label>
     <label><input type="checkbox" class="scope" value="system" checked> system</label>
     <label><input type="checkbox" class="scope" value="project" checked> project</label>
   </span>
-  <label><input type="checkbox" id="show-memories"> show memories</label>
-  <input type="search" id="search" placeholder="search entities" autocomplete="off" spellcheck="false">
+  <label class="graph-only"><input type="checkbox" id="show-memories"> show memories</label>
+  <input type="search" id="search" class="graph-only" placeholder="search entities" autocomplete="off" spellcheck="false">
+  <label class="ext-only">status
+    <select id="run-status">
+      <option value="all">all</option>
+      <option value="done">done</option>
+      <option value="failed">failed</option>
+      <option value="pending">pending</option>
+    </select>
+  </label>
+  <label class="ext-only"><input type="checkbox" id="flagged-only"> flagged only</label>
   <button type="button" id="refresh" title="Refresh from rem">⟳</button>
-  <span id="snapshot" class="muted"></span>
+  <span id="snapshot" class="muted graph-only"></span>
   <span id="status" class="muted"></span>
 </header>
-<main id="stage">
+<main id="stage" class="graph-only">
   <div id="cy"></div>
   <div id="empty" hidden>rem hasn't extracted any entities here yet</div>
   <div id="tooltip" hidden></div>
@@ -47,6 +60,17 @@
     <button type="button" id="panel-close" title="Close (Esc)">✕</button>
     <div id="panel-body"></div>
   </aside>
+</main>
+<main id="ext" class="ext-only">
+  <nav id="runs" aria-label="extraction runs">
+    <ul id="run-list"></ul>
+    <div id="runs-empty" class="muted" hidden>no extraction runs</div>
+    <button type="button" id="load-more" hidden>Load more</button>
+  </nav>
+  <section id="run" aria-label="selected run">
+    <div id="run-empty" class="muted">select a run</div>
+    <div id="run-body"></div>
+  </section>
 </main>
 <!-- @scripts -->
 </body>

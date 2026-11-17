@@ -188,6 +188,21 @@ class RemDB:
         ).fetchall()
         return [HistoryRow(**dict(r)) for r in rows]
 
+    def history_for_jobs(self, job_keys: list[str]) -> dict[str, list[HistoryRow]]:
+        """The history rows written by each job key (e.g. "job:7"), oldest first, in one query."""
+        out: dict[str, list[HistoryRow]] = {k: [] for k in job_keys}
+        for i in range(0, len(job_keys), 500):  # stay under SQLite's variable limit
+            chunk = job_keys[i:i + 500]
+            rows = self._conn.execute(
+                f"SELECT * FROM history WHERE job_id IN ({','.join('?' * len(chunk))}) ORDER BY id", chunk
+            ).fetchall()
+            for r in rows:
+                out[r["job_id"]].append(HistoryRow(**dict(r)))
+        return out
+
+    def history_for_job(self, job_key: str) -> list[HistoryRow]:
+        return self.history_for_jobs([job_key])[job_key]
+
     def save_extraction(self, job_id: int, model: str, candidates_json: str) -> None:
         """Cache a job's extraction. The first write wins, so a replay reuses the original candidates."""
         self._conn.execute(
