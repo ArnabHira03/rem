@@ -135,7 +135,7 @@ def test_cli_eval_prints_na_for_empty_rates(tmp_path, monkeypatch, capsys):
     data.write_text(json.dumps(CASE_EMPTY) + "\n")
     assert main(["eval", "extraction", "--dataset", str(data)]) == 0
     out = capsys.readouterr().out
-    assert "dedup accuracy     n/a" in out and "JSON validity     1.00" in out
+    assert "dedup accuracy         n/a" in out and "JSON validity         1.00" in out
     assert main(["eval", "extraction", "--dataset", str(data), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["dedup_acc"] is None
 
@@ -158,3 +158,93 @@ def test_eval_never_contacts_daemon(cfg, hashing, monkeypatch, tmp_path):
     monkeypatch.setattr(rem.client.RemClient, "__init__", boom)
     r = run_eval(FakeLLM([said(FISH)]), hashing, [CASE_FISH], cfg)
     assert r.cases == 1
+
+
+def lab(text, ents, rels=()):
+    return {"text": text, "scope": "global", "origin": "user",
+            "entities": [{"name": n, "type": t} for n, t in ents],
+            "relations": [{"source": s, "type": ty, "target": d} for s, ty, d in rels]}
+
+
+def _case(cid, *facts):
+    return {"id": cid, "turns": [{"role": "user", "content": "x"}], "context": [], "existing": [],
+            "expected": list(facts), "expect_corroborate": []}
+
+
+UV_PIP = lab("Prefers uv over pip", [("uv", "tool"), ("pip", "tool")], [("uv", "preferred_over", "pip")])
+LABEL_RATES = ("entity_precision", "entity_recall", "entity_type_acc", "relation_precision",
+               "relation_recall", "relation_type_acc")
+
+
+def test_perfect_labels_score_one(cfg, hashing):
+    r = run_eval(FakeLLM([said(UV_PIP), said()]), hashing, [_case("uvpip", UV_PIP), CASE_EMPTY], cfg)
+    assert all(getattr(r, k) == 1 for k in LABEL_RATES) and r.invalid_type_rate == 0
+    assert r.labelled_cases == 2 and r.failures == []
+
+
+def test_unlabelled_cases_skip_label_scores(cfg, hashing):
+    fish = {**FISH, "entities": [{"name": "fish", "type": "tool"}], "relations": []}
+    r = run_eval(FakeLLM([said(fish)]), hashing, [CASE_FISH], cfg)
+    assert all(getattr(r, k) is None for k in LABEL_RATES)
+    assert r.labelled_cases == 0 and r.precision == 1 and r.recall == 1 and r.invalid_type_rate == 0
+
+
+def test_entity_matching_uses_normalized_names_and_aliases(cfg, hashing):
+    want = lab("Uses PostgreSQL", [("x", "tool")])
+    want["entities"] = [{"name": "PostgreSQL", "type": "tool", "aliases": ["Postgres"]}]
+    got = lab("Uses PostgreSQL", [("postgres", "tool")])
+    r = run_eval(FakeLLM([said(got)]), hashing, [_case("pg", want)], cfg)
+    assert r.entity_recall == 1
+
+
+def test_missing_and_extra_entities_reported(cfg, hashing):
+    got = lab("Prefers uv over pip", [("uv", "tool"), ("npm", "tool")])
+    r = run_eval(FakeLLM([said(got)]), hashing, [_case("c", lab("Prefers uv over pip", [("uv", "tool"), ("pip", "tool")]))], cfg)
+    assert r.entity_precision == r.entity_recall == 0.5
+    assert r.failures[0]["missing_entities"] == ["pip"] and r.failures[0]["extra_entities"] == ["npm"]
+
+
+def test_relation_direction_matters(cfg, hashing):
+    got = lab("Prefers uv over pip", [("uv", "tool"), ("pip", "tool")], [("pip", "preferred_over", "uv")])
+    r = run_eval(FakeLLM([said(got)]), hashing, [_case("c", UV_PIP)], cfg)
+    assert r.relation_precision == r.relation_recall == 0
+
+
+def test_relation_type_scored_separately(cfg, hashing):
+    ents = [("alpha", "project"), ("Qdrant", "tool")]
+    want = lab("alpha depends on Qdrant", ents, [("alpha", "depends_on", "Qdrant")])
+    got = lab("alpha depends on Qdrant", ents, [("alpha", "uses", "Qdrant")])
+    r = run_eval(FakeLLM([said(got)]), hashing, [_case("c", want)], cfg)
+    assert r.relation_recall == 1 and r.relation_type_acc == 0
+    assert "wrong_relation_type" in r.failures[0]
+
+
+def test_type_accuracy_and_invalid_rate_are_per_mention(cfg, hashing):
+    a = lab("Uses uv daily", [("uv", "tool")])
+    b = lab("Likes uv a lot", [("uv", "entity_type_x")])
+    r = run_eval(FakeLLM([said(a, b)]), hashing, [_case("c", lab("Uses uv daily", [("uv", "tool")]))], cfg)
+    assert r.entity_type_acc == 0.5 and r.invalid_type_rate == 0.5
+    assert r.failures[0]["invalid_entity_type"] == [{"name": "uv", "type": "entity_type_x"}]
+
+
+def test_failed_llm_case_counts_against_label_recall(cfg, hashing):
+    r = run_eval(FakeLLM([LLMError("boom")]), hashing, [_case("c", UV_PIP)], cfg)
+    assert r.entity_recall == 0 and r.relation_recall == 0 and r.entity_precision is None
+
+
+def test_cli_eval_prints_label_scores(tmp_path, monkeypatch, capsys):
+    import json
+
+    _eval_env(tmp_path, monkeypatch, '[llm]\nprovider = "ollama"\nmodel = "x"\n')
+    monkeypatch.setattr("rem.llm.factory.create_llm", lambda cfg: FakeLLM([said(UV_PIP)]))
+    data = tmp_path / "d.jsonl"
+    data.write_text(json.dumps(_case("uvpip", UV_PIP)) + "\n")
+    assert main(["eval", "extraction", "--dataset", str(data)]) == 0
+    out = capsys.readouterr().out
+    assert f"  {'entity precision':<20}{'1.00':>6}" in out and f"  {'relation recall':<20}{'1.00':>6}" in out
+    assert f"  {'invalid types':<20}{'0.00':>6}" in out and "labelled cases" in out
+    monkeypatch.setattr("rem.llm.factory.create_llm", lambda cfg: FakeLLM([said(FISH)]))
+    data.write_text(json.dumps(CASE_FISH) + "\n")
+    assert main(["eval", "extraction", "--dataset", str(data)]) == 0
+    out = capsys.readouterr().out
+    assert f"  {'entity precision':<20}{'n/a':>6}" in out and f"  {'relation recall':<20}{'n/a':>6}" in out

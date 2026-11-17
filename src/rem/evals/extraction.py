@@ -12,12 +12,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from rem.config import RemConfig, VectorStoreConfig
+from rem.entities import normalize_name
 from rem.embed.base import Embedder
 from rem.errors import LLMError
 from rem.extract import extract
 from rem.llm.base import LLM
 from rem.memory import Memory
-from rem.models import Provenance, Scope, Status
+from rem.models import ENTITY_TYPES, Candidate, Provenance, Scope, Status
 from rem.storage.queue import Turn
 from rem.storage.vector.memory import InMemoryVectorStore
 
@@ -41,6 +42,14 @@ class EvalReport:
     dedup_acc: float | None
     latency_p50: float
     latency_p95: float
+    entity_precision: float | None = None
+    entity_recall: float | None = None
+    entity_type_acc: float | None = None
+    invalid_type_rate: float | None = None
+    relation_precision: float | None = None
+    relation_recall: float | None = None
+    relation_type_acc: float | None = None
+    labelled_cases: int = 0
     failures: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -91,6 +100,132 @@ def _ratio(num: int, den: int) -> float | None:
     return num / den if den else None
 
 
+def is_labelled(case: dict) -> bool:
+    """A case is labelled iff every expected fact has an `entities` key (an empty `expected` counts)."""
+    return all("entities" in x for x in case["expected"])
+
+
+@dataclass
+class LabelScore:
+    ent_pred: int = 0
+    ent_exp: int = 0
+    ent_match: int = 0
+    type_mentions: int = 0
+    type_ok: int = 0
+    rel_pred: int = 0
+    rel_exp: int = 0
+    rel_match: int = 0
+    rel_type_ok: int = 0
+    problems: dict = field(default_factory=dict)
+
+
+def _expected_entities(expected: list[dict]) -> list[dict]:
+    """One entry per label across all expected facts, de-duplicated by normalised name."""
+    out: dict[str, dict] = {}
+    for fact in expected:
+        for e in fact.get("entities", []):
+            norm = normalize_name(e["name"])
+            if norm not in out:
+                keys = {norm} | {normalize_name(a) for a in e.get("aliases", [])}
+                out[norm] = {"name": e["name"], "norm": norm, "type": e["type"], "keys": keys}
+    return list(out.values())
+
+
+def _expected_relations(expected: list[dict]) -> list[tuple[str, str, str]]:
+    out: list[tuple[str, str, str]] = []
+    for fact in expected:
+        for r in fact.get("relations", []):
+            rel = (normalize_name(r["source"]), normalize_name(r["target"]), r["type"])
+            if rel not in out:
+                out.append(rel)
+    return out
+
+
+def invalid_type_mentions(candidates: list[Candidate]) -> tuple[int, int]:
+    """(mentions whose type is not a known entity type, all mentions)."""
+    mentions = [m for c in candidates for m in c.entities]
+    return sum(1 for m in mentions if m.type not in ENTITY_TYPES), len(mentions)
+
+
+def score_labels(candidates: list[Candidate], expected: list[dict]) -> LabelScore:
+    exp_ents = _expected_entities(expected)
+    mentions = [m for c in candidates for m in c.entities]
+    pred_names: dict[str, str] = {}  # normalised -> first spelling seen
+    for m in mentions:
+        pred_names.setdefault(normalize_name(m.name), m.name)
+
+    used: set[str] = set()
+    matched: dict[str, dict] = {}  # predicted normalised name -> expected entity
+    for e in exp_ents:
+        hit = next((n for n in pred_names if n not in used and n in e["keys"]), None)
+        if hit is not None:
+            used.add(hit)
+            matched[hit] = e
+
+    score = LabelScore(ent_pred=len(pred_names), ent_exp=len(exp_ents), ent_match=len(matched))
+    problems = score.problems
+    wrong_type = []
+    for m in mentions:
+        e = matched.get(normalize_name(m.name))
+        if e is None:
+            continue
+        score.type_mentions += 1
+        if m.type == e["type"]:
+            score.type_ok += 1
+        else:
+            wrong_type.append({"name": m.name, "got": m.type, "want": e["type"]})
+    missing = [e["name"] for e in exp_ents if e["norm"] not in {x["norm"] for x in matched.values()}]
+    extra = [pred_names[n] for n in pred_names if n not in matched]
+    invalid, seen = [], set()
+    for m in mentions:
+        if m.type not in ENTITY_TYPES and (m.name, m.type) not in seen:
+            seen.add((m.name, m.type))
+            invalid.append({"name": m.name, "type": m.type})
+    for key, val in (("missing_entities", missing), ("extra_entities", extra),
+                     ("wrong_entity_type", wrong_type), ("invalid_entity_type", invalid)):
+        if val:
+            problems[key] = val
+
+    canon = {}  # key -> canonical normalised name, for matched expected entities
+    for e in matched.values():
+        for k in e["keys"]:
+            canon.setdefault(k, e["norm"])
+
+    def resolve(name: str) -> str:
+        n = normalize_name(name)
+        return canon.get(n, n)
+
+    pred_rels: list[tuple[str, str, str]] = []
+    for c in candidates:
+        for r in c.relations:
+            rel = (resolve(r.source), resolve(r.target), r.type)
+            if rel not in pred_rels:
+                pred_rels.append(rel)
+    exp_rels = _expected_relations(expected)
+    score.rel_pred, score.rel_exp = len(pred_rels), len(exp_rels)
+    used_p: set[int] = set()
+    matched_exp: set[int] = set()
+    wrong_rel_type = []
+    for j, (src, tgt, typ) in enumerate(exp_rels):
+        i = next((i for i, p in enumerate(pred_rels) if i not in used_p and p[:2] == (src, tgt)), None)
+        if i is None:
+            continue
+        used_p.add(i)
+        matched_exp.add(j)
+        score.rel_match += 1
+        if pred_rels[i][2] == typ:
+            score.rel_type_ok += 1
+        else:
+            wrong_rel_type.append({"relation": f"{src} -{typ}-> {tgt}", "got": pred_rels[i][2], "want": typ})
+    miss_rel = [f"{s} -{t}-> {d}" for j, (s, d, t) in enumerate(exp_rels) if j not in matched_exp]
+    extra_rel = [f"{s} -{t}-> {d}" for i, (s, d, t) in enumerate(pred_rels) if i not in used_p]
+    for key, val in (("missing_relations", miss_rel), ("extra_relations", extra_rel),
+                     ("wrong_relation_type", wrong_rel_type)):
+        if val:
+            problems[key] = val
+    return score
+
+
 def run_eval(llm: LLM, embedder: Embedder, cases: list[dict], cfg: RemConfig) -> EvalReport:
     settings = cfg.extraction
     predicted_total = expected_total = matched_total = 0
@@ -99,6 +234,9 @@ def run_eval(llm: LLM, embedder: Embedder, cases: list[dict], cfg: RemConfig) ->
     dedup_cases = dedup_ok = 0
     latencies: list[float] = []
     failures: list[dict] = []
+    ent_pred = ent_exp = ent_match = type_mentions = type_ok = 0
+    rel_pred = rel_exp = rel_match = rel_type_ok = 0
+    invalid_total = mention_total = labelled_cases = 0
 
     for case in cases:
         with tempfile.TemporaryDirectory(prefix="rem-eval-") as tmp:
@@ -127,6 +265,10 @@ def run_eval(llm: LLM, embedder: Embedder, cases: list[dict], cfg: RemConfig) ->
                 except LLMError as e:
                     latencies.append(time.perf_counter() - started)
                     expected_total += len(case["expected"])
+                    if is_labelled(case):
+                        labelled_cases += 1
+                        ent_exp += len(_expected_entities(case["expected"]))
+                        rel_exp += len(_expected_relations(case["expected"]))
                     if case.get("expect_corroborate"):
                         dedup_cases += 1
                     failures.append({"id": case["id"], "error": str(e)})
@@ -185,6 +327,22 @@ def run_eval(llm: LLM, embedder: Embedder, cases: list[dict], cfg: RemConfig) ->
                         problems["not_corroborated"] = bad
                     else:
                         dedup_ok += 1
+                bad_types, n_mentions = invalid_type_mentions(candidates)
+                invalid_total += bad_types
+                mention_total += n_mentions
+                if is_labelled(case):
+                    ls = score_labels(candidates, expected)
+                    labelled_cases += 1
+                    ent_pred += ls.ent_pred
+                    ent_exp += ls.ent_exp
+                    ent_match += ls.ent_match
+                    type_mentions += ls.type_mentions
+                    type_ok += ls.type_ok
+                    rel_pred += ls.rel_pred
+                    rel_exp += ls.rel_exp
+                    rel_match += ls.rel_match
+                    rel_type_ok += ls.rel_type_ok
+                    problems.update(ls.problems)
                 if problems:
                     failures.append({"id": case["id"], **problems})
             finally:
@@ -200,5 +358,13 @@ def run_eval(llm: LLM, embedder: Embedder, cases: list[dict], cfg: RemConfig) ->
         dedup_acc=_ratio(dedup_ok, dedup_cases),
         latency_p50=_percentile(latencies, 0.50),
         latency_p95=_percentile(latencies, 0.95),
+        entity_precision=_ratio(ent_match, ent_pred),
+        entity_recall=_ratio(ent_match, ent_exp),
+        entity_type_acc=_ratio(type_ok, type_mentions),
+        invalid_type_rate=_ratio(invalid_total, mention_total),
+        relation_precision=_ratio(rel_match, rel_pred),
+        relation_recall=_ratio(rel_match, rel_exp),
+        relation_type_acc=_ratio(rel_type_ok, rel_match),
+        labelled_cases=labelled_cases,
         failures=failures,
     )

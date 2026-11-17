@@ -169,10 +169,15 @@ def _eval(args, cfg) -> int:
         ("precision", report.precision), ("recall", report.recall), ("scope accuracy", report.scope_acc),
         ("origin accuracy", report.origin_acc), ("JSON validity", report.json_valid_rate),
         ("dedup accuracy", report.dedup_acc),
+        ("entity precision", report.entity_precision), ("entity recall", report.entity_recall),
+        ("entity types", report.entity_type_acc), ("invalid types", report.invalid_type_rate),
+        ("relation precision", report.relation_precision), ("relation recall", report.relation_recall),
+        ("relation types", report.relation_type_acc),
     ]:
-        print(f"  {label:<16}" + (f"{value:6.2f}" if value is not None else f"{'n/a':>6}"))
-    print(f"  {'latency p50':<16}{report.latency_p50:5.2f}s")
-    print(f"  {'latency p95':<16}{report.latency_p95:5.2f}s")
+        print(f"  {label:<20}" + (f"{value:6.2f}" if value is not None else f"{'n/a':>6}"))
+    print(f"  {'latency p50':<20}{report.latency_p50:5.2f}s")
+    print(f"  {'latency p95':<20}{report.latency_p95:5.2f}s")
+    print(f"  {'labelled cases':<20}{report.labelled_cases:>5}")
     if report.failures:
         print(f"{len(report.failures)} case(s) with problems:")
         for f in report.failures:
