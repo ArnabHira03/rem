@@ -207,3 +207,39 @@ def test_client_graph_round_trip(daemon_env):
     assert main(["start"]) == 0
     snap = RemClient(daemon_env.sock).graph(None)
     assert set(snap) == {"generated_at", "current_project_id", "projects", "entities", "relations", "memories"}
+
+
+def test_cli_graph_without_extra_exits_3(daemon_env, monkeypatch, capsys):
+    from rem.graph import window
+
+    def boom():
+        raise ImportError("no webview")
+
+    monkeypatch.setattr(window, "import_webview", boom)
+    assert main(["graph"]) == 3
+    assert "uv sync --extra graph" in capsys.readouterr().err
+
+
+def test_cli_graph_opens_window_with_cwd(daemon_env, tmp_path, monkeypatch):
+    from rem.graph import window
+
+    seen = []
+    monkeypatch.setattr(window, "import_webview", lambda: object())
+    monkeypatch.setattr(window, "run_window", lambda client, cwd: seen.append((client, cwd)))
+    monkeypatch.chdir(tmp_path)
+    assert main(["graph"]) == 0
+    assert seen[0][1] == tmp_path.resolve()
+
+
+def test_cli_graph_window_failure_exits_1(daemon_env, monkeypatch, capsys):
+    from rem.graph import window
+
+    def fail(client, cwd):
+        raise RuntimeError("no display")
+
+    monkeypatch.setattr(window, "import_webview", lambda: object())
+    monkeypatch.setattr(window, "run_window", fail)
+    assert main(["graph"]) == 1
+    err = capsys.readouterr().err
+    assert "could not open the graph window: no display" in err
+    assert "Traceback" not in err
