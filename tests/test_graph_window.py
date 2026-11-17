@@ -154,3 +154,30 @@ def test_window_module_imports_without_qt():
     assert "webview" not in sys.modules
     assert "qtpy" not in sys.modules
     assert "PySide6" not in sys.modules
+
+
+def test_run_window_without_display_fails_cleanly(monkeypatch):
+    from rem.graph import window
+
+    for v in ("DISPLAY", "WAYLAND_DISPLAY", "QT_QPA_PLATFORM"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setattr(window, "import_webview", lambda: pytest.fail("Qt must not be touched"))
+    with pytest.raises(RuntimeError, match="no display"):
+        window.run_window(object(), None)
+
+
+def test_run_window_with_display_reaches_webview_import(monkeypatch):
+    from rem.graph import window
+
+    class Sentinel(Exception):
+        pass
+
+    def stop():
+        raise Sentinel
+
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(window, "import_webview", stop)
+    with pytest.raises(Sentinel):
+        window.run_window(object(), None)

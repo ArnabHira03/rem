@@ -4,6 +4,7 @@ Lazy imports only: importing this module never imports webview, qtpy or PySide6 
 The `Api` only reads (`RemClient.graph`) and builds views; nothing here writes to rem.
 """
 
+import os
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -118,6 +119,10 @@ def import_webview():
 
 def run_window(client, cwd: Path | None) -> None:
     """Open the graph window and block until it is closed."""
+    # Qt aborts the whole process (no exception) when it finds no display, so check first.
+    # QT_QPA_PLATFORM set means the user chose a platform on purpose.
+    if not any(os.environ.get(v) for v in ("QT_QPA_PLATFORM", "DISPLAY", "WAYLAND_DISPLAY")):
+        raise RuntimeError("no display (DISPLAY/WAYLAND_DISPLAY not set)")
     webview = import_webview()
     webview.create_window(TITLE, html=render_html(), js_api=Api(client, cwd),
                           width=1200, height=800, background_color="#FFFFFF")
