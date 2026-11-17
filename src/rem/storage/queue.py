@@ -202,6 +202,33 @@ class IngestStore:
         ).fetchone()
         return Job(*r)
 
+    def job_rows(self, job_id: int) -> dict | None:
+        """A job's own columns with its session's source and project name (read-only)."""
+        r = self.conn.execute(
+            "SELECT j.id, j.status, j.created_at, j.updated_at, j.last_error, s.source, s.project_id, "
+            "p.name AS project_name FROM jobs j JOIN sessions s ON s.id = j.session_pk "
+            "LEFT JOIN projects p ON p.id = s.project_id WHERE j.id = ?", (job_id,),
+        ).fetchone()
+        return dict(r) if r else None
+
+    def job_ids(self, *, project_id: int | None = None, statuses: tuple[str, ...] | None = None,
+                before: int | None = None, limit: int = 50) -> list[int]:
+        """Job ids, newest first, optionally of one project, in some statuses, below `before` (read-only)."""
+        sql, args, where = "SELECT j.id FROM jobs j", [], []
+        if project_id is not None:
+            sql += " JOIN sessions s ON s.id = j.session_pk"
+            where.append("s.project_id = ?")
+            args.append(project_id)
+        if statuses:
+            where.append(f"j.status IN ({','.join('?' * len(statuses))})")
+            args += statuses
+        if before is not None:
+            where.append("j.id < ?")
+            args.append(before)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        return [r[0] for r in self.conn.execute(sql + " ORDER BY j.id DESC LIMIT ?", (*args, limit))]
+
     def messages_for(self, job_id: int) -> list[Turn]:
         rows = self.conn.execute(
             "SELECT role, content, message_id, ts FROM messages WHERE job_id = ? ORDER BY id", (job_id,)

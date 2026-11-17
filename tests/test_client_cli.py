@@ -3,9 +3,12 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from rem.cli import main
 from rem.client import RemClient
 from rem.daemon.lock import InstanceLock
+from rem.errors import MemoryNotFound
 
 
 def test_cli_auto_starts_daemon_and_persists(daemon_env, capsys):
@@ -243,3 +246,12 @@ def test_cli_graph_window_failure_exits_1(daemon_env, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "could not open the graph window: no display" in err
     assert "Traceback" not in err
+
+
+def test_client_jobs_round_trip(daemon_env):
+    main(["start"])
+    c = RemClient(daemon_env.sock)
+    assert set(c.jobs()) == {"runs", "next_before"}
+    assert c.jobs(status="done", flagged=True, limit=5, before=3, project_id=1)["runs"] == []
+    with pytest.raises(MemoryNotFound):
+        c.job(999)
