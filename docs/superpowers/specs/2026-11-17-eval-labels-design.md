@@ -1,6 +1,6 @@
 # Eval: entity and relation labels, plus real-failure cases: design
 
-_Status: draft 2026-11-17. Builds on the extraction eval (`src/rem/evals/extraction.py`, `src/rem/evals/data/extraction.jsonl`), M7 (entities) and M8 (relations)._
+_Status: implemented 2026-11-17. Builds on the extraction eval (`src/rem/evals/extraction.py`, `src/rem/evals/data/extraction.jsonl`), M7 (entities) and M8 (relations)._
 
 ## Intent
 `rem eval extraction` scores the facts a model extracts: precision, recall, scope, origin, JSON validity and dedup. It doesn't score the **entities** (M7) or **relations** (M8) the same LLM call returns. That gap is listed as a known limitation in CLAUDE.md for both milestones.
