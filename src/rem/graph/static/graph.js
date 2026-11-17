@@ -142,19 +142,46 @@
     return out;
   }
 
+  // Nodes that stay keep their place; a new node starts at the middle of its already-placed neighbours,
+  // so a filter change nudges the picture instead of reshuffling it. Only a first layout is random and fitted.
+  function placeNew(view, prev) {
+    var placed = 0;
+    view.nodes.forEach(function (n) { if (prev[n.id]) placed++; });
+    if (!placed) return false;
+    var neighbours = {};
+    view.edges.forEach(function (e) {
+      (neighbours[e.source] = neighbours[e.source] || []).push(e.target);
+      (neighbours[e.target] = neighbours[e.target] || []).push(e.source);
+    });
+    cy.nodes().forEach(function (node) {
+      var id = node.id();
+      if (prev[id]) { node.position(prev[id]); return; }
+      var near = (neighbours[id] || []).filter(function (o) { return prev[o]; });
+      if (!near.length) return;
+      var x = 0, y = 0;
+      near.forEach(function (o) { x += prev[o].x; y += prev[o].y; });
+      node.position({ x: x / near.length + (Math.random() - 0.5) * 30, y: y / near.length + (Math.random() - 0.5) * 30 });
+    });
+    return true;
+  }
+
   function render(view) {
+    var prev = {};
+    cy.nodes().forEach(function (node) { var p = node.position(); prev[node.id()] = { x: p.x, y: p.y }; });
     info = new Map();
     view.nodes.forEach(function (n) { info.set(n.id, n); });
     view.edges.forEach(function (e) { info.set(e.id, e); });
     unhover();
+    var kept = false;
     cy.batch(function () {
       cy.elements().remove();
       cy.add(toElements(view));
+      kept = placeNew(view, prev);
     });
     $("empty").hidden = view.nodes.some(function (n) { return n.kind === "entity"; });
     if (view.nodes.length) {
-      cy.layout({ name: "cose", animate: false, randomize: true, nodeDimensionsIncludeLabels: true,
-                  padding: 40, fit: true }).run();
+      cy.layout({ name: "cose", animate: false, randomize: !kept, fit: !kept,
+                  nodeDimensionsIncludeLabels: true, padding: 40 }).run();
     }
     applySearch();
     var keep = selectedId && cy.getElementById(selectedId);
@@ -239,16 +266,21 @@
     b.addEventListener("click", function () { selectId(nodeId); });
     return b;
   }
+  // Clicking selects the whole id, so Ctrl+C always copies it. The clipboard API is tried too, but an
+  // inline page in QtWebEngine may not be allowed to use it; "copied" shows only when it really worked.
   function copyId(id) {
     var c = el("span", "id", id);
-    c.title = "Click to copy";
+    c.title = "Click to select, then Ctrl+C to copy";
     c.addEventListener("click", function () {
+      var range = document.createRange();
+      range.selectNodeContents(c);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
       var done = function () { c.classList.add("copied"); setTimeout(function () { c.classList.remove("copied"); }, 600); };
       try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(id).then(done, function () {});
-        }
-      } catch (err) { /* the text stays selectable */ }
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(id).then(done, function () {});
+      } catch (err) { /* the selection is there for Ctrl+C */ }
     });
     return c;
   }
@@ -271,6 +303,12 @@
     li.appendChild(el("span", "meta", " · " + r.scope + " · " + projectText(r)));
     if (!r.drawn) li.appendChild(el("span", "same", " (same node)"));
     li.title = r.provenance + ", " + r.scope + ", relation " + r.id;
+    var ids = el("div", "ids");
+    ids.appendChild(el("span", null, "relation "));
+    ids.appendChild(copyId(r.id));
+    ids.appendChild(el("span", null, " · other end "));
+    ids.appendChild(copyId(r.other_entity_id));
+    li.appendChild(ids);
     return li;
   }
   function memoryItem(m) {
@@ -384,13 +422,20 @@
     setSnapshotTime(payload.generated_at);
     render(payload.view);
   }
+  // A refresh replaces the snapshot in Python. If a filter changed while it ran, the filter's view may come
+  // from the old snapshot, so the latest refresh always updates the project list and time, then re-renders
+  // with whatever filters are on screen now.
+  var refreshSeq = 0;
   function refresh() {
-    var mine = ++seq;
+    var mine = ++seq, myRefresh = ++refreshSeq;
     setStatus("refreshing…");
     api.refresh(readFilters()).then(function (payload) {
-      if (mine !== seq) return;
+      if (myRefresh !== refreshSeq) return;
       setStatus("");
-      load(payload);
+      if (mine === seq) { load(payload); return; }
+      setProjects(payload.projects, $("project").value);  // a project that vanished falls back to "all"
+      setSnapshotTime(payload.generated_at);
+      update();
     }, fail);
   }
 

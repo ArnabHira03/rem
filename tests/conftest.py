@@ -21,7 +21,8 @@ def _never_touch_real_rem(tmp_path_factory, monkeypatch):
 @pytest.fixture
 def rem_home(tmp_path, monkeypatch):
     monkeypatch.setenv("REM_HOME", str(tmp_path))
-    monkeypatch.delenv("REM_CONFIG", raising=False)
+    # never fall back to the real ~/.config/rem/config.toml (it may configure a real LLM)
+    monkeypatch.setenv("REM_CONFIG", str(tmp_path / "no-config.toml"))
     return tmp_path
 
 

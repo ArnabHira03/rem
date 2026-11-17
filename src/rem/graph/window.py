@@ -5,6 +5,8 @@ The `Api` only reads (`RemClient.graph`) and builds views; nothing here writes t
 """
 
 import os
+import re
+import socket
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -117,12 +119,58 @@ def import_webview():
     return webview
 
 
+X11_SOCKET_DIR = Path("/tmp/.X11-unix")
+_PROBE_SECONDS = 1.0
+
+
+def _connects(family: int, address) -> bool:
+    s = socket.socket(family, socket.SOCK_STREAM)
+    s.settimeout(_PROBE_SECONDS)
+    try:
+        s.connect(address)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _x11_reachable(display: str) -> bool:
+    """Whether an X server answers at `display` ("[host]:N[.S]"). An unknown form returns True: Qt decides."""
+    m = re.fullmatch(r"([^:]*):(\d+)(?:\.\d+)?", display)
+    if not m:
+        return True
+    host, n = m.group(1), int(m.group(2))
+    if host in ("", "unix"):
+        path = str(X11_SOCKET_DIR / f"X{n}")
+        return _connects(socket.AF_UNIX, path) or _connects(socket.AF_UNIX, "\0" + path)  # abstract socket
+    return _connects(socket.AF_INET, (host, 6000 + n))
+
+
+def _wayland_reachable(name: str) -> bool:
+    path = Path(name) if name.startswith("/") else Path(os.environ.get("XDG_RUNTIME_DIR", "")) / name
+    return _connects(socket.AF_UNIX, str(path))
+
+
+def _display_problem() -> str | None:
+    """Why Qt would find no usable display, or None. Qt aborts the whole process (no exception) in that case.
+    QT_QPA_PLATFORM set means the user chose a platform on purpose, so nothing is checked."""
+    if os.environ.get("QT_QPA_PLATFORM"):
+        return None
+    wayland, x = os.environ.get("WAYLAND_DISPLAY"), os.environ.get("DISPLAY")
+    if wayland and _wayland_reachable(wayland):
+        return None
+    if x:
+        return None if _x11_reachable(x) else f"cannot reach the X display {x}"
+    if wayland:
+        return f"cannot reach the Wayland display {wayland}"
+    return "no display (DISPLAY/WAYLAND_DISPLAY not set)"
+
+
 def run_window(client, cwd: Path | None) -> None:
     """Open the graph window and block until it is closed."""
-    # Qt aborts the whole process (no exception) when it finds no display, so check first.
-    # QT_QPA_PLATFORM set means the user chose a platform on purpose.
-    if not any(os.environ.get(v) for v in ("QT_QPA_PLATFORM", "DISPLAY", "WAYLAND_DISPLAY")):
-        raise RuntimeError("no display (DISPLAY/WAYLAND_DISPLAY not set)")
+    if (problem := _display_problem()) is not None:
+        raise RuntimeError(problem)
     webview = import_webview()
     webview.create_window(TITLE, html=render_html(), js_api=Api(client, cwd),
                           width=1200, height=800, background_color="#FFFFFF")
