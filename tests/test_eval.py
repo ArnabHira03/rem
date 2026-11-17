@@ -1,10 +1,14 @@
+import re
+
 import pytest
 
 from rem.cli import main
+from rem.entities import normalize_name
 from rem.embed.hashing import HashingEmbedder
 from rem.errors import LLMError
-from rem.evals.extraction import DEFAULT_DATASET, load_cases, match_facts, run_eval
+from rem.evals.extraction import DEFAULT_DATASET, is_labelled, load_cases, match_facts, run_eval
 from rem.llm.fake import FakeLLM
+from rem.models import ENTITY_TYPES, RELATION_TYPES
 
 FISH = {"text": "Uses fish shell", "scope": "global", "origin": "user"}
 CASE_FISH = {
@@ -76,6 +80,48 @@ def test_shipped_dataset_is_well_formed():
     assert sum(1 for c in cases if not c["expected"]) >= 4
     assert sum(1 for c in cases if c["expect_corroborate"]) >= 4
     assert any("[REDACTED:" in t["content"] for c in cases for t in c["turns"])
+    assert len(cases) >= 50
+    assert sum(1 for c in cases if not c["expected"]) >= 6
+    real = [c["id"] for c in cases if c["id"].startswith("real-")]
+    assert len(real) >= 10
+    for kind in ("noise", "activity", "quoted", "scope", "assistant", "types", "relations"):
+        assert any(kind in i for i in real), kind
+    # Expected facts never keep one-off session details: no URLs, no commit ids.
+    commit_like = re.compile(r"\b(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b")
+    for c in cases:
+        for fact in c["expected"]:
+            assert "http" not in fact["text"], (c["id"], fact["text"])
+            assert not commit_like.search(fact["text"]), (c["id"], fact["text"])
+
+
+def test_shipped_dataset_labels_are_valid():
+    cases = load_cases(DEFAULT_DATASET)
+    with_relation = 0
+    for c in cases:
+        assert is_labelled(c), c["id"]
+        names, aliases = set(), {}
+        for fact in c["expected"]:
+            fact_names = set()
+            for e in fact["entities"]:
+                assert e["type"] in ENTITY_TYPES, (c["id"], e)
+                assert 1 <= len(e["name"].strip()) <= 80, (c["id"], e)
+                assert "[REDACTED:" not in e["name"], (c["id"], e)
+                norm = normalize_name(e["name"])
+                fact_names.add(norm)
+                names.add(norm)
+                for a in e.get("aliases", []):
+                    aliases.setdefault(normalize_name(a), set()).add(norm)
+            for r in fact.get("relations", []):
+                assert r["type"] in RELATION_TYPES, (c["id"], r)
+                src, tgt = normalize_name(r["source"]), normalize_name(r["target"])
+                # Ends name an entity of the same fact by its name, never an alias spelling.
+                assert src in fact_names and tgt in fact_names, (c["id"], r)
+                assert src != tgt, (c["id"], r)
+            with_relation += bool(fact.get("relations"))
+        # No label's name is another label's alias within one case.
+        for n in names:
+            assert aliases.get(n, set()) <= {n}, (c["id"], n)
+    assert with_relation >= 5
 
 
 def test_cli_eval_without_llm_exits_3(rem_home, capsys):
@@ -135,7 +181,7 @@ def test_cli_eval_prints_na_for_empty_rates(tmp_path, monkeypatch, capsys):
     data.write_text(json.dumps(CASE_EMPTY) + "\n")
     assert main(["eval", "extraction", "--dataset", str(data)]) == 0
     out = capsys.readouterr().out
-    assert "dedup accuracy     n/a" in out and "JSON validity     1.00" in out
+    assert "dedup accuracy         n/a" in out and "JSON validity         1.00" in out
     assert main(["eval", "extraction", "--dataset", str(data), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["dedup_acc"] is None
 
@@ -158,3 +204,93 @@ def test_eval_never_contacts_daemon(cfg, hashing, monkeypatch, tmp_path):
     monkeypatch.setattr(rem.client.RemClient, "__init__", boom)
     r = run_eval(FakeLLM([said(FISH)]), hashing, [CASE_FISH], cfg)
     assert r.cases == 1
+
+
+def lab(text, ents, rels=()):
+    return {"text": text, "scope": "global", "origin": "user",
+            "entities": [{"name": n, "type": t} for n, t in ents],
+            "relations": [{"source": s, "type": ty, "target": d} for s, ty, d in rels]}
+
+
+def _case(cid, *facts):
+    return {"id": cid, "turns": [{"role": "user", "content": "x"}], "context": [], "existing": [],
+            "expected": list(facts), "expect_corroborate": []}
+
+
+UV_PIP = lab("Prefers uv over pip", [("uv", "tool"), ("pip", "tool")], [("uv", "preferred_over", "pip")])
+LABEL_RATES = ("entity_precision", "entity_recall", "entity_type_acc", "relation_precision",
+               "relation_recall", "relation_type_acc")
+
+
+def test_perfect_labels_score_one(cfg, hashing):
+    r = run_eval(FakeLLM([said(UV_PIP), said()]), hashing, [_case("uvpip", UV_PIP), CASE_EMPTY], cfg)
+    assert all(getattr(r, k) == 1 for k in LABEL_RATES) and r.invalid_type_rate == 0
+    assert r.labelled_cases == 2 and r.failures == []
+
+
+def test_unlabelled_cases_skip_label_scores(cfg, hashing):
+    fish = {**FISH, "entities": [{"name": "fish", "type": "tool"}], "relations": []}
+    r = run_eval(FakeLLM([said(fish)]), hashing, [CASE_FISH], cfg)
+    assert all(getattr(r, k) is None for k in LABEL_RATES)
+    assert r.labelled_cases == 0 and r.precision == 1 and r.recall == 1 and r.invalid_type_rate == 0
+
+
+def test_entity_matching_uses_normalized_names_and_aliases(cfg, hashing):
+    want = lab("Uses PostgreSQL", [("x", "tool")])
+    want["entities"] = [{"name": "PostgreSQL", "type": "tool", "aliases": ["Postgres"]}]
+    got = lab("Uses PostgreSQL", [("postgres", "tool")])
+    r = run_eval(FakeLLM([said(got)]), hashing, [_case("pg", want)], cfg)
+    assert r.entity_recall == 1
+
+
+def test_missing_and_extra_entities_reported(cfg, hashing):
+    got = lab("Prefers uv over pip", [("uv", "tool"), ("npm", "tool")])
+    r = run_eval(FakeLLM([said(got)]), hashing, [_case("c", lab("Prefers uv over pip", [("uv", "tool"), ("pip", "tool")]))], cfg)
+    assert r.entity_precision == r.entity_recall == 0.5
+    assert r.failures[0]["missing_entities"] == ["pip"] and r.failures[0]["extra_entities"] == ["npm"]
+
+
+def test_relation_direction_matters(cfg, hashing):
+    got = lab("Prefers uv over pip", [("uv", "tool"), ("pip", "tool")], [("pip", "preferred_over", "uv")])
+    r = run_eval(FakeLLM([said(got)]), hashing, [_case("c", UV_PIP)], cfg)
+    assert r.relation_precision == r.relation_recall == 0
+
+
+def test_relation_type_scored_separately(cfg, hashing):
+    ents = [("alpha", "project"), ("Qdrant", "tool")]
+    want = lab("alpha depends on Qdrant", ents, [("alpha", "depends_on", "Qdrant")])
+    got = lab("alpha depends on Qdrant", ents, [("alpha", "uses", "Qdrant")])
+    r = run_eval(FakeLLM([said(got)]), hashing, [_case("c", want)], cfg)
+    assert r.relation_recall == 1 and r.relation_type_acc == 0
+    assert "wrong_relation_type" in r.failures[0]
+
+
+def test_type_accuracy_and_invalid_rate_are_per_mention(cfg, hashing):
+    a = lab("Uses uv daily", [("uv", "tool")])
+    b = lab("Likes uv a lot", [("uv", "entity_type_x")])
+    r = run_eval(FakeLLM([said(a, b)]), hashing, [_case("c", lab("Uses uv daily", [("uv", "tool")]))], cfg)
+    assert r.entity_type_acc == 0.5 and r.invalid_type_rate == 0.5
+    assert r.failures[0]["invalid_entity_type"] == [{"name": "uv", "type": "entity_type_x"}]
+
+
+def test_failed_llm_case_counts_against_label_recall(cfg, hashing):
+    r = run_eval(FakeLLM([LLMError("boom")]), hashing, [_case("c", UV_PIP)], cfg)
+    assert r.entity_recall == 0 and r.relation_recall == 0 and r.entity_precision is None
+
+
+def test_cli_eval_prints_label_scores(tmp_path, monkeypatch, capsys):
+    import json
+
+    _eval_env(tmp_path, monkeypatch, '[llm]\nprovider = "ollama"\nmodel = "x"\n')
+    monkeypatch.setattr("rem.llm.factory.create_llm", lambda cfg: FakeLLM([said(UV_PIP)]))
+    data = tmp_path / "d.jsonl"
+    data.write_text(json.dumps(_case("uvpip", UV_PIP)) + "\n")
+    assert main(["eval", "extraction", "--dataset", str(data)]) == 0
+    out = capsys.readouterr().out
+    assert f"  {'entity precision':<20}{'1.00':>6}" in out and f"  {'relation recall':<20}{'1.00':>6}" in out
+    assert f"  {'invalid types':<20}{'0.00':>6}" in out and "labelled cases" in out
+    monkeypatch.setattr("rem.llm.factory.create_llm", lambda cfg: FakeLLM([said(FISH)]))
+    data.write_text(json.dumps(CASE_FISH) + "\n")
+    assert main(["eval", "extraction", "--dataset", str(data)]) == 0
+    out = capsys.readouterr().out
+    assert f"  {'entity precision':<20}{'n/a':>6}" in out and f"  {'relation recall':<20}{'n/a':>6}" in out
