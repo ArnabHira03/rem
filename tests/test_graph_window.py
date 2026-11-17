@@ -190,6 +190,110 @@ def test_run_window_with_display_reaches_webview_import(monkeypatch):
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
     monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(window, "_x11_reachable", lambda display: True)
     monkeypatch.setattr(window, "import_webview", stop)
     with pytest.raises(Sentinel):
         window.run_window(object(), None)
+
+
+@pytest.fixture
+def listening_unix(short_dir):
+    """Bind and listen on a Unix socket at short_dir/<name>; yields the factory, closes everything after."""
+    import socket
+
+    socks = []
+
+    def make(name):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(short_dir / name))
+        s.listen(16)  # probes connect without being accepted: leave room in the backlog
+        socks.append(s)
+        return short_dir / name
+
+    yield make
+    for s in socks:
+        s.close()
+
+
+def _no_display_env(monkeypatch):
+    for v in ("DISPLAY", "WAYLAND_DISPLAY", "QT_QPA_PLATFORM"):
+        monkeypatch.delenv(v, raising=False)
+
+
+def test_dead_x_display_is_refused_before_qt(monkeypatch, short_dir):
+    from rem.graph import window
+
+    _no_display_env(monkeypatch)
+    monkeypatch.setattr(window, "X11_SOCKET_DIR", short_dir)  # nothing listens at short_dir/X7
+    monkeypatch.setenv("DISPLAY", ":7")
+    monkeypatch.setattr(window, "import_webview", lambda: pytest.fail("Qt must not be touched"))
+    with pytest.raises(RuntimeError, match=r"cannot reach the X display :7"):
+        window.run_window(object(), None)
+
+
+def test_x_display_reachable_over_unix_socket(monkeypatch, short_dir, listening_unix):
+    from rem.graph import window
+
+    monkeypatch.setattr(window, "X11_SOCKET_DIR", short_dir)
+    listening_unix("X5")
+    assert window._x11_reachable(":5")
+    assert window._x11_reachable(":5.0")
+    assert window._x11_reachable("unix:5")
+    assert not window._x11_reachable(":6")
+
+
+def test_x_display_reachable_over_tcp(monkeypatch):
+    import socket
+
+    from rem.graph import window
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    try:
+        n = srv.getsockname()[1] - 6000
+        assert window._x11_reachable(f"127.0.0.1:{n}")
+    finally:
+        srv.close()
+    assert not window._x11_reachable(f"127.0.0.1:{n}")
+
+
+def test_unparseable_display_is_let_through():
+    from rem.graph import window
+
+    assert window._x11_reachable("not-a-display")  # unknown form: let Qt decide
+
+
+def test_wayland_display_checked_by_socket(monkeypatch, short_dir, listening_unix):
+    from rem.graph import window
+
+    _no_display_env(monkeypatch)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(short_dir))
+    listening_unix("wl-test")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wl-test")
+    assert window._display_problem() is None
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wl-gone")
+    assert window._display_problem() == "cannot reach the Wayland display wl-gone"
+    monkeypatch.setenv("WAYLAND_DISPLAY", str(short_dir / "wl-test"))  # absolute path form
+    assert window._display_problem() is None
+
+
+def test_dead_wayland_with_live_x_is_let_through(monkeypatch, short_dir, listening_unix):
+    from rem.graph import window
+
+    _no_display_env(monkeypatch)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(short_dir))
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wl-gone")
+    monkeypatch.setattr(window, "X11_SOCKET_DIR", short_dir)
+    listening_unix("X3")
+    monkeypatch.setenv("DISPLAY", ":3")
+    assert window._display_problem() is None  # Qt falls back to X (XWayland)
+
+
+def test_qt_platform_override_skips_the_check(monkeypatch):
+    from rem.graph import window
+
+    _no_display_env(monkeypatch)
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("DISPLAY", ":99")
+    assert window._display_problem() is None
