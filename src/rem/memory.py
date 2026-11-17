@@ -85,6 +85,10 @@ class ContextResult:
 CONTEXT_HEADER = "Facts rem remembers from earlier sessions (verified):"
 
 
+MEMORY_GRAPH_FIELDS = ("id", "text", "scope", "project_id", "project_name", "provenance", "status", "agent_claim",
+                       "entity_ids", "source", "created_at", "updated_at")
+
+
 class Memory:
     def __init__(
         self,
@@ -183,6 +187,26 @@ class Memory:
             records = self._relations_naming(records, entity)
         results = [self._relation_result(r) for r in records]
         return sorted(results, key=lambda r: (r.source.casefold(), r.type, r.target.casefold(), r.id))
+
+    def graph_snapshot(self, cwd: Path | None) -> dict:
+        """Read-only dump of every entity, relation and memory for the graph window.
+
+        Payloads go through their record model, so a field added later (e.g. `agent_claim` in M5) gets its
+        default on an older payload. Nothing is written back.
+        """
+        def scroll(col: str, model) -> list[dict]:
+            records = (model.from_payload(p.payload).to_payload() for p in self.vectors.list_points(col))
+            return sorted(records, key=lambda p: p["id"])
+
+        memories = [{k: p[k] for k in MEMORY_GRAPH_FIELDS} for p in scroll(self.col, MemoryRecord)]
+        return {
+            "generated_at": utcnow(),
+            "current_project_id": self.db.find_project(str(project_root(cwd))) if cwd else None,
+            "projects": self.db.list_projects(),
+            "entities": scroll(self.entity_col, EntityRecord),
+            "relations": scroll(self.relation_col, RelationRecord),
+            "memories": memories,
+        }
 
     def _relations_naming(self, records: list[RelationRecord], entity: str) -> list[RelationRecord]:
         """The relations with an end whose name or an alias normalizes to `entity`."""

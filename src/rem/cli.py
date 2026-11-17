@@ -67,6 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     cmd("daemon", "run the rem daemon in the foreground")
     cmd("start", "start the rem daemon in the background")
     cmd("stop", "stop the rem daemon")
+    cmd("graph", "open the read-only graph window")
     cmd("status", "show daemon status")
     i = cmd("install-service", "install the systemd user service")
     i.add_argument("--enable", action="store_true", help="also enable and start it now")
@@ -331,6 +332,24 @@ def main(argv: list[str] | None = None) -> int:
 
                 pid = ensure_daemon(cfg).status()["pid"]
                 print(f"rem daemon running (pid {pid})")
+                return 0
+            case "graph":
+                from rem.client import ensure_daemon
+
+                client = ensure_daemon(cfg)
+                client.graph(Path.cwd())  # fail fast if the daemon doesn't answer
+                from rem.graph import window
+
+                try:
+                    window.import_webview()
+                except ImportError:
+                    print("rem: install the graph extra: uv sync --extra graph", file=sys.stderr)
+                    return 3
+                try:
+                    window.run_window(client, Path.cwd())
+                except Exception as e:
+                    print(f"rem: could not open the graph window: {e}", file=sys.stderr)
+                    return 1
                 return 0
         _emit(args, _memory_command(args, cfg))
     except RemError as e:

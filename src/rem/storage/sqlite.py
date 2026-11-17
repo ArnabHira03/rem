@@ -159,6 +159,10 @@ class RemDB:
         row = self._conn.execute("SELECT root_path, name, git_remote FROM projects WHERE id = ?", (id,)).fetchone()
         return (row["root_path"], row["name"], row["git_remote"]) if row else None
 
+    def list_projects(self) -> list[dict]:
+        rows = self._conn.execute("SELECT id, name, root_path FROM projects ORDER BY name, id").fetchall()
+        return [{"id": r["id"], "name": r["name"], "root_path": r["root_path"]} for r in rows]
+
     def add_history(
         self,
         target_kind: TargetKind,

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rem — graph</title>
+<!-- @style -->
+</head>
+<body>
+<header id="bar">
+  <span class="brand">rem</span>
+  <label>project
+    <select id="project"><option value="all">all</option></select>
+  </label>
+  <span class="group">
+    <label><input type="checkbox" class="scope" value="global" checked> global</label>
+    <label><input type="checkbox" class="scope" value="system" checked> system</label>
+    <label><input type="checkbox" class="scope" value="project" checked> project</label>
+  </span>
+  <label><input type="checkbox" id="show-memories"> show memories</label>
+  <input type="search" id="search" placeholder="search entities" autocomplete="off" spellcheck="false">
+  <button type="button" id="refresh" title="Refresh from rem">⟳</button>
+  <span id="snapshot" class="muted"></span>
+  <span id="status" class="muted"></span>
+</header>
+<main id="stage">
+  <div id="cy"></div>
+  <div id="empty" hidden>rem hasn't extracted any entities here yet</div>
+  <div id="tooltip" hidden></div>
+  <aside id="legend" aria-label="legend">
+    <div class="legend-title">entity type</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><ellipse cx="10" cy="7" rx="8" ry="6"/></svg>person · other</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><rect x="2" y="1" width="16" height="12" rx="4"/></svg>tool</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><polygon points="5,1 15,1 19,7 15,13 5,13 1,7"/></svg>project</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><polygon points="10,0 18,7 10,14 2,7"/></svg>language</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><rect x="2" y="1" width="16" height="12"/></svg>org</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><polygon points="10,1 18,13 2,13"/></svg>place</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><polygon points="7,1 13,1 17,4 17,10 13,13 7,13 3,10 3,4"/></svg>concept</div>
+    <div class="legend-title">trust</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><circle class="filled" cx="10" cy="7" r="5"/></svg>verified</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><circle class="dashed" cx="10" cy="7" r="5"/></svg>unverified</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><line class="solid" x1="1" y1="7" x2="19" y2="7"/></svg>verified relation</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><line class="dash" x1="1" y1="7" x2="19" y2="7"/></svg>unverified relation</div>
+    <div class="legend-row"><svg viewBox="0 0 20 14"><circle class="mem" cx="10" cy="7" r="3"/></svg>memory</div>
+  </aside>
+  <aside id="panel" hidden>
+    <button type="button" id="panel-close" title="Close (Esc)">✕</button>
+    <div id="panel-body"></div>
+  </aside>
+</main>
+<!-- @scripts -->
+</body>
+</html>

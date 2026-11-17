@@ -60,6 +60,9 @@ class RemService:
                                         entity=entity)
         return await self.store.run(self.memory.list_relations, scope=scope, entity=entity)
 
+    async def graph(self, cwd: Path | None):
+        return await self.store.run(self.memory.graph_snapshot, cwd)
+
     async def get(self, id: str):
         return await self.store.run(self.memory.get, id)
 

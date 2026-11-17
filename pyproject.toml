@@ -17,6 +17,9 @@ dependencies = [
     "uvicorn>=0.54.0",
 ]
 
+[project.optional-dependencies]
+graph = ["pywebview[pyside6]>=6.2.1"]
+
 [project.scripts]
 rem = "rem:main"
 

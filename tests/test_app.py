@@ -254,3 +254,11 @@ async def test_relations_endpoint_limit_is_bounded(api):
     for bad in ("0", "-1", "101"):
         assert (await api.get("/relations", params={"query": "x", "limit": bad})).status_code == 400
     assert (await api.get("/relations", params={"query": "x", "limit": "100"})).status_code == 200
+
+
+async def test_graph_endpoint(api):
+    r = await api.get("/graph")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"generated_at", "current_project_id", "projects", "entities", "relations", "memories"}
+    assert body["entities"] == body["relations"] == body["memories"] == []
