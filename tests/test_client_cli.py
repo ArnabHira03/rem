@@ -201,3 +201,9 @@ def test_cli_relations_passes_query_entity_scope(daemon_env, monkeypatch, tmp_pa
     assert main(["relations", "--query", "uv", "--entity", "pip", "--scope", "global", "--limit", "4"]) == 0
     assert seen[0] == {"query": None, "entity": None, "scope": None, "limit": 10, "cwd": None}
     assert seen[1] == {"query": "uv", "entity": "pip", "scope": "global", "limit": 4, "cwd": tmp_path}
+
+
+def test_client_graph_round_trip(daemon_env):
+    assert main(["start"]) == 0
+    snap = RemClient(daemon_env.sock).graph(None)
+    assert set(snap) == {"generated_at", "current_project_id", "projects", "entities", "relations", "memories"}

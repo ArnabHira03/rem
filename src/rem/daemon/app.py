@@ -124,6 +124,9 @@ def build_app(service: RemService) -> Starlette:
             scope=Scope(q["scope"]) if q.get("scope") else None, limit=limit, cwd=_path(q.get("cwd")),
         ))
 
+    async def graph(request: Request):
+        return _json(await service.graph(_path(request.query_params.get("cwd"))))
+
     async def get(request: Request):
         mid = request.path_params["id"]
         rec = await service.get(mid)
@@ -198,6 +201,7 @@ def build_app(service: RemService) -> Starlette:
             Route("/memories", list_memories, methods=["GET"]),
             Route("/entities", list_entities, methods=["GET"]),
             Route("/relations", relations, methods=["GET"]),
+            Route("/graph", graph, methods=["GET"]),
             Route("/memories/{id}", get, methods=["GET"]),
             Route("/memories/{id}", update, methods=["PATCH"]),
             Route("/memories/{id}", delete, methods=["DELETE"]),
