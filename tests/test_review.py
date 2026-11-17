@@ -77,7 +77,8 @@ def test_corroborated_by_text_and_by_restates():
     now = {"m1": {"id": "m1", "text": "Uses  Tmux", "status": "verified", "provenance": "user_asserted"},
            "m2": {"id": "m2", "text": "other words", "status": "verified", "provenance": "user_asserted"}}
     out = review_run(rows([cand("Uses tmux"), cand("Likes vim", restates="m2")],
-                          history=[hist("CORROBORATE", "m1"), hist("CORROBORATE", "m2")], memories_now=now))
+                          history=[hist("CORROBORATE", "m1"), hist("CORROBORATE", "m2")], memories_now=now,
+                          turns=[{"role": "user", "content": "I use tmux. I like vim.", "ts": "1"}]))
     assert out["facts"][0]["outcome"] == {"kind": "corroborated", "memory_id": "m1", "memory_now": now["m1"]}
     assert out["facts"][1]["outcome"]["memory_id"] == "m2"
 
@@ -88,6 +89,14 @@ def test_one_corroborate_row_credits_one_fact():
                           history=[hist("CORROBORATE", "m1")], memories_now=now))
     kinds = [f["outcome"]["kind"] for f in out["facts"]]
     assert kinds == ["corroborated", "none"]
+
+
+def test_corroboration_not_credited_to_unverified_fact():
+    now = {"m1": {"id": "m1", "text": "Uses tmux", "status": "verified", "provenance": "user_asserted"}}
+    out = review_run(rows([cand("Likes screen", "global", "assistant", restates="m1"), cand("Uses tmux")],
+                          history=[hist("CORROBORATE", "m1")], memories_now=now))
+    assert out["facts"][0]["outcome"] == {"kind": "none", "reason": "existing_or_skipped"}
+    assert out["facts"][1]["outcome"]["kind"] == "corroborated"
 
 
 def test_existing_or_skipped():
@@ -152,9 +161,10 @@ def test_run_summary_counts_and_flags():
     mid = memory_id("Uses tmux", Scope.GLOBAL, None, "job:7")
     now = {"m1": {"id": "m1", "text": "likes vim", "status": "verified", "provenance": "user_asserted"}}
     r = rows([cand("Uses tmux"), cand("Likes vim"), cand("Commit ID is 82fd0fc"), cand("Prefers emacs")],
-             history=[hist("ADD", mid), hist("CORROBORATE", "m1")], memories_now=now)
+             history=[hist("ADD", mid), hist("CORROBORATE", "m1")], memories_now=now,
+             turns=[{"role": "user", "content": "I use tmux. I like vim.", "ts": "1"}])
     s = run_summary(r)
-    assert (s["n_turns"], s["n_proposed"], s["n_added"], s["n_corroborated"], s["model"]) == (2, 4, 1, 1, "m")
+    assert (s["n_turns"], s["n_proposed"], s["n_added"], s["n_corroborated"], s["model"]) == (1, 4, 1, 1, "m")
     assert s["flags"] == ["downgraded", "noise"] and s["id"] == 7 and s["project_name"] == "rem"
 
 

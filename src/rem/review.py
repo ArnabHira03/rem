@@ -8,8 +8,8 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from rem.models import ENTITY_TYPES, Scope, memory_id, normalize_text
-from rem.trust import user_states
+from rem.models import ENTITY_TYPES, Candidate, Scope, Status, memory_id, normalize_text
+from rem.trust import assign_trust, user_states
 
 RULES = ("downgraded", "invalid-type", "noise", "narration", "scope-hint", "relation-not-written", "failed")
 NARRATION_VERBS = frozenset({
@@ -83,7 +83,9 @@ def _facts(rows: RunRows, candidates: list[dict]) -> list[dict]:
             mid = memory_id(text, Scope(scope), project_id if scope == Scope.PROJECT else None, job_key)
             if mid in added_ids:
                 outcome = {"kind": "added", "memory_id": mid, "memory_now": rows.memories_now.get(mid)}
-            else:
+            elif assign_trust(Candidate(text=text, scope=scope, origin=effective,
+                                        evidence_source=c.get("evidence_source"))).status == Status.VERIFIED:
+                # only a verified fact can corroborate (trust.decide)
                 for j, target in enumerate(corroborated):
                     now = rows.memories_now.get(target)
                     if j in credited or not (target == restates or (
