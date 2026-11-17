@@ -75,7 +75,8 @@ Decided **now** so the payload and history schema never need a breaking change. 
   - It reuses the **same trust model** as memories: a relation proposed by the assistant is `unverified` until corroborated.
 - **Memory ↔ entity links** are stored on both sides (`memory.entity_ids`, `entity.memory_ids`), as Mem0 does. Relations cite their evidence memories.
 - **The graph interface (M9)** is a **read-only visualization**:
-  - It's served by the daemon as a local web page at `/graph`, built from scrolling the three collections. Nodes are entities (and optionally memories, like Obsidian notes); edges are relations plus mention links.
+  - **Superseded by `2026-11-17-m9-graph-design.md`:** it is a local desktop window (`rem graph`, pywebview on Qt) fed by a read-only daemon route `GET /graph` over the socket, not a browser page.
+  - It's built from scrolling the three collections. Nodes are entities (and optionally memories, like Obsidian notes); edges are relations plus mention links.
   - It is not a separate store.
   - Editing from the UI, if added later, goes through the same Memory API, so history and trust apply.
 
