@@ -54,6 +54,16 @@ A second panel for **checking extraction quality** (is rem picking the right thi
 - **Theme: black and white.**
 - **Data:** a snapshot when the window opens, plus a ⟳ refresh button.
 
+## Grouping requirements (user, 2026-11-17)
+Visual grouping is kept strictly separate from rem's entity identity and storage. The window must never become an entity-resolution or relationship-inference system.
+1. Records are grouped only when their `normalized` names are identical. Aliases, similar names and semantic similarity never merge records.
+2. Every original entity id, scope, project, relation and memory association is preserved and shown.
+3. **Project and scope filters are applied before grouping.** A filtered view never includes records from unrelated projects.
+4. Grouping never creates, modifies or infers a relationship. Every edge drawn is an existing stored relation or memory↔entity association.
+5. A relation whose two ends are represented by the same node is drawn as no edge (no self-loop) but stays in the detail panel.
+6. The detail panel clearly separates the individual records: one section per member record, each with its own entity id, project, scope, relations and memories.
+7. Tests verify that grouping never introduces a relationship and never changes the underlying entity identities.
+
 ## Builder's decisions (documented before implementation, as requested)
 
 ### Graph library
@@ -121,7 +131,7 @@ graph = ["pywebview[pyside6]>=6.2.1"]
 4. If `show_memories` is on, add memory nodes `mem:<id>` and mention edges `men:<memory id>:<normalized>` using the exact link rule above, among kept records only.
 
 Node data:
-- `members`: every grouped record, with its entity id, name, type, aliases, scope, project.
+- `members`: every grouped record, with its entity id, name, type, aliases, scope, project, and that record's own relations and memories (the panel renders one section per member).
 - `type`: the members' type if they all agree, else `mixed`.
 - `verified`: true iff any memory with an edge to the node is verified.
 - `relations`: each with its id, direction, type, other end, status, provenance, scope and project.
@@ -181,7 +191,9 @@ There are no other node or edge kinds.
   - a self-loop after grouping gets no edge but stays in the panel;
   - node `verified` derivation;
   - lone memories;
-  - no edge exists without a stored relation or link (an anti-inference check over generated cases).
+  - no edge exists without a stored relation or link (an anti-inference check over generated cases);
+  - grouping leaves identities unchanged: the multiset of member entity ids equals the filtered input ids, each member's scope, project, relation ids and memory ids equal its stored record's, and the input snapshot is not mutated;
+  - filtering happens before grouping: a project-X view contains no member, relation or memory from another project.
 - `tests/test_app.py` / `tests/test_client_cli.py`: `GET /graph` and `RemClient.graph`. `rem graph` without the extra exits 3 with the hint (simulated with a monkeypatched import).
 - The window and JS are smoke-tested by hand against a throwaway store. Nothing in the default suite imports Qt.
 

@@ -8,7 +8,11 @@ rem is a local-first personal memory layer for AI agents, modelled on Mem0. Pyth
 
 The **approved design (rev 2)** is `docs/superpowers/specs/2026-11-15-rem-design.md`, with diagrams in `docs/superpowers/specs/2026-11-15-rem-architecture.html`. It is implemented milestone by milestone (M1 → M9). Background notes are in `plans/initial_plan.md` and `plans/Mem0 Memory Pipeline - Claude.pdf`; `plans/` is **gitignored** and local only.
 
-Each milestone gets its own implementation plan before any code is written.
+Each milestone gets its own implementation plan before any 
+code is written.
+
+## Rules
+- never create anything in claude artifact
 
 ## Commands
 
