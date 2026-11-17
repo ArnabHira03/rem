@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from rem.cli import main
@@ -78,6 +80,18 @@ def test_shipped_dataset_is_well_formed():
     assert sum(1 for c in cases if not c["expected"]) >= 4
     assert sum(1 for c in cases if c["expect_corroborate"]) >= 4
     assert any("[REDACTED:" in t["content"] for c in cases for t in c["turns"])
+    assert len(cases) >= 50
+    assert sum(1 for c in cases if not c["expected"]) >= 6
+    real = [c["id"] for c in cases if c["id"].startswith("real-")]
+    assert len(real) >= 10
+    for kind in ("noise", "activity", "quoted", "scope", "assistant", "types", "relations"):
+        assert any(kind in i for i in real), kind
+    # Expected facts never keep one-off session details: no URLs, no commit ids.
+    commit_like = re.compile(r"\b(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b")
+    for c in cases:
+        for fact in c["expected"]:
+            assert "http" not in fact["text"], (c["id"], fact["text"])
+            assert not commit_like.search(fact["text"]), (c["id"], fact["text"])
 
 
 def test_shipped_dataset_labels_are_valid():
