@@ -54,3 +54,34 @@ def test_graph_snapshot_writes_nothing(mem):
     mem.graph_snapshot(None)
     mem.graph_snapshot(None)
     assert state() == before
+
+
+def test_graph_snapshot_tolerates_payloads_missing_model_defaults(mem):
+    """A memory written before M5 has no `agent_claim`; an entity payload may lack `aliases`."""
+    from rem.models import EntityRecord, MemoryRecord, utcnow
+    from rem.storage.vector.base import VectorPoint
+
+    now = utcnow()
+    old_mem = MemoryRecord(
+        id="00000000-0000-0000-0000-000000000001", text="Prefers uv", hash="h", scope="global", project_id=None,
+        project_name=None, provenance="user_asserted", status="verified", evidence_source=None, observed_at=None,
+        source="cli", session_id=None, job_id=None, created_at=now, updated_at=now,
+    ).to_payload()
+    del old_mem["agent_claim"]
+    old_ent = EntityRecord(
+        id="00000000-0000-0000-0000-000000000002", name="uv", normalized="uv", type="tool", scope="global",
+        project_id=None, memory_ids=[old_mem["id"]], created_at=now, updated_at=now,
+    ).to_payload()
+    del old_ent["aliases"]
+    zero = [0.0] * mem.embedder.dims
+    mem.vectors.upsert(mem.col, [VectorPoint(old_mem["id"], zero, old_mem)])
+    mem.vectors.upsert(mem.entity_col, [VectorPoint(old_ent["id"], zero, old_ent)])
+
+    snap = mem.graph_snapshot(None)
+    [m] = snap["memories"]
+    assert m["agent_claim"] is False and set(m) == set(MEMORY_GRAPH_FIELDS)
+    [e] = snap["entities"]
+    assert e["aliases"] == []
+    # read-only: the stored payloads are not rewritten
+    assert "agent_claim" not in _scroll(mem, mem.col)[0]
+    assert "aliases" not in _scroll(mem, mem.entity_col)[0]

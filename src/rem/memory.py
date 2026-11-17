@@ -189,17 +189,22 @@ class Memory:
         return sorted(results, key=lambda r: (r.source.casefold(), r.type, r.target.casefold(), r.id))
 
     def graph_snapshot(self, cwd: Path | None) -> dict:
-        """Read-only dump of every entity, relation and memory (stored payloads) for the graph window."""
-        def scroll(col: str) -> list[dict]:
-            return sorted((p.payload for p in self.vectors.list_points(col)), key=lambda p: p["id"])
+        """Read-only dump of every entity, relation and memory for the graph window.
 
-        memories = [{k: p[k] for k in MEMORY_GRAPH_FIELDS} for p in scroll(self.col)]
+        Payloads go through their record model, so a field added later (e.g. `agent_claim` in M5) gets its
+        default on an older payload. Nothing is written back.
+        """
+        def scroll(col: str, model) -> list[dict]:
+            records = (model.from_payload(p.payload).to_payload() for p in self.vectors.list_points(col))
+            return sorted(records, key=lambda p: p["id"])
+
+        memories = [{k: p[k] for k in MEMORY_GRAPH_FIELDS} for p in scroll(self.col, MemoryRecord)]
         return {
             "generated_at": utcnow(),
             "current_project_id": self.db.find_project(str(project_root(cwd))) if cwd else None,
             "projects": self.db.list_projects(),
-            "entities": scroll(self.entity_col),
-            "relations": scroll(self.relation_col),
+            "entities": scroll(self.entity_col, EntityRecord),
+            "relations": scroll(self.relation_col, RelationRecord),
             "memories": memories,
         }
 

@@ -63,14 +63,15 @@ def build_view(
         for direction, own, other, other_node in (("out", src, dst, dst_node), ("in", dst, src, src_node)):
             member_rels[own["id"]].setdefault(r["id"], {
                 "id": r["id"], "direction": direction, "type": r["type"], "other": other["name"],
-                "other_node": other_node, "status": r["status"], "provenance": r["provenance"],
+                "other_entity_id": other["id"], "other_node": other_node, "status": r["status"], "provenance": r["provenance"],
                 "scope": r["scope"], "project_id": r.get("project_id"), "project_name": pname(r), "drawn": drawn,
             })
         if drawn:
             edges.append({
                 "id": f"rel:{r['id']}", "kind": "relation", "source": src_node, "target": dst_node,
                 "rel_type": r["type"], "status": r["status"], "provenance": r["provenance"],
-                "sentence": r.get("sentence"), "evidence": len(r.get("memory_ids", [])), "project_name": pname(r),
+                "sentence": r.get("sentence"), "evidence": len(r.get("memory_ids", [])), "scope": r["scope"],
+                "project_name": pname(r),
             })
 
     # 4. links (M, E): both kept, and stored on either side

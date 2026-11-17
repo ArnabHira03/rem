@@ -1,5 +1,9 @@
 /* rem graph window: black and white only. Every colour here is a grey (R == G == B). */
 * { box-sizing: border-box; }
+/* no browser blue: selection, keyboard focus and form-control accents are black */
+::selection { background: #000; color: #fff; }
+:focus-visible { outline: 2px solid #000; outline-offset: 1px; }
+input, select, button { accent-color: #000; }
 html, body { margin: 0; height: 100%; }
 body {
   display: flex; flex-direction: column;

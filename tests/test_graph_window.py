@@ -82,6 +82,18 @@ def test_page_is_black_and_white():
     assert seen > 0
 
 
+def test_page_overrides_browser_blue_selection_focus_and_accent():
+    css = (STATIC / "graph.css").read_text(encoding="utf-8")
+    flat = re.sub(r"\s+", "", css)
+    sel = re.search(r"::selection\{([^}]*)\}", flat)
+    assert sel and "background:#000;" in sel.group(1) + ";" and "color:#fff;" in sel.group(1) + ";"
+    focus = re.search(r":focus-visible\{([^}]*)\}", flat)
+    assert focus and "outline:2pxsolid#000" in focus.group(1)
+    for sel in ("input", "select"):
+        rule = re.search(r"(?:^|[},])" + sel + r"(?:,[^{]*)?\{([^}]*)\}", flat)
+        assert rule and "accent-color:#000" in rule.group(1), sel
+
+
 def test_api_initial_view_and_refresh():
     from rem.graph.window import Api
 

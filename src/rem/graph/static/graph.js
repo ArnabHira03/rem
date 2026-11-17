@@ -200,8 +200,9 @@
     $("tooltip").hidden = true;
   }
 
-  // ---------- search (JS only, over the current view) ----------
+  // ---------- search (JS only, over the current view): entity name or alias only ----------
   function matches(n, q) {
+    if (n.kind !== "entity") return false;
     if ((n.label || "").toLowerCase().indexOf(q) >= 0) return true;
     return (n.members || []).some(function (m) {
       if ((m.name || "").toLowerCase().indexOf(q) >= 0) return true;
@@ -267,9 +268,9 @@
     li.appendChild(el("span", null, arrow));
     li.appendChild(r.drawn ? nodeLink(r.other_node, r.other) : el("span", null, r.other));
     li.appendChild(el("span", null, " " + mark(r.status)));
-    li.appendChild(el("span", "meta", " · " + projectText(r)));
+    li.appendChild(el("span", "meta", " · " + r.scope + " · " + projectText(r)));
     if (!r.drawn) li.appendChild(el("span", "same", " (same node)"));
-    li.title = r.provenance + ", " + r.scope;
+    li.title = r.provenance + ", " + r.scope + ", relation " + r.id;
     return li;
   }
   function memoryItem(m) {
@@ -336,7 +337,8 @@
     if (e.sentence) body.appendChild(el("div", "fulltext", e.sentence));
     body.appendChild(kv([["status", mark(e.status) + " " + e.status], ["provenance", e.provenance],
                          ["evidence", e.evidence + (e.evidence === 1 ? " memory" : " memories")],
-                         ["project", projectText(e)], ["id", copyId(e.id.replace(/^rel:/, ""))]]));
+                         ["scope", e.scope], ["project", projectText(e)],
+                         ["relation id", copyId(e.id.replace(/^rel:/, ""))]]));
   }
 
   function mentionPanel(body, e) {

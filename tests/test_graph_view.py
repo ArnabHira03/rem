@@ -305,7 +305,7 @@ def test_label_and_member_order_and_sorting():
     edge = v["edges"][1]
     assert edge == {"id": "rel:r", "kind": "relation", "source": "ent:uv", "target": "ent:aaa", "rel_type": "uses",
                     "status": "verified", "provenance": "user_asserted", "sentence": "y uses a", "evidence": 1,
-                    "project_name": None}
+                    "scope": "global", "project_name": None}
 
 
 def test_default_filters():
@@ -340,3 +340,23 @@ def test_memory_project_name_falls_back_to_projects_lookup():
     v = view(s, show_memories=True)
     assert nodes_by_id(v)["mem:m1"]["project_name"] == "one"
     assert nodes_by_id(v)["ent:uv"]["memories"][0]["project_name"] == "one"
+
+
+def test_relation_identity_scope_and_other_entity_id():
+    s = _rich_snapshot()
+    v = view(s)
+    rels = {r["id"]: r for r in s["relations"]}
+    ents = {e["id"]: e for e in s["entities"]}
+    for edge in v["edges"]:
+        assert edge["kind"] == "relation"
+        assert edge["scope"] == rels[edge["id"].removeprefix("rel:")]["scope"]
+    for m in all_members(v):
+        for r in m["relations"]:
+            stored = rels[r["id"]]
+            want = stored["target_entity_id"] if r["direction"] == "out" else stored["source_entity_id"]
+            assert r["other_entity_id"] == want
+            assert r["other"] == ents[want]["name"]
+            assert r["scope"] == stored["scope"]
+    m2 = next(m for m in all_members(v) if m["entity_id"] == "e2")
+    assert m2["relations"][0]["other_entity_id"] == "e3"
+    assert {e["id"]: e["scope"] for e in v["edges"]} == {"rel:r1": "project", "rel:r2": "global"}
