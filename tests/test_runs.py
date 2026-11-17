@@ -151,3 +151,44 @@ def test_relation_ids_by_memory_one_scan(mem):
     assert mem.relation_ids_by_memory(Scope.PROJECT, 2) == {}
     # same filter as relations_for
     assert sorted(r.id for r in mem.relations_for("m1", Scope.GLOBAL, None)) == got["m1"]
+
+
+def test_messages_for_jobs_matches_messages_for(mem, ing):
+    a = seed(mem, ing, "s1", [("user", "one"), ("assistant", "two")], None)
+    ing.ingest("cli", "s1", None, [Turn("user", "three", "s1-later")])
+    b = ing.claim().id
+    c = seed(mem, ing, "s2", [("user", "four")], None)
+    unclaimed_session = ing.ingest("cli", "s3", None, [Turn("user", "five", "s3-0")])
+    got = ing.messages_for_jobs([c, a, b, 999])
+    assert set(got) == {a, b, c, 999}
+    for jid in (a, b, c, 999):
+        assert got[jid] == ing.messages_for(jid)
+    assert [t.content for t in got[a]] == ["one", "two"] and got[999] == []
+    assert ing.messages_for_jobs([]) == {}
+    del unclaimed_session
+
+
+def test_messages_for_jobs_uses_the_index(mem, ing):
+    plan = ing.conn.execute(
+        "EXPLAIN QUERY PLAN " + ing._MESSAGES_FOR_JOBS_SQL.format(marks="?,?"), (1, 2)).fetchall()
+    detail = " ".join(r[-1] for r in plan)
+    assert "messages_job" in detail and "SCAN m" not in detail and "SCAN messages" not in detail
+
+
+def test_list_runs_fetches_turns_once_per_batch(mem, ing, monkeypatch):
+    ids = [seed(mem, ing, f"s{i}", [("user", f"I use tool{i}")], [cand(f"Uses tool{i}")]) for i in range(7)]
+    calls = []
+    real = ing.messages_for_jobs
+    monkeypatch.setattr(ing, "messages_for_jobs", lambda job_ids: calls.append(list(job_ids)) or real(job_ids))
+    monkeypatch.setattr(ing, "messages_for", lambda job_id: pytest.fail("per-job turn query in the list path"))
+    monkeypatch.setattr(ing, "context_for", lambda job_id: pytest.fail("context turns in the list path"))
+    q = dict(project_id=None, status=None, flagged=False, limit=50, before=None)
+    page = runs.list_runs(mem, ing, **q)
+    assert len(page["runs"]) == 7 and all(r["n_turns"] == 1 for r in page["runs"])
+    assert len(calls) == 1
+    calls.clear()
+    monkeypatch.setattr(runs, "SCAN_BATCH", 3)
+    page = runs.list_runs(mem, ing, **{**q, "flagged": True, "limit": 1})
+    assert page == {"runs": [], "next_before": None}  # every fact is the user's own: nothing flagged
+    assert [len(c) for c in calls] == [3, 3, 1]
+    assert sorted(i for c in calls for i in c) == sorted(ids)

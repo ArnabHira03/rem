@@ -235,12 +235,33 @@ class IngestStore:
         ).fetchall()
         return [Turn(*r) for r in rows]
 
+    # The join on session_pk lets SQLite use messages_job (session_pk, job_id): a job's messages are
+    # always in its own session, so this is messages_for for many jobs without scanning messages.
+    _MESSAGES_FOR_JOBS_SQL = (
+        "SELECT j.id AS job_id, m.role, m.content, m.message_id, m.ts FROM jobs j "
+        "JOIN messages m ON m.session_pk = j.session_pk AND m.job_id = j.id "
+        "WHERE j.id IN ({marks}) ORDER BY m.id"
+    )
+
+    def messages_for_jobs(self, job_ids: list[int]) -> dict[int, list[Turn]]:
+        """messages_for for each job id (read-only), in one query per 500 ids."""
+        out: dict[int, list[Turn]] = {j: [] for j in job_ids}
+        ids = list(out)
+        for i in range(0, len(ids), 500):  # stay under SQLite's variable limit
+            chunk = ids[i:i + 500]
+            sql = self._MESSAGES_FOR_JOBS_SQL.format(marks=",".join("?" * len(chunk)))
+            for r in self.conn.execute(sql, chunk):
+                r = tuple(r)
+                out[r[0]].append(Turn(*r[1:]))
+        return out
+
     def context_for(self, job_id: int, limit: int = 10) -> list[Turn]:
         rows = self.conn.execute(
             """
             SELECT role, content, message_id, ts FROM messages
             WHERE session_pk = (SELECT session_pk FROM jobs WHERE id = :job)
-              AND id < COALESCE((SELECT MIN(id) FROM messages WHERE job_id = :job), 0)
+              AND id < COALESCE((SELECT MIN(id) FROM messages WHERE job_id = :job
+                                 AND session_pk = (SELECT session_pk FROM jobs WHERE id = :job)), 0)
             ORDER BY id DESC LIMIT :limit
             """,
             {"job": job_id, "limit": limit},

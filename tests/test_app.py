@@ -278,5 +278,5 @@ async def test_jobs_routes(api):
     await api.post("/ingest", json={"source": "cli", "session_id": "s", "turns": [{"role": "user", "content": "hi"}]})
     (item,) = (await api.get("/jobs")).json()["runs"]
     detail = (await api.get(f"/jobs/{item['id']}")).json()
-    assert set(detail) == {"run", "turns", "context_turns", "facts", "confirmations", "writes"}
+    assert set(detail) == {"run", "turns", "context_turns", "facts", "confirmations", "writes", "other_memory_writes"}
     assert detail["run"]["id"] == item["id"]

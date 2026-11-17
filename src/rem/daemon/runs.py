@@ -3,11 +3,12 @@
 Everything here runs in one store-thread call and only reads (SELECTs and vector gets/scrolls)."""
 
 from rem.memory import Memory
-from rem.models import Scope, memory_id
+from rem.models import Scope
 from rem.review import RunRows, parse_extraction, review_run, run_summary
-from rem.storage.queue import IngestStore
+from rem.storage.queue import IngestStore, Turn
 
 SCAN_CAP = 2000  # most jobs one flagged-only listing looks at
+SCAN_BATCH = 100  # jobs a flagged-only listing reviews per batch (one turn query each)
 STATUS_GROUPS = {"done": ("done",), "failed": ("failed",), "pending": ("pending", "processing")}
 
 # {(scope, project_id): {memory_id: [relation ids]}}, built once per list_runs / get_run call
@@ -19,14 +20,17 @@ def _turns(turns) -> list[dict]:
 
 
 def gather(memory: Memory, ingest: IngestStore, job_id: int, *, history: list[dict] | None = None,
-           with_context: bool = True, relations: _RelationCache | None = None) -> RunRows | None:
+           with_context: bool = True, relations: _RelationCache | None = None,
+           turns: list[Turn] | None = None) -> RunRows | None:
+    """A job's rows for rem.review. `turns` and `history`, when given, were fetched in a batch."""
     job = ingest.job_rows(job_id)
     if job is None:
         return None
     relations = {} if relations is None else relations
-    job_key = f"job:{job_id}"
     if history is None:
-        history = [h.model_dump(mode="json") for h in memory.db.history_for_job(job_key)]
+        history = [h.model_dump(mode="json") for h in memory.db.history_for_job(f"job:{job_id}")]
+    if turns is None:
+        turns = ingest.messages_for_jobs([job_id])[job_id]
     extraction = memory.db.get_extraction(job_id)
     candidates = parse_extraction(extraction[1])[0] if extraction else []
 
@@ -40,20 +44,19 @@ def gather(memory: Memory, ingest: IngestStore, job_id: int, *, history: list[di
             "scope": str(rec.scope), "project_id": rec.project_id,
         }
 
+    # relations of every memory this run added and that still exists (review credits ADD rows to facts)
     by_memory: dict[str, list[str]] = {}
-    added = {h["target_id"] for h in history if h["target_kind"] == "memory" and h["event"] == "ADD"}
-    for c in candidates:
-        scope = Scope(c.get("scope", "global"))
-        pid = job["project_id"] if scope == Scope.PROJECT else None
-        mid = memory_id(c.get("text", ""), scope, pid, job_key)
-        if mid in added:
-            key = (str(scope), pid)
-            if key not in relations:
-                relations[key] = memory.relation_ids_by_memory(scope, pid)
-            by_memory[mid] = relations[key].get(mid, [])
+    for h in history:
+        now = memories_now.get(h["target_id"])
+        if h["target_kind"] != "memory" or h["event"] != "ADD" or now is None:
+            continue
+        key = (now["scope"], now["project_id"])
+        if key not in relations:
+            relations[key] = memory.relation_ids_by_memory(Scope(now["scope"]), now["project_id"])
+        by_memory[h["target_id"]] = relations[key].get(h["target_id"], [])
 
     return RunRows(
-        job=job, turns=_turns(ingest.messages_for(job_id)),
+        job=job, turns=_turns(turns),
         context_turns=_turns(ingest.context_for(job_id)) if with_context else [],
         extraction=extraction, history=history, memories_now=memories_now, relations_by_memory=by_memory,
     )
@@ -70,10 +73,12 @@ def list_runs(memory: Memory, ingest: IngestStore, *, project_id: int | None, st
     relations: _RelationCache = {}
 
     def summaries(ids: list[int]) -> list[dict]:
+        # one history query and one turn query per batch; a summary needs no context turns
         history = memory.db.history_for_jobs([f"job:{i}" for i in ids])
+        turns = ingest.messages_for_jobs(ids)
         return [run_summary(gather(
             memory, ingest, i, history=[h.model_dump(mode="json") for h in history[f"job:{i}"]],
-            with_context=False, relations=relations)) for i in ids]
+            with_context=False, relations=relations, turns=turns[i])) for i in ids]
 
     if not flagged:
         ids = ingest.job_ids(project_id=project_id, statuses=statuses, before=before, limit=limit + 1)
@@ -83,7 +88,7 @@ def list_runs(memory: Memory, ingest: IngestStore, *, project_id: int | None, st
     scanned, cursor = 0, before
     while len(found) < limit and scanned < SCAN_CAP:
         ids = ingest.job_ids(project_id=project_id, statuses=statuses, before=cursor,
-                             limit=min(limit, SCAN_CAP - scanned))
+                             limit=min(max(limit, SCAN_BATCH), SCAN_CAP - scanned))
         if not ids:
             return {"runs": found, "next_before": None}
         for run in summaries(ids):

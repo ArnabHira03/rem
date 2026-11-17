@@ -52,39 +52,84 @@ def _flag(rule: str, reason: str | None = None) -> dict:
     return {"rule": rule, "reason": reason or _REASONS[rule]}
 
 
+def candidate_memory_id(candidate: dict, project_id: int | None, job_id: int) -> str:
+    """The id Memory.add derives first for a candidate of job `job_id` (models.memory_id)."""
+    scope = Scope(candidate.get("scope", "global"))
+    pid = project_id if scope == Scope.PROJECT else None
+    return memory_id(candidate.get("text", ""), scope, pid, f"job:{job_id}")
+
+
+def _verified(c: dict, origin: str) -> bool:
+    return assign_trust(Candidate(text=c.get("text", ""), scope=c.get("scope", "global"), origin=origin,
+                                  evidence_source=c.get("evidence_source"))).status == Status.VERIFIED
+
+
 def _facts(rows: RunRows, candidates: list[dict]) -> list[dict]:
+    """One reviewed fact per candidate, in the model's order.
+
+    Duplicates: like Memory._collapse_duplicates, each (normalised text, scope) group has one
+    representative, the first copy unless a later one is verified and it is not (then the first
+    verified copy). Only the representative is credited with the group's write (added or
+    corroborated) and is checked by relation-not-written with the group's pooled relations; the
+    other copies show the outcome "duplicate".
+
+    Added: the ADD row of the id Memory.add derives first (candidate_memory_id). When that id was
+    taken, add() re-derives another one, so a fact with no ADD row under its id falls back to an
+    uncredited memory ADD row of this run with the same normalised text. Each ADD or CORROBORATE
+    row is credited to at most one fact."""
     job = rows.job
     project_id = job.get("project_id")
-    job_key = f"job:{job['id']}"
     user_texts = [t["content"] for t in rows.turns if t["role"] == "user"]
     mem = [h for h in rows.history if h["target_kind"] == "memory"]
-    added_ids = {h["target_id"] for h in mem if h["event"] == "ADD"}
+    add_rows = [h for h in mem if h["event"] == "ADD"]
     corroborated = [h["target_id"] for h in mem if h["event"] == "CORROBORATE"]
-    credited: set[int] = set()  # each CORROBORATE row is credited to at most one fact
+    exact_ids = {candidate_memory_id(c, project_id, job["id"]) for c in candidates}
+    credited_adds: set[int] = set()  # indexes into add_rows
+    credited: set[int] = set()  # indexes into corroborated
     name = job.get("project_name")
     name_re = re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE) if name else None
-    seen: set[tuple[str, str]] = set()
-    facts = []
+
+    effective_of, groups = [], {}
     for i, c in enumerate(candidates):
-        text, scope = c.get("text", ""), c.get("scope", "global")
-        proposed = c.get("origin", "assistant")
+        text, proposed = c.get("text", ""), c.get("origin", "assistant")
         effective = proposed
         if proposed == "user" and (not user_texts or not user_states(text, user_texts)):
             effective = "assistant"
+        effective_of.append(effective)
+        groups.setdefault((normalize_text(text), c.get("scope", "global")), []).append(i)
+    representative: dict[tuple[str, str], int] = {}
+    for key, members in groups.items():
+        best = members[0]
+        for i in members[1:]:
+            if _verified(candidates[i], effective_of[i]) and not _verified(candidates[best], effective_of[best]):
+                best = i
+        representative[key] = best
+
+    facts = []
+    for i, c in enumerate(candidates):
+        text, scope = c.get("text", ""), c.get("scope", "global")
+        proposed, effective = c.get("origin", "assistant"), effective_of[i]
         norm = normalize_text(text)
         restates = c.get("restates")
+        key = (norm, scope)
         outcome: dict
-        if (norm, scope) in seen:
+        if representative[key] != i:
             outcome = {"kind": "none", "reason": "duplicate"}
         elif scope == Scope.PROJECT and project_id is None:
             outcome = {"kind": "none", "reason": "no_project"}
         else:
             outcome = {"kind": "none", "reason": "existing_or_skipped"}
-            mid = memory_id(text, Scope(scope), project_id if scope == Scope.PROJECT else None, job_key)
-            if mid in added_ids:
-                outcome = {"kind": "added", "memory_id": mid, "memory_now": rows.memories_now.get(mid)}
-            elif assign_trust(Candidate(text=text, scope=scope, origin=effective,
-                                        evidence_source=c.get("evidence_source"))).status == Status.VERIFIED:
+            mid = candidate_memory_id(c, project_id, job["id"])
+            hit = next((j for j, h in enumerate(add_rows) if j not in credited_adds and h["target_id"] == mid), None)
+            if hit is None:
+                hit = next((j for j, h in enumerate(add_rows) if j not in credited_adds
+                            and h["target_id"] not in exact_ids and h.get("new_value")
+                            and normalize_text(h["new_value"]) == norm), None)
+            if hit is not None:
+                credited_adds.add(hit)
+                added = add_rows[hit]["target_id"]
+                outcome = {"kind": "added", "memory_id": added, "memory_now": rows.memories_now.get(added)}
+            elif _verified(c, effective):
                 # only a verified fact can corroborate (trust.decide)
                 for j, target in enumerate(corroborated):
                     now = rows.memories_now.get(target)
@@ -94,9 +139,9 @@ def _facts(rows: RunRows, candidates: list[dict]) -> list[dict]:
                     credited.add(j)
                     outcome = {"kind": "corroborated", "memory_id": target, "memory_now": now}
                     break
-        seen.add((norm, scope))
         entities = c.get("entities") or []
         relations = c.get("relations") or []
+        pooled = [r for j in groups[key] for r in (candidates[j].get("relations") or [])]
         flags = []
         if proposed == "user" and effective == "assistant":
             flags.append(_flag("downgraded"))
@@ -109,7 +154,11 @@ def _facts(rows: RunRows, candidates: list[dict]) -> list[dict]:
             flags.append(_flag("narration"))
         if scope in ("system", "global") and ((name_re and name_re.search(text)) or _PROJECT_WORDS.search(text)):
             flags.append(_flag("scope-hint"))
-        if relations and outcome["kind"] == "added" and not rows.relations_by_memory.get(outcome["memory_id"]):
+        now = outcome.get("memory_now")
+        # rem delete and a text-changing update unlink the memory's relations, so only a memory that
+        # still holds the fact's text can show a relation that was never written
+        if (pooled and outcome["kind"] == "added" and now is not None and normalize_text(now["text"]) == norm
+                and not rows.relations_by_memory.get(outcome["memory_id"])):
             flags.append(_flag("relation-not-written"))
         facts.append({
             "index": i, "text": text, "scope": scope, "origin_proposed": proposed,
@@ -117,6 +166,22 @@ def _facts(rows: RunRows, candidates: list[dict]) -> list[dict]:
             "relations": relations, "outcome": outcome, "flags": flags,
         })
     return facts
+
+
+def _other_memory_writes(rows: RunRows, facts: list[dict]) -> list[dict]:
+    """This run's memory history rows no fact accounts for: every CONFIRM (from the cached
+    confirmations) and any ADD or CORROBORATE not credited to a fact, oldest first."""
+    credited = {(f["outcome"]["kind"], f["outcome"].get("memory_id")) for f in facts}
+    kinds = {"ADD": "added", "CORROBORATE": "corroborated"}
+    out = []
+    for h in rows.history:
+        if h["target_kind"] != "memory" or h["event"] not in ("CONFIRM", *kinds):
+            continue
+        if h["event"] in kinds and (kinds[h["event"]], h["target_id"]) in credited:
+            continue
+        out.append({"event": h["event"], "target_id": h["target_id"], "new_value": h.get("new_value"),
+                    "memory_now": rows.memories_now.get(h["target_id"])})
+    return out
 
 
 def _parsed(rows: RunRows) -> tuple[list[dict], list[dict]]:
@@ -156,5 +221,6 @@ def review_run(rows: RunRows) -> dict:
     return {
         "run": _run(rows, facts), "turns": rows.turns, "context_turns": rows.context_turns,
         "facts": facts, "confirmations": confirmations,
+        "other_memory_writes": _other_memory_writes(rows, facts),
         "writes": [{k: h[k] for k in ("target_kind", "event", "target_id", "new_value")} for h in rows.history],
     }

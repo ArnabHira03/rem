@@ -3,7 +3,9 @@ import subprocess
 import sys
 
 from rem.models import Scope, memory_id
-from rem.review import NARRATION_VERBS, RULES, RunRows, parse_extraction, review_run, run_summary
+from rem.review import (
+    NARRATION_VERBS, RULES, RunRows, candidate_memory_id, parse_extraction, review_run, run_summary,
+)
 
 
 def cand(text, scope="global", origin="user", restates=None, entities=(), relations=()):
@@ -142,12 +144,74 @@ def test_scope_hint_whole_word():
 
 def test_relation_not_written():
     mid = memory_id("Uses tmux", Scope.GLOBAL, None, "job:7")
+    now = {mid: {"id": mid, "text": "Uses tmux", "status": "verified", "provenance": "user_asserted"}}
     rel = [{"source": "a", "type": "uses", "target": "b"}]
     c = cand("Uses tmux", relations=rel)
-    assert "relation-not-written" in rules_of(review_run(rows([c], history=[hist("ADD", mid)]))["facts"][0])
-    ok = rows([c], history=[hist("ADD", mid)], relations_by_memory={mid: ["r1"]})
+    r = rows([c], history=[hist("ADD", mid)], memories_now=now)
+    assert "relation-not-written" in rules_of(review_run(r)["facts"][0])
+    ok = rows([c], history=[hist("ADD", mid)], memories_now=now, relations_by_memory={mid: ["r1"]})
     assert rules_of(review_run(ok)["facts"][0]) == []
     assert rules_of(review_run(rows([c]))["facts"][0]) == []
+
+
+def test_relation_not_written_skipped_after_delete_or_edit():
+    # rem delete and a text-changing update unlink the memory's relations: that is not a lost write
+    mid = memory_id("Uses tmux", Scope.GLOBAL, None, "job:7")
+    c = cand("Uses tmux", relations=[{"source": "a", "type": "uses", "target": "b"}])
+    deleted = rows([c], history=[hist("ADD", mid)], memories_now={mid: None})
+    assert rules_of(review_run(deleted)["facts"][0]) == []
+    edited = rows([c], history=[hist("ADD", mid)], memories_now={
+        mid: {"id": mid, "text": "Uses screen", "status": "verified", "provenance": "user_asserted"}})
+    assert rules_of(review_run(edited)["facts"][0]) == []
+    spacing = rows([c], history=[hist("ADD", mid)], memories_now={
+        mid: {"id": mid, "text": "uses  TMUX ", "status": "verified", "provenance": "user_asserted"}})
+    assert rules_of(review_run(spacing)["facts"][0]) == ["relation-not-written"]
+
+
+def test_duplicate_credits_the_most_trusted_copy():
+    # Memory._collapse_duplicates keeps the first verified copy of a (text, scope) group, at the
+    # group's first position; review credits that copy and shows the others as duplicates
+    now = {"m1": {"id": "m1", "text": "Uses tmux", "status": "verified", "provenance": "user_asserted"}}
+    out = review_run(rows([cand("Uses tmux", origin="assistant"), cand("uses tmux", origin="user")],
+                          history=[hist("CORROBORATE", "m1")], memories_now=now))
+    f = out["facts"]
+    assert f[0]["outcome"] == {"kind": "none", "reason": "duplicate"}
+    assert f[1]["outcome"] == {"kind": "corroborated", "memory_id": "m1", "memory_now": now["m1"]}
+    assert out["run"]["n_corroborated"] == 1
+    # with no verified copy the first one stays the representative
+    out = review_run(rows([cand("Prefers neovim"), cand("prefers neovim", origin="assistant")]))
+    assert [x["outcome"]["reason"] for x in out["facts"]] == ["existing_or_skipped", "duplicate"]
+
+
+def test_duplicate_group_pools_relations_for_the_rule():
+    mid = memory_id("Uses tmux", Scope.GLOBAL, None, "job:7")
+    now = {mid: {"id": mid, "text": "Uses tmux", "status": "verified", "provenance": "user_asserted"}}
+    rel = [{"source": "a", "type": "uses", "target": "b"}]
+    out = review_run(rows([cand("Uses tmux"), cand("uses tmux", relations=rel)],
+                          history=[hist("ADD", mid)], memories_now=now))
+    assert rules_of(out["facts"][0]) == ["relation-not-written"]
+
+
+def test_add_falls_back_to_text_when_the_id_was_rederived():
+    # Memory.add derives uuid5(mid) when mid is taken (an updated memory kept the id of its old text)
+    taken = memory_id("Uses tmux", Scope.GLOBAL, None, "job:7")
+    other = memory_id("Uses tmux", Scope.SYSTEM, None, "job:7")
+    a = {**hist("ADD", "rederived"), "new_value": "Uses tmux"}
+    b = {**hist("ADD", other), "new_value": "Uses tmux"}
+    out = review_run(rows([cand("Uses tmux", "system"), cand("Uses tmux")], history=[b, a]))
+    assert out["facts"][0]["outcome"]["memory_id"] == other
+    assert out["facts"][1]["outcome"]["memory_id"] == "rederived"
+    assert taken != "rederived"
+    # each ADD row is credited at most once
+    out = review_run(rows([cand("Uses tmux"), cand("Uses tmux", "system")], history=[a]))
+    assert [x["outcome"]["kind"] for x in out["facts"]] == ["added", "none"]
+
+
+def test_candidate_memory_id():
+    assert candidate_memory_id({"text": "Uses uv", "scope": "project"}, 3, 7) == memory_id(
+        "Uses uv", Scope.PROJECT, 3, "job:7")
+    assert candidate_memory_id({"text": "Uses uv", "scope": "global"}, 3, 7) == memory_id(
+        "Uses uv", Scope.GLOBAL, None, "job:7")
 
 
 def test_failed_run_flag():
@@ -172,6 +236,19 @@ def test_writes_and_confirmations():
     out = review_run(rows([], confirmations=[{"id": "x", "quote": "q"}], history=[hist("ADD", "e1", "entity")]))
     assert out["confirmations"] == [{"id": "x", "quote": "q"}]
     assert out["writes"][0]["target_kind"] == "entity" and out["writes"][0]["target_id"] == "e1"
+
+
+def test_other_memory_writes():
+    mid = memory_id("Uses tmux", Scope.GLOBAL, None, "job:7")
+    now = {"m9": {"id": "m9", "text": "Likes vim", "status": "verified", "provenance": "user_confirmed"}}
+    h = [hist("ADD", mid), hist("CONFIRM", "m9"), {**hist("ADD", "m5"), "new_value": "Uses zsh"},
+         hist("CORROBORATE", "m6"), hist("ADD", "e1", "entity")]
+    out = review_run(rows([cand("Uses tmux")], history=h, memories_now=now,
+                          confirmations=[{"memory_id": "m9", "hash": "h", "quote": "yes, I like vim"}]))
+    other = out["other_memory_writes"]
+    assert [(w["event"], w["target_id"]) for w in other] == [("CONFIRM", "m9"), ("ADD", "m5"), ("CORROBORATE", "m6")]
+    assert other[0]["memory_now"] == now["m9"] and other[1]["memory_now"] is None
+    assert out["confirmations"] == [{"memory_id": "m9", "hash": "h", "quote": "yes, I like vim"}]
 
 
 def test_run_without_extraction():
