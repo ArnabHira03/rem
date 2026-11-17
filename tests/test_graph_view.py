@@ -317,3 +317,26 @@ def test_default_filters():
 
 def test_empty_snapshot_gives_empty_view():
     assert view(snap()) == {"nodes": [], "edges": []}
+
+
+def test_filtered_out_relation_between_kept_entities_is_dropped():
+    s = snap(
+        entities=[ent("e1", "uv"), ent("e2", "pip")],
+        relations=[rel("rp", "e1", "e2", scope="project", project_id=2), rel("rs", "e1", "e2", scope="system")],
+    )
+    for v in (view(s, project=1, scopes=["global", "project"]), view(s, project=1, scopes=["global"])):
+        assert v["edges"] == []
+        for n in entity_nodes(v):
+            assert n["relations"] == [] and n["n_relations"] == 0
+            assert all(m["relations"] == [] for m in n["members"])
+    # sanity: with both relations in view, both are drawn
+    assert {e["id"] for e in view(s, project=2)["edges"]} == {"rel:rp", "rel:rs"}
+
+
+def test_memory_project_name_falls_back_to_projects_lookup():
+    m = mem("m1", scope="project", project_id=1, entity_ids=["e1"])
+    m["project_name"] = None
+    s = snap(entities=[ent("e1", "uv", scope="project", project_id=1)], memories=[m])
+    v = view(s, show_memories=True)
+    assert nodes_by_id(v)["mem:m1"]["project_name"] == "one"
+    assert nodes_by_id(v)["ent:uv"]["memories"][0]["project_name"] == "one"
