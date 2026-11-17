@@ -523,8 +523,14 @@
     var append = before !== undefined && before !== null;
     var mine = ++runsSeq;
     extStale = false;
+    if (!append) {
+      // a new filter: drop the old cursor now, so "load more" can't append a page of the old filters
+      nextBefore = null;
+      $("load-more").hidden = true;
+    }
+    var filters = readJobFilters(append ? before : null);
     setStatus("loading runs…");
-    api.jobs(readJobFilters(append ? before : null)).then(function (page) {
+    api.jobs(filters).then(function (page) {
       if (mine !== runsSeq) return;
       setStatus("");
       var ul = $("run-list");
@@ -532,7 +538,10 @@
       page.runs.forEach(function (r) { ul.appendChild(runItem(r)); });
       nextBefore = page.next_before === undefined ? null : page.next_before;
       $("load-more").hidden = nextBefore === null;
-      $("runs-empty").hidden = ul.childNodes.length > 0;
+      var empty = $("runs-empty");
+      empty.hidden = ul.childNodes.length > 0;
+      empty.textContent = !filters.flagged ? "no extraction runs"
+        : nextBefore !== null ? "no flagged runs in the jobs scanned so far" : "no flagged runs";
     }, fail);
   }
 
@@ -596,14 +605,44 @@
     line = el("div", "outcome", now ? label + " " + mark(now.status) + " " + now.status : label + ", deleted since");
     if (o.memory_id) line.title = "memory " + o.memory_id;
     c.appendChild(line);
-    if (now && now.text !== f.text) c.appendChild(el("div", "meta", "now: " + now.text));
+    // no run's ADD or CORROBORATE makes a memory user_confirmed: only the user's confirmation does
+    if (now && now.provenance === "user_confirmed") c.appendChild(el("div", "meta", "confirmed since"));
+    if (now && String(now.text).trim() !== String(f.text).trim()) c.appendChild(el("div", "meta", "now: " + now.text));
     return c;
   }
 
-  function writesCell(writes) {
+  function writesCell(body) {
     var c = el("div", "cell");
+    var other = body.other_memory_writes || [];
+    if (other.length) {
+      // memory writes no fact accounts for: confirmations, and adds or corroborations not credited
+      c.appendChild(el("h3", null, "other memory writes"));
+      var mul = el("ul");
+      other.forEach(function (w) {
+        var now = w.memory_now;
+        var text = now ? now.text : (w.new_value || w.target_id);
+        var li = el("li", null, "memory " + w.event.toLowerCase() + " " + text + (now ? " " + mark(now.status) : ", deleted since"));
+        li.title = "memory " + w.target_id;
+        mul.appendChild(li);
+      });
+      c.appendChild(mul);
+    }
+    var confirmations = body.confirmations || [];
+    if (confirmations.length) {
+      var confirmed = {};
+      other.forEach(function (w) { if (w.event === "CONFIRM") confirmed[w.target_id] = true; });
+      c.appendChild(el("h3", null, "confirmations"));
+      var cul = el("ul");
+      confirmations.forEach(function (x) {
+        var id = x.memory_id || x.id || "?";
+        var li = el("li", null, "memory " + id + (confirmed[id] ? " · confirmed" : " · not applied"));
+        if (x.quote) li.appendChild(el("div", "meta fulltext", "user: \u201c" + x.quote + "\u201d"));
+        cul.appendChild(li);
+      });
+      c.appendChild(cul);
+    }
     c.appendChild(el("h3", null, "entity and relation writes"));
-    var rows = writes.filter(function (w) { return w.target_kind === "entity" || w.target_kind === "relation"; });
+    var rows = (body.writes || []).filter(function (w) { return w.target_kind === "entity" || w.target_kind === "relation"; });
     if (!rows.length) { c.appendChild(el("div", "meta", "none")); return c; }
     var ul = el("ul");
     rows.forEach(function (w) {
@@ -662,7 +701,7 @@
       grid.appendChild(place(proposedCell(f), i + 2, 2));
       grid.appendChild(place(storedCell(f), i + 2, 3));
     });
-    grid.appendChild(place(writesCell(body.writes || []), writesRow, 3));
+    grid.appendChild(place(writesCell(body), writesRow, 3));
     out.appendChild(grid);
     $("run").scrollTop = 0;
   }

@@ -94,7 +94,8 @@ A run is **flagged** if any of its facts or the run itself carries a flag. Rules
   - `context_turns`;
   - `facts`: per proposed fact, `{index, text, scope, origin_proposed, origin_effective, restates, entities, relations, outcome: {kind, memory_id?, memory_now?, reason?}, flags: [{rule, reason}]}`;
   - `writes`: the run's history rows (`target_kind`, `event`, `target_id`, `new_value`);
-  - `confirmations`: the cached ones, if any.
+  - `confirmations`: the cached ones, if any;
+  - `other_memory_writes`: the run's memory `CONFIRM` rows and any memory `ADD`/`CORROBORATE` row not credited to a fact (`{event, target_id, new_value, memory_now}`).
 
   An unknown id gives 404.
 - `RemClient.jobs(...)` and `RemClient.job(id)`.
