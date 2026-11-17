@@ -1,10 +1,12 @@
 import pytest
 
 from rem.cli import main
+from rem.entities import normalize_name
 from rem.embed.hashing import HashingEmbedder
 from rem.errors import LLMError
-from rem.evals.extraction import DEFAULT_DATASET, load_cases, match_facts, run_eval
+from rem.evals.extraction import DEFAULT_DATASET, is_labelled, load_cases, match_facts, run_eval
 from rem.llm.fake import FakeLLM
+from rem.models import ENTITY_TYPES, RELATION_TYPES
 
 FISH = {"text": "Uses fish shell", "scope": "global", "origin": "user"}
 CASE_FISH = {
@@ -76,6 +78,36 @@ def test_shipped_dataset_is_well_formed():
     assert sum(1 for c in cases if not c["expected"]) >= 4
     assert sum(1 for c in cases if c["expect_corroborate"]) >= 4
     assert any("[REDACTED:" in t["content"] for c in cases for t in c["turns"])
+
+
+def test_shipped_dataset_labels_are_valid():
+    cases = load_cases(DEFAULT_DATASET)
+    with_relation = 0
+    for c in cases:
+        assert is_labelled(c), c["id"]
+        names, aliases = set(), {}
+        for fact in c["expected"]:
+            fact_names = set()
+            for e in fact["entities"]:
+                assert e["type"] in ENTITY_TYPES, (c["id"], e)
+                assert 1 <= len(e["name"].strip()) <= 80, (c["id"], e)
+                assert "[REDACTED:" not in e["name"], (c["id"], e)
+                norm = normalize_name(e["name"])
+                fact_names.add(norm)
+                names.add(norm)
+                for a in e.get("aliases", []):
+                    aliases.setdefault(normalize_name(a), set()).add(norm)
+            for r in fact.get("relations", []):
+                assert r["type"] in RELATION_TYPES, (c["id"], r)
+                src, tgt = normalize_name(r["source"]), normalize_name(r["target"])
+                # Ends name an entity of the same fact by its name, never an alias spelling.
+                assert src in fact_names and tgt in fact_names, (c["id"], r)
+                assert src != tgt, (c["id"], r)
+            with_relation += bool(fact.get("relations"))
+        # No label's name is another label's alias within one case.
+        for n in names:
+            assert aliases.get(n, set()) <= {n}, (c["id"], n)
+    assert with_relation >= 5
 
 
 def test_cli_eval_without_llm_exits_3(rem_home, capsys):
