@@ -67,6 +67,9 @@
 /* a list item's mark, link and meta flow as one line of text; a relation's id line takes its own row */
 #sphere-panel li { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 4px; }
 #sphere-panel li > .link { flex: 0 1 auto; min-width: 0; }
+/* a memory item (no id row): the text takes the rest of the line beside its mark instead of wrapping below */
+#sphere-panel li:not(:has(.ids)) > .link,
+#sphere-panel li:not(:has(.ids)) > span:nth-child(2) { flex: 1 1 0; }
 #sphere-panel li > .ids { flex-basis: 100%; }
 #sphere-panel .meta { color: #7f8bab; font-size: 12px; }
 #sphere-panel .fulltext { white-space: pre-wrap; word-break: break-word; margin: 6px 0; }

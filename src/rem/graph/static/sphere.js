@@ -342,6 +342,8 @@ let camDist = HOME_DIST;
 let autoOn = !reduced.matches;
 let resumeAt = 0;
 let spinGain = 0, ringGain = 0;     // 0..1: how much of the auto-rotate / ring drift speed is applied
+let ringVel = 0;                    // ring drag inertia, rad/ms
+let ringResumeAt = 0;
 let pointer = null;                 // last pointer position over the canvas, for re-picking every frame
 let ringAngle = 0;
 const spinVel = { axis: new THREE.Vector3(0, 1, 0), w: 0 };   // drag inertia, rad/ms
@@ -533,30 +535,55 @@ function makeSegments(pairs, parent, objects) {
 
 // ---------- look: trust, hover, selection, search ----------
 function focusId() { return hoverId || selectedId; }
-function litSet() {
-  const f = focusId();
-  if (f && world) {
-    const s = new Set([f]);
-    (world.nbrs.get(f) || []).forEach((x) => s.add(x));
-    return s;
+
+// Layers around the focus: id -> 0 (the focus), 1 or 2. One layer is one step out through a memory or a
+// relation: an entity's layer holds its memories, the entities those memories mention, and its relation
+// neighbours; a memory's layer holds its entities. Hover shows one layer; the selected item shows two.
+let levels = null;   // cached by applyLook: Map id -> level, or null when nothing is lit
+function layersAround(focus, depth) {
+  const level = new Map([[focus, 0]]);
+  let frontier = [focus];
+  const nb = (x) => world.nbrs.get(x) || [];
+  for (let d = 1; d <= depth && frontier.length; d++) {
+    const next = [];
+    const visit = (x) => { if (!level.has(x)) { level.set(x, d); next.push(x); } };
+    for (const x of frontier) {
+      for (const y of nb(x)) {
+        visit(y);
+        if (!world.ents.has(y)) for (const z of nb(y)) visit(z);   // a memory brings its entities into the layer
+      }
+    }
+    frontier = next;
   }
-  return searchHits;
+  return level;
+}
+function computeLevels() {
+  if (!world) return null;
+  const f = focusId();
+  if (f) return layersAround(f, hoverId && hoverId !== selectedId ? 1 : 2);
+  if (searchHits) return new Map([...searchHits].map((id) => [id, 0]));
+  return null;
 }
 
 function applyLook() {
   if (!world) return;
-  const f = focusId(), lit = litSet();
-  const on = (id) => !lit || lit.has(id);
+  const f = focusId();
+  levels = computeLevels();
+  const lit = levels;
+  const lvl = (id) => (lit ? (lit.has(id) ? lit.get(id) : -1) : 0);
+  // full brightness for the focus and layer 1, a little softer for layer 2, dim for the rest
+  const strength = (id) => { const l = lvl(id); return l < 0 ? DIM : l === 2 ? 0.6 : 1; };
   for (const e of world.ents.values()) {
     if (!e.visible) continue;
-    e.sprite.material.opacity = on(e.id) ? 1 : DIM;
-    e.sprite.scale.setScalar(e.size * (e.id === f ? 1.35 : lit && lit.has(e.id) && f ? 1.12 : 1));
+    e.sprite.material.opacity = strength(e.id);
+    const l = lvl(e.id);
+    e.sprite.scale.setScalar(e.size * (f && e.id === f ? 1.35 : f && l === 1 ? 1.12 : 1));
   }
   const vColor = lin(MEM_VERIFIED), uColor = lin(MEM_UNVERIFIED), tmp = new THREE.Color();
   const paintPoints = (pts, items) => {
     const col = pts.geometry.getAttribute("color");
     items.forEach((m, i) => {
-      tmp.copy(m.verified ? vColor : uColor).multiplyScalar(on(m.id) ? (m.id === f ? 1.6 : 1) : DIM);
+      tmp.copy(m.verified ? vColor : uColor).multiplyScalar(m.id === f ? 1.6 : strength(m.id));
       col.setXYZ(i, tmp.r, tmp.g, tmp.b);
     });
     col.needsUpdate = true;
@@ -564,19 +591,24 @@ function applyLook() {
   paintPoints(world.memPoints, world.sphereMems);
   paintPoints(world.ringPoints, world.ringMems);
 
+  // a line is lit, in its entity's colour, when both its ends are lit; brighter nearer the focus
   const lineColor = lin(LINE_COLOR), lc = world.lines.geometry.getAttribute("color");
-  world.segs.forEach((s, i) => {
-    if (f && (s.mem === f || s.ent === f)) tmp.copy(lin(world.ents.get(s.ent).color)).multiplyScalar(0.75);
-    else tmp.copy(lineColor).multiplyScalar(lit ? DIM : 1);
+  world.segs.forEach((sg, i) => {
+    const a = lvl(sg.mem), b = lvl(sg.ent);
+    if (f && a >= 0 && b >= 0) {
+      const far = Math.max(a, b);
+      tmp.copy(lin(world.ents.get(sg.ent).color)).multiplyScalar(far <= 1 ? 0.75 : 0.35);
+    } else tmp.copy(lineColor).multiplyScalar(lit ? DIM : 1);
     lc.setXYZ(2 * i, tmp.r, tmp.g, tmp.b); lc.setXYZ(2 * i + 1, tmp.r, tmp.g, tmp.b);
   });
   lc.needsUpdate = true;
 
   const ac = world.arcLines.geometry.getAttribute("color");
   for (const a of world.arcs) {
+    const both = lvl(a.source) >= 0 && lvl(a.target) >= 0;
     const incident = f && (a.source === f || a.target === f);
     tmp.copy(lin(a.verified ? ARC_VERIFIED : ARC_UNVERIFIED))
-      .multiplyScalar(incident ? 1.3 : lit && !(lit.has(a.source) && lit.has(a.target)) ? DIM : a.verified ? 0.7 : 1);
+      .multiplyScalar(incident ? 1.3 : lit && !both ? DIM : f && both ? 1.1 : a.verified ? 0.7 : 1);
     for (let k = 0; k < a.count * 2; k++) ac.setXYZ(2 * a.from + k, tmp.r, tmp.g, tmp.b);
   }
   ac.needsUpdate = true;
@@ -630,13 +662,23 @@ function labelDiv(i) {
 function updateLabels() {
   let used = 0;
   if (world) {
-    const f = focusId(), lit = litSet();
+    const f = focusId(), lit = levels;
+    // the focus (or the search hits) always get a label; then layer 1, layer 2 and the most-linked
+    // entities, each only where it doesn't collide with one already placed
     const forced = [];
-    if (f) { if (world.ents.has(f)) forced.push(f); (world.nbrs.get(f) || []).forEach((x) => { if (world.ents.has(x)) forced.push(x); }); }
-    else if (searchHits) forced.push(...searchHits);
+    const layered = [];
+    if (f && lit) {
+      if (world.ents.has(f)) forced.push(f);
+      for (const want of [1, 2]) {
+        const ids = [...lit].filter(([id, l]) => l === want && world.ents.has(id)).map(([id]) => id);
+        ids.sort((x, y) => world.ents.get(y).n - world.ents.get(x).n || (x < y ? -1 : 1));
+        layered.push(...ids);
+      }
+    } else if (searchHits) forced.push(...searchHits);
     const frac = Math.min(1, 0.15 * Math.pow(HOME_DIST / camDist, 2.5));
     const top = world.topByMem.slice(0, Math.ceil(world.topByMem.length * frac)).map((e) => e.id);
     const seen = new Set(), boxes = [];
+    let labelStrength = 1;
     const place = (text, p, isForced, cls) => {
       const s = toScreen(p), w = text.length * 6.4 + 10, h = 16;
       const box = [s.x + 6, s.y - h / 2, s.x + 6 + w, s.y + h / 2];
@@ -646,10 +688,10 @@ function updateLabels() {
       if (d.textContent !== text) d.textContent = text;
       d.className = "sphere-label" + (cls ? " " + cls : "");
       d.style.transform = `translate(${Math.round(box[0])}px, ${Math.round(box[1])}px)`;
-      d.style.opacity = String(Math.max(0.25, Math.min(1, 0.55 + p.dot(CAM_DIR) * 0.6)) * (lit && !isForced ? DIM * 3 : 1));
+      d.style.opacity = String(Math.max(0.25, Math.min(1, 0.55 + p.dot(CAM_DIR) * 0.6)) * labelStrength);
       d.hidden = false;
     };
-    for (const id of forced.concat(top)) {
+    for (const id of forced.concat(layered, top)) {
       if (seen.has(id)) continue;
       seen.add(id);
       const e = world.ents.get(id);
@@ -659,10 +701,13 @@ function updateLabels() {
       const front = p.dot(CAM_DIR);
       if (front <= 0.05 && !isForced) continue;   // front hemisphere only
       if (front <= -0.2 && isForced && id !== f) continue;
-      place(e.label, p, isForced, isForced ? "strong" : "");
+      const l = lit && lit.has(id) ? lit.get(id) : -1;
+      labelStrength = !lit || isForced || l === 1 ? 1 : l === 2 ? 0.75 : DIM * 3;
+      place(e.label, p, isForced, isForced || l === 1 ? "strong" : "");
     }
     if (f) for (const a of world.arcs) {
       if (a.source !== f && a.target !== f) continue;
+      labelStrength = 1;
       place(a.type, a.mid.clone().applyMatrix4(root.matrixWorld), true, "rel");
     }
   }
@@ -689,7 +734,7 @@ function frame(t) {
   }
   // Auto-rotate pauses for the sphere's own items (hover, an open panel, drag, inertia, a focus turn), never
   // for the ring's. It eases out at once and back in after RESUME_MS.
-  const spinOn = autoOn && !(drag && drag.moved) && !(anim && anim.kind === "root") && spinVel.w <= 1e-6 && !pausesSphere(hoverId) && !pausesSphere(panelId) &&
+  const spinOn = autoOn && !(drag && drag.moved && drag.mode === "sphere") && !(anim && anim.kind === "root") && spinVel.w <= 1e-6 && !pausesSphere(hoverId) && !pausesSphere(panelId) &&
     now >= resumeAt;
   spinGain = ease(spinGain, spinOn ? 1 : 0, dt);
   if (spinGain > 1e-3) {
@@ -697,8 +742,14 @@ function frame(t) {
   }
   // The ring stops while one of its dots is hovered or selected, while a panel is open, with auto-rotate off,
   // and under reduced motion; dragging the sphere doesn't stop it.
+  const ringDragged = drag && drag.mode === "ring" && drag.moved;
+  if (!ringDragged && Math.abs(ringVel) > 1e-7) {
+    ringAngle += ringVel * dt;
+    ringVel *= Math.exp(-dt / 400);
+    if (Math.abs(ringVel) <= 1e-7) ringResumeAt = now + RESUME_MS;
+  }
   const ringOn = !(anim && anim.kind === "ring") && autoOn && !reduced.matches && !panelId && !isRing(hoverId) &&
-    !isRing(selectedId);
+    !isRing(selectedId) && !ringDragged && Math.abs(ringVel) <= 1e-7 && now >= ringResumeAt;
   ringGain = ease(ringGain, ringOn ? 1 : 0, dt);
   if (ringGain > 1e-3) ringAngle += (ringGain * RING_SPIN * dt) / 1000;
   ringGroup.rotation.y = ringAngle;
@@ -720,6 +771,65 @@ function frame(t) {
   }
   raf = requestAnimationFrame(frame);
 }
+// ---------- grabbing the ring ----------
+// Where the pointer's ray meets the ring's plane (y = 0), as an angle about the vertical axis; null when the
+// ray misses the plane (pointing above the horizon).
+const raycaster = new THREE.Raycaster(), groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+function groundAngle(px, py) {
+  const ndc = new THREE.Vector2((px / stage.clientWidth) * 2 - 1, 1 - (py / stage.clientHeight) * 2);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.ray.intersectPlane(groundPlane, new THREE.Vector3());
+  return hit && hit.lengthSq() > 0.04 ? Math.atan2(hit.z, hit.x) : null;
+}
+// Whether a screen point lies on the ring's band: within a few pixels of the ring's outline, where the ring
+// is outside the sphere's disc or passes in front of it.
+function onRing(px, py) {
+  if (!world || !world.ringMems.length) return false;
+  const centre = toScreen(new THREE.Vector3());
+  const alpha = Math.asin(Math.min(1, 1 / camDist));
+  const discPx = (stage.clientHeight / 2) * Math.tan(alpha) / Math.tan((FOV * Math.PI) / 360);
+  const outside = Math.hypot(px - centre.x, py - centre.y) > discPx;
+  const N = 96;
+  let prev = null;
+  for (let i = 0; i <= N; i++) {
+    const a = (2 * Math.PI * i) / N, w = new THREE.Vector3(RING_R * Math.cos(a), 0, RING_R * Math.sin(a));
+    const sp = toScreen(w), front = w.dot(CAM_DIR) > 0;
+    if (prev && (outside || front || prev.front)) {
+      const vx = sp.x - prev.x, vy = sp.y - prev.y, len2 = vx * vx + vy * vy || 1;
+      const t = Math.max(0, Math.min(1, ((px - prev.x) * vx + (py - prev.y) * vy) / len2));
+      if (Math.hypot(px - (prev.x + t * vx), py - (prev.y + t * vy)) < 14) return true;
+    }
+    prev = { x: sp.x, y: sp.y, front };
+  }
+  return false;
+}
+function cursorFor() {
+  if (drag && drag.mode === "ring" && drag.moved) return "grabbing";
+  if (!pointer || !renderer) return "";
+  const r = stage.getBoundingClientRect();
+  return onRing(pointer.clientX - r.left, pointer.clientY - r.top) ? "grab" : "";
+}
+// Turns the ring so the point under the pointer follows it (a ring dot at world angle w sits at a - ringAngle).
+function dragRing(ev, dx) {
+  const r = stage.getBoundingClientRect();
+  const now = performance.now(), dtm = Math.max(1, now - drag.t);
+  const angle = groundAngle(ev.clientX - r.left, ev.clientY - r.top);
+  let delta;
+  if (angle !== null && drag.angle !== null) {
+    delta = angle - drag.angle;
+    if (delta > Math.PI) delta -= 2 * Math.PI;
+    if (delta < -Math.PI) delta += 2 * Math.PI;
+    delta = -delta;
+  } else {
+    delta = (dx * Math.PI) / stage.clientWidth;   // above the horizon: plain horizontal drag
+  }
+  drag.angle = angle;
+  ringAngle += delta;
+  ringVel = delta / dtm;
+  drag.t = now;
+  stage.style.cursor = "grabbing";
+}
+
 function isRing(id) { return !!(id && world && world.ringIndex.has(id)); }
 function pausesSphere(id) { return !!id && !isRing(id); }
 function ease(gain, target, dt) {
@@ -754,7 +864,7 @@ function setHover(id, ev) {
     if (pausesSphere(hoverId) && !pausesSphere(id)) resumeAt = performance.now() + RESUME_MS;
     hoverId = id;
     applyLook();
-    stage.style.cursor = id ? "pointer" : "";
+    stage.style.cursor = id ? "pointer" : cursorFor();
     showTip(id);
   }
   if (id && ev) placeTip(ev);
@@ -788,15 +898,30 @@ function wirePointer() {
   el.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) return;
     try { el.setPointerCapture(ev.pointerId); } catch (err) { /* not an active pointer: drag without capture */ }
-    drag = { x: ev.clientX, y: ev.clientY, x0: ev.clientX, y0: ev.clientY, t: performance.now(), moved: false };
-    spinVel.w = 0;
-    if (anim && anim.kind === "root") anim = null;
+    const r = stage.getBoundingClientRect(), px = ev.clientX - r.left, py = ev.clientY - r.top;
+    const hit = pick(px, py);
+    const mode = isRing(hit) || (!hit && onRing(px, py)) ? "ring" : "sphere";
+    drag = { mode, x: ev.clientX, y: ev.clientY, x0: ev.clientX, y0: ev.clientY, t: performance.now(), moved: false,
+             angle: mode === "ring" ? groundAngle(px, py) : null };
+    if (mode === "ring") {
+      ringVel = 0;
+      if (anim && anim.kind === "ring") anim = null;
+    } else {
+      spinVel.w = 0;
+      if (anim && anim.kind === "root") anim = null;
+    }
   });
   el.addEventListener("pointermove", (ev) => {
     if (drag) {
       const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
       if (Math.hypot(ev.clientX - drag.x0, ev.clientY - drag.y0) > 4) drag.moved = true;
       if (!drag.moved) return;
+      if (drag.mode === "ring") {
+        dragRing(ev, dx);
+        drag.x = ev.clientX; drag.y = ev.clientY;
+        setHover(null);
+        return;
+      }
       const len = Math.hypot(dx, dy);
       if (len > 0) {
         const ang = (len * Math.PI) / stage.clientHeight * (camDist / HOME_DIST) * 1.4;
@@ -814,15 +939,22 @@ function wirePointer() {
     pointer = { clientX: ev.clientX, clientY: ev.clientY };
     const r = stage.getBoundingClientRect();
     setHover(pick(ev.clientX - r.left, ev.clientY - r.top), ev);
+    if (!hoverId) stage.style.cursor = cursorFor();
   });
   const end = (ev) => {
     if (!drag) return;
     const d = drag;
     drag = null;
-    if (d.moved) resumeAt = performance.now() + RESUME_MS;   // a click alone never paused the spin
-    if (performance.now() - d.t > 80) spinVel.w = 0;   // released after holding still: no fling
-    if (d.moved) return;
-    spinVel.w = 0;
+    if (d.mode === "ring") {
+      if (performance.now() - d.t > 80) ringVel = 0;   // released after holding still: no fling
+      if (d.moved) { ringResumeAt = performance.now() + RESUME_MS; return; }
+      ringVel = 0;
+    } else {
+      if (d.moved) resumeAt = performance.now() + RESUME_MS;   // a click alone never paused the spin
+      if (performance.now() - d.t > 80) spinVel.w = 0;
+      if (d.moved) return;
+      spinVel.w = 0;
+    }
     const r = stage.getBoundingClientRect();
     const id = pick(ev.clientX - r.left, ev.clientY - r.top);
     if (id) focus(id); else { selectedId = null; closePanel(); applyLook(); }
@@ -970,6 +1102,7 @@ const view = {
       sphereMemories: world ? world.sphereMems.length : 0, ringMemories: world ? world.ringMems.length : 0,
       ringIds: world ? world.ringMems.map((m) => m.id) : [],
       spinGain, ringGain,
+      layers: levels ? [0, 1, 2].map((l) => [...levels.values()].filter((x) => x === l).length) : null,
     };
     if (id === "*closest" && world) {
       // the two entities whose dots come closest, as distance / (size a + size b)
