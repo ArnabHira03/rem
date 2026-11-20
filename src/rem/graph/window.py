@@ -9,6 +9,7 @@ import json
 import os
 import re
 import socket
+import tempfile
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -258,6 +259,13 @@ def run_window(client, cwd: Path | None) -> None:
     if (problem := _display_problem()) is not None:
         raise RuntimeError(problem)
     webview = import_webview()
-    webview.create_window(TITLE, html=render_html(), js_api=Api(client, cwd),
-                          width=1200, height=800, background_color=BACKGROUND)
-    webview.start(gui="qt")
+    html = render_html()
+    # Qt's setHtml (pywebview's `html=`) can't show a page over 2 MB, and the embedded three.js makes this one
+    # bigger. So the same self-contained page is written to a private temporary directory and loaded as a
+    # file:// URL. pywebview starts no HTTP server for file:// URLs, and nothing is fetched from anywhere.
+    with tempfile.TemporaryDirectory(prefix="rem-graph-") as tmp:
+        page = Path(tmp) / "graph.html"
+        page.write_text(html, encoding="utf-8")
+        webview.create_window(TITLE, url=page.as_uri(), js_api=Api(client, cwd),
+                              width=1200, height=800, background_color=BACKGROUND)
+        webview.start(gui="qt")
