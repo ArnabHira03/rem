@@ -35,7 +35,10 @@ const CAM_ELEV = 0.3;                   // camera height above the equator, radi
 const CAM_DIR = new THREE.Vector3(0, Math.sin(CAM_ELEV), Math.cos(CAM_ELEV));
 const SPIN = (2 * Math.PI) / 90;        // auto-rotate, rad/s
 const RING_SPIN = (2 * Math.PI) / 75;   // ring drift, rad/s
-const RESUME_MS = 3000;
+const RESUME_MS = 1000;                 // after a pause ends, wait this long, then ease back in
+const EASE_IN_MS = 900;                 // spin and ring drift ease back up to speed over about this long
+const EASE_OUT_MS = 90;                 // and stop almost at once, so a hovered dot holds still
+const SEPARATION = 0.3;                 // two entities' centres stay at least this x (size a + size b) apart
 const FOCUS_MS = 600;
 const REPULSE_COS = Math.cos((40 * Math.PI) / 180);
 const REPULSE_CHORD = 2 * Math.sin((20 * Math.PI) / 180);
@@ -81,9 +84,51 @@ function buildGraph(full) {
   for (const e of full.edges) if (e.kind === "relation") add(e.source, e.target, 2);
   const keys = [...weights.keys()].sort();
   const pairs = keys.map((k) => weights.get(k));
+  const nMem = new Map(full.nodes.filter((n) => n.kind === "entity").map((n) => [n.id, n.n_memories]));
+  const sizes = ents.map((id) => entitySize(nMem.get(id) || 0));
   const print = fnv(ents.join("\n") + "\n#\n" + keys.map((k) => k + "|" + weights.get(k).w.toFixed(6)).join("\n"))
     .toString(16);
-  return { ents, index, pairs, print };
+  return { ents, index, pairs, print, sizes };
+}
+
+// Dot size, from the number of linked memories in the full view.
+function entitySize(nMemories) { return Math.min(0.24, 0.075 + 0.03 * Math.sqrt(nMemories)); }
+
+// Pushes apart any two entities closer than SEPARATION x (size a + size b), so no two dots ever sit on one
+// point. Deterministic, and it moves nothing when nothing overlaps, so an unchanged layout stays put.
+function separate(g, pos) {
+  const n = g.ents.length, P = new Float64Array(3 * n);
+  g.ents.forEach((id, i) => P.set(pos.get(id), 3 * i));
+  const maxNeed = 2 * SEPARATION * Math.max(...g.sizes, 0), minDot = 1 - (maxNeed * maxNeed) / 2;
+  for (let pass = 0; pass < 40; pass++) {
+    let moved = false;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dot = P[3 * i] * P[3 * j] + P[3 * i + 1] * P[3 * j + 1] + P[3 * i + 2] * P[3 * j + 2];
+        if (dot < minDot) continue;
+        const need = SEPARATION * (g.sizes[i] + g.sizes[j]);
+        let dx = P[3 * i] - P[3 * j], dy = P[3 * i + 1] - P[3 * j + 1], dz = P[3 * i + 2] - P[3 * j + 2];
+        const c = Math.hypot(dx, dy, dz);
+        if (c >= need) continue;
+        if (c < 1e-6) {
+          const h = hashDir(g.ents[i] + "|" + g.ents[j], "split");
+          dx = h[0]; dy = h[1]; dz = h[2];
+        } else { dx /= c; dy /= c; dz /= c; }
+        const push = (need - c) / 2 + 1e-4;
+        P[3 * i] += dx * push; P[3 * i + 1] += dy * push; P[3 * i + 2] += dz * push;
+        P[3 * j] -= dx * push; P[3 * j + 1] -= dy * push; P[3 * j + 2] -= dz * push;
+        for (const k of [i, j]) {
+          const len = Math.hypot(P[3 * k], P[3 * k + 1], P[3 * k + 2]);
+          P[3 * k] /= len; P[3 * k + 1] /= len; P[3 * k + 2] /= len;
+        }
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  const out = new Map();
+  g.ents.forEach((id, i) => out.set(id, [P[3 * i], P[3 * i + 1], P[3 * i + 2]]));
+  return out;
 }
 
 function itersFor(n, base) {
@@ -296,6 +341,8 @@ let shown = false, raf = 0, lastT = 0;
 let camDist = HOME_DIST;
 let autoOn = !reduced.matches;
 let resumeAt = 0;
+let spinGain = 0, ringGain = 0;     // 0..1: how much of the auto-rotate / ring drift speed is applied
+let pointer = null;                 // last pointer position over the canvas, for re-picking every frame
 let ringAngle = 0;
 const spinVel = { axis: new THREE.Vector3(0, 1, 0), w: 0 };   // drag inertia, rad/ms
 let drag = null;
@@ -393,7 +440,7 @@ function buildScene(res, g, pos, memPos) {
     const mat = new THREE.SpriteMaterial({ map: dotTexture(color, filled), transparent: true, depthWrite: false, fog: true });
     const sprite = new THREE.Sprite(mat);
     const p = new THREE.Vector3(...pos.get(id));
-    const size = Math.min(0.24, 0.075 + 0.03 * Math.sqrt(fn.n_memories));
+    const size = entitySize(fn.n_memories);
     sprite.position.copy(p);
     sprite.scale.setScalar(size);
     sprite.visible = !!vis;
@@ -639,11 +686,21 @@ function frame(t) {
   } else if (spinVel.w > 1e-6) {
     root.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(spinVel.axis, spinVel.w * dt));
     spinVel.w *= Math.exp(-dt / 350);
-  } else if (autoOn && !hoverId && !panelId && now >= resumeAt) {
-    root.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), (SPIN * dt) / 1000));
   }
-  const ringHovered = hoverId && world && world.ringIndex.has(hoverId);
-  if (!(anim && anim.kind === "ring") && autoOn && !reduced.matches && !panelId && !ringHovered) ringAngle += (RING_SPIN * dt) / 1000;
+  // Auto-rotate pauses for the sphere's own items (hover, an open panel, drag, inertia, a focus turn), never
+  // for the ring's. It eases out at once and back in after RESUME_MS.
+  const spinOn = autoOn && !(drag && drag.moved) && !(anim && anim.kind === "root") && spinVel.w <= 1e-6 && !pausesSphere(hoverId) && !pausesSphere(panelId) &&
+    now >= resumeAt;
+  spinGain = ease(spinGain, spinOn ? 1 : 0, dt);
+  if (spinGain > 1e-3) {
+    root.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), (spinGain * SPIN * dt) / 1000));
+  }
+  // The ring stops while one of its dots is hovered or selected, while a panel is open, with auto-rotate off,
+  // and under reduced motion; dragging the sphere doesn't stop it.
+  const ringOn = !(anim && anim.kind === "ring") && autoOn && !reduced.matches && !panelId && !isRing(hoverId) &&
+    !isRing(selectedId);
+  ringGain = ease(ringGain, ringOn ? 1 : 0, dt);
+  if (ringGain > 1e-3) ringAngle += (ringGain * RING_SPIN * dt) / 1000;
   ringGroup.rotation.y = ringAngle;
   setCamera();
   scene.updateMatrixWorld();
@@ -656,7 +713,19 @@ function frame(t) {
   }
   renderer.render(scene, camera);
   updateLabels();
+  // things drift under a resting pointer: re-pick so hovering doesn't need the mouse to move
+  if (pointer && !drag && !anim) {
+    const r = stage.getBoundingClientRect();
+    setHover(pick(pointer.clientX - r.left, pointer.clientY - r.top), pointer);
+  }
   raf = requestAnimationFrame(frame);
+}
+function isRing(id) { return !!(id && world && world.ringIndex.has(id)); }
+function pausesSphere(id) { return !!id && !isRing(id); }
+function ease(gain, target, dt) {
+  const tau = target > gain ? EASE_IN_MS / 3 : EASE_OUT_MS / 3;
+  const next = target + (gain - target) * Math.exp(-dt / tau);
+  return Math.abs(next - target) < 1e-3 ? target : next;
 }
 function kick() { if (shown && renderer && !raf) { lastT = 0; raf = requestAnimationFrame(frame); } }
 
@@ -676,13 +745,13 @@ function pick(px, py) {
     test(e.id, p, Math.max(6, 0.22 * e.size * pxPerUnit(camera.position.distanceTo(p))));
   }
   for (const m of world.sphereMems) test(m.id, m.pos.clone().applyMatrix4(root.matrixWorld), 5);
-  for (const m of world.ringMems) test(m.id, m.pos.clone().applyMatrix4(ringGroup.matrixWorld), 6);
+  for (const m of world.ringMems) test(m.id, m.pos.clone().applyMatrix4(ringGroup.matrixWorld), 9);
   return best;
 }
 
 function setHover(id, ev) {
   if (id !== hoverId) {
-    if (hoverId && !id) resumeAt = performance.now() + RESUME_MS;
+    if (pausesSphere(hoverId) && !pausesSphere(id)) resumeAt = performance.now() + RESUME_MS;
     hoverId = id;
     applyLook();
     stage.style.cursor = id ? "pointer" : "";
@@ -742,6 +811,7 @@ function wirePointer() {
       setHover(null);
       return;
     }
+    pointer = { clientX: ev.clientX, clientY: ev.clientY };
     const r = stage.getBoundingClientRect();
     setHover(pick(ev.clientX - r.left, ev.clientY - r.top), ev);
   });
@@ -749,7 +819,7 @@ function wirePointer() {
     if (!drag) return;
     const d = drag;
     drag = null;
-    resumeAt = performance.now() + RESUME_MS;
+    if (d.moved) resumeAt = performance.now() + RESUME_MS;   // a click alone never paused the spin
     if (performance.now() - d.t > 80) spinVel.w = 0;   // released after holding still: no fling
     if (d.moved) return;
     spinVel.w = 0;
@@ -759,7 +829,7 @@ function wirePointer() {
   };
   el.addEventListener("pointerup", end);
   el.addEventListener("pointercancel", () => { drag = null; });
-  el.addEventListener("pointerleave", () => { if (!drag) setHover(null); });
+  el.addEventListener("pointerleave", () => { pointer = null; if (!drag) setHover(null); });
   el.addEventListener("wheel", (ev) => {
     ev.preventDefault();
     camDist = Math.min(MAX_DIST, Math.max(MIN_DIST, camDist * Math.exp(ev.deltaY * 0.001)));
@@ -813,7 +883,7 @@ function openPanel(id) {
   panel.scrollTop = 0;
 }
 function closePanel() {
-  if (panelId) resumeAt = performance.now() + RESUME_MS;
+  if (pausesSphere(panelId)) resumeAt = performance.now() + RESUME_MS;
   panelId = null;
   panel.hidden = true;
   while (panelBody.firstChild) panelBody.removeChild(panelBody.firstChild);
@@ -838,6 +908,7 @@ async function accept(res, mine) {
     if (!pos) return;   // a newer request took over
     G.setStatus("");
   }
+  pos = separate(g, pos);
   const first = !cache.pos;
   cache.pos = pos;
   cache.print = g.print;
@@ -898,7 +969,18 @@ const view = {
       entities: world ? [...world.ents.values()].filter((e) => e.visible).length : 0,
       sphereMemories: world ? world.sphereMems.length : 0, ringMemories: world ? world.ringMems.length : 0,
       ringIds: world ? world.ringMems.map((m) => m.id) : [],
+      spinGain, ringGain,
     };
+    if (id === "*closest" && world) {
+      // the two entities whose dots come closest, as distance / (size a + size b)
+      const es = [...world.ents.values()];
+      let best = null;
+      for (let i = 0; i < es.length; i++) for (let j = i + 1; j < es.length; j++) {
+        const r = es[i].pos.distanceTo(es[j].pos) / (es[i].size + es[j].size);
+        if (!best || r < best.ratio) best = { ratio: r, a: es[i].label, b: es[j].label };
+      }
+      out.closest = best;
+    }
     if (id && world) {
       const p = worldPosOf(id);
       if (p) {
