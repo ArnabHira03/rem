@@ -809,7 +809,8 @@
     fail: fail,
     showRun: function (id) { showRun(id); },
     switchTab: function (name) { switchTab(name); },
-    registerView: registerView
+    registerView: registerView,
+    view: function (name) { return views[name]; }
   };
 
   window.addEventListener("pywebviewready", start);

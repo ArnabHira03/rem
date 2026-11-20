@@ -64,6 +64,10 @@
 #sphere-panel section { border-top: 1px solid #1f2740; margin-top: 10px; padding-top: 6px; }
 #sphere-panel ul { list-style: none; margin: 0; padding: 0; }
 #sphere-panel li { margin: 3px 0; word-break: break-word; }
+/* a list item's mark, link and meta flow as one line of text; a relation's id line takes its own row */
+#sphere-panel li { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 4px; }
+#sphere-panel li > .link { flex: 0 1 auto; min-width: 0; }
+#sphere-panel li > .ids { flex-basis: 100%; }
 #sphere-panel .meta { color: #7f8bab; font-size: 12px; }
 #sphere-panel .fulltext { white-space: pre-wrap; word-break: break-word; margin: 6px 0; }
 #sphere-panel .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; font-size: 12px; }

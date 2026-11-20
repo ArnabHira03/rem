@@ -24,6 +24,7 @@ const LINE_COLOR = "#252c3d";
 const ARC_VERIFIED = "#b9c7ee";
 const ARC_UNVERIFIED = "#4a5470";
 const RIM_COLOR = "#3a5cc0";
+const HALO_COLOR = "#e8eefc";
 const DIM = 0.1;
 
 // ---------- geometry and motion ----------
@@ -290,7 +291,7 @@ const panel = $("sphere-panel");
 const panelBody = $("sphere-panel-body");
 const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-let renderer = null, scene, camera, root, ringGroup, rim;
+let renderer = null, scene, camera, root, ringGroup, rim, halo;
 let shown = false, raf = 0, lastT = 0;
 let camDist = HOME_DIST;
 let autoOn = !reduced.matches;
@@ -335,6 +336,11 @@ function initRenderer() {
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.FrontSide,
   }));
   scene.add(rim);
+  // a thin ring around the selected item, so a picked memory dot is easy to find
+  halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTexture(HALO_COLOR, false), transparent: true,
+    depthWrite: false, depthTest: false, fog: false, opacity: 0.85 }));
+  halo.visible = false;
+  scene.add(halo);
   new ResizeObserver(resize).observe(stage);
   resize();
   wirePointer();
@@ -387,7 +393,7 @@ function buildScene(res, g, pos, memPos) {
     const mat = new THREE.SpriteMaterial({ map: dotTexture(color, filled), transparent: true, depthWrite: false, fog: true });
     const sprite = new THREE.Sprite(mat);
     const p = new THREE.Vector3(...pos.get(id));
-    const size = Math.min(0.30, 0.075 + 0.035 * Math.sqrt(fn.n_memories));
+    const size = Math.min(0.24, 0.075 + 0.03 * Math.sqrt(fn.n_memories));
     sprite.position.copy(p);
     sprite.scale.setScalar(size);
     sprite.visible = !!vis;
@@ -641,6 +647,13 @@ function frame(t) {
   ringGroup.rotation.y = ringAngle;
   setCamera();
   scene.updateMatrixWorld();
+  const sel = selectedId && worldPosOf(selectedId);
+  halo.visible = !!sel;
+  if (sel) {
+    halo.position.copy(sel);
+    const e = world.ents.get(selectedId);
+    halo.scale.setScalar(e ? e.size * 1.7 : 0.13);
+  }
   renderer.render(scene, camera);
   updateLabels();
   raf = requestAnimationFrame(frame);
@@ -705,7 +718,7 @@ function wirePointer() {
   const el = renderer.domElement;
   el.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) return;
-    el.setPointerCapture(ev.pointerId);
+    try { el.setPointerCapture(ev.pointerId); } catch (err) { /* not an active pointer: drag without capture */ }
     drag = { x: ev.clientX, y: ev.clientY, x0: ev.clientX, y0: ev.clientY, t: performance.now(), moved: false };
     spinVel.w = 0;
     if (anim && anim.kind === "root") anim = null;
@@ -877,6 +890,26 @@ const view = {
   },
   escape() { selectedId = null; closePanel(); applyLook(); },
   focus,
+  // Read-only state for checking the view from outside (screenshots and evaluate_js); changes nothing.
+  inspect(id) {
+    const out = {
+      shown, autoOn, reduced: reduced.matches, camDist, ringAngle, hoverId, selectedId, panelId,
+      rotation: root ? root.quaternion.toArray() : null, print: cache.print,
+      entities: world ? [...world.ents.values()].filter((e) => e.visible).length : 0,
+      sphereMemories: world ? world.sphereMems.length : 0, ringMemories: world ? world.ringMems.length : 0,
+      ringIds: world ? world.ringMems.map((m) => m.id) : [],
+    };
+    if (id && world) {
+      const p = worldPosOf(id);
+      if (p) {
+        const r = stage.getBoundingClientRect(), s = toScreen(p.clone());
+        out.screen = { x: r.left + s.x, y: r.top + s.y, front: p.dot(CAM_DIR) };
+        const e = world.ents.get(id);
+        if (e) out.position = e.pos.toArray();
+      }
+    }
+    return out;
+  },
 };
 
 // The page shell (graph.html / graph.js) provides the stage and window.remGraph; without them, stay inert.
