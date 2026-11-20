@@ -4,25 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rem — graph</title>
+<!-- @importmap -->
 <!-- @style -->
 </head>
-<body>
+<body data-tab="sphere">
 <header id="bar">
   <span class="brand">rem</span>
   <span class="tabs" role="tablist">
-    <button type="button" class="tab" id="tab-graph" data-tab="graph" role="tab" aria-selected="true">Graph</button>
+    <button type="button" class="tab" id="tab-graph" data-tab="graph" role="tab" aria-selected="false">Graph</button>
+    <button type="button" class="tab" id="tab-sphere" data-tab="sphere" role="tab" aria-selected="true">Sphere</button>
     <button type="button" class="tab" id="tab-extraction" data-tab="extraction" role="tab" aria-selected="false">Extraction</button>
   </span>
   <label>project
     <select id="project"><option value="all">all</option></select>
   </label>
-  <span class="group graph-only">
+  <span class="group view-only">
     <label><input type="checkbox" class="scope" value="global" checked> global</label>
     <label><input type="checkbox" class="scope" value="system" checked> system</label>
     <label><input type="checkbox" class="scope" value="project" checked> project</label>
   </span>
   <label class="graph-only"><input type="checkbox" id="show-memories"> show memories</label>
-  <input type="search" id="search" class="graph-only" placeholder="search entities" autocomplete="off" spellcheck="false">
+  <input type="search" id="search" class="view-only" placeholder="search entities" autocomplete="off" spellcheck="false">
+  <label class="sphere-only switch"><input type="checkbox" id="sphere-autorotate" checked> auto-rotate</label>
+  <button type="button" id="sphere-reset-view" class="sphere-only" title="Camera, rotation and ring back to the start">Reset view</button>
+  <button type="button" id="sphere-reset-layout" class="sphere-only" title="Recompute the layout from scratch">Reset layout</button>
   <label class="ext-only">status
     <select id="run-status">
       <option value="all">all</option>
@@ -33,7 +38,7 @@
   </label>
   <label class="ext-only"><input type="checkbox" id="flagged-only"> flagged only</label>
   <button type="button" id="refresh" title="Refresh from rem">⟳</button>
-  <span id="snapshot" class="muted graph-only"></span>
+  <span id="snapshot" class="muted view-only"></span>
   <span id="status" class="muted"></span>
 </header>
 <main id="stage" class="graph-only">
@@ -60,6 +65,34 @@
     <button type="button" id="panel-close" title="Close (Esc)">✕</button>
     <div id="panel-body"></div>
   </aside>
+</main>
+<main id="sphere-stage" class="sphere-only">
+  <div id="sphere-canvas"></div>
+  <div id="sphere-labels"></div>
+  <div id="sphere-tip" hidden></div>
+  <aside id="sphere-legend" aria-label="legend">
+    <div class="legend-title">entity type</div>
+    <div class="legend-row"><span class="dot person"></span>person</div>
+    <div class="legend-row"><span class="dot tool"></span>tool</div>
+    <div class="legend-row"><span class="dot project"></span>project</div>
+    <div class="legend-row"><span class="dot language"></span>language</div>
+    <div class="legend-row"><span class="dot org"></span>org</div>
+    <div class="legend-row"><span class="dot place"></span>place</div>
+    <div class="legend-row"><span class="dot concept"></span>concept</div>
+    <div class="legend-row"><span class="dot other"></span>other</div>
+    <div class="legend-title">trust</div>
+    <div class="legend-row"><span class="dot verified"></span>verified entity</div>
+    <div class="legend-row"><span class="dot unverified"></span>unverified entity</div>
+    <div class="legend-row"><span class="dot mem"></span>verified memory</div>
+    <div class="legend-row"><span class="dot mem dim"></span>unverified memory</div>
+    <div class="legend-row"><span class="bar"></span>verified relation</div>
+    <div class="legend-row"><span class="bar faint"></span>unverified relation</div>
+  </aside>
+  <aside id="sphere-panel" hidden>
+    <button type="button" id="sphere-panel-close" title="Close (Esc)">✕</button>
+    <div id="sphere-panel-body"></div>
+  </aside>
+  <div id="sphere-nogl" hidden>3D view needs WebGL — showing the 2D graph</div>
 </main>
 <main id="ext" class="ext-only">
   <nav id="runs" aria-label="extraction runs">

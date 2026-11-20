@@ -22,8 +22,8 @@ Your conversations with an AI assistant are full of personal and work details. r
 - **Knows what to trust.** Things you said yourself count as true. Things the assistant guessed are kept as "unconfirmed" until you agree with them.
 - **Understands your projects.** Each memory is tied to a project, to your computer, or to you in general, so one project's details don't leak into another.
 - **Smart search.** Finds memories by meaning and by keyword, with the current project first.
-- **Knowledge map.** Links memories through the people, tools and projects they mention, and shows them in a desktop window you can explore.
-- **Extraction review.** A second tab in that window shows what rem picked up from each conversation and what it decided to keep.
+- **Knowledge map.** Links memories through the people, tools and projects they mention, and shows them in a desktop window you can explore, as a slowly turning 3D sphere or as a flat 2D graph.
+- **Extraction review.** Another tab in that window shows what rem picked up from each conversation and what it decided to keep.
 - **Works with your assistant.** Plugs into Claude Code, and any assistant that supports MCP can search and add memories.
 - **Simple command line.** Add, search, list, confirm and delete memories from the terminal.
 
@@ -120,6 +120,26 @@ uv run --extra graph rem graph              # open the knowledge map
 ```
 
 Run `uv run rem --help` to see every command.
+
+### The knowledge map
+
+`uv run --extra graph rem graph` opens a window with three tabs. It only reads from rem: nothing you do there changes your memories.
+
+- **Sphere** (the tab it opens on) puts the people, tools and projects rem knows about on the surface of a slowly
+  turning sphere, coloured by kind. Things that come up in the same memories sit close together. Each memory is a
+  small dot inside the sphere, joined to the things it mentions. Memories that don't mention anything shown circle
+  the sphere on a ring.
+  - Filled, glowing dots and bright memory dots are confirmed. Hollow rings and dim memory dots aren't yet.
+  - Drag to turn the sphere, and scroll to zoom.
+  - Point at something to highlight it and its neighbours. Click it, or search and press Enter, to bring it to the
+    front and see its details.
+  - **auto-rotate** turns the spinning on or off. **Reset view** puts the camera back. **Reset layout** arranges
+    everything from scratch.
+  - It needs a graphics card with WebGL. Without one, the window shows the Graph tab instead.
+- **Graph** shows the same things as a flat 2D graph.
+- **Extraction** shows each conversation rem read, what it picked up and what it kept.
+
+The project, scope and search controls at the top apply to both Sphere and Graph.
 
 ## Learn more
 

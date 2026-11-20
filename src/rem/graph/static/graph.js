@@ -1,4 +1,4 @@
-/* rem graph window. Read-only: it only calls api.initial / api.view / api.refresh / api.jobs / api.job.
+/* rem graph window. Read-only: it only calls api.initial / api.view / api.refresh / api.jobs / api.job (and sphere.js, api.sphere).
  * Every piece of text from data enters the page through textContent or createElement, never as markup. */
 (function () {
   "use strict";
@@ -257,13 +257,18 @@
     ele.select();
     cy.animate({ center: { eles: ele }, duration: 200 });
   }
-  function nodeLink(nodeId, text) {
-    var exists = cy && cy.getElementById(nodeId).nonempty();
-    if (!exists) return el("span", null, text);
+  // The panel builders reach the view they serve only through `nav`: {exists(id), select(id), info(id)}.
+  var cyNav = {
+    exists: function (id) { return !!cy && cy.getElementById(id).nonempty(); },
+    select: function (id) { selectId(id); },
+    info: function (id) { return info.get(id); }
+  };
+  function nodeLink(nav, nodeId, text) {
+    if (!nav.exists(nodeId)) return el("span", null, text);
     var b = el("button", "link", text);
     b.type = "button";
     b.title = "Select this node";
-    b.addEventListener("click", function () { selectId(nodeId); });
+    b.addEventListener("click", function () { nav.select(nodeId); });
     return b;
   }
   // Clicking selects the whole id, so Ctrl+C always copies it. The clipboard API is tried too, but an
@@ -294,11 +299,11 @@
     });
     return dl;
   }
-  function relationItem(r) {
+  function relationItem(nav, r) {
     var li = el("li");
     var arrow = r.direction === "out" ? "→ " + r.type + " → " : "← " + r.type + " ← ";
     li.appendChild(el("span", null, arrow));
-    li.appendChild(r.drawn ? nodeLink(r.other_node, r.other) : el("span", null, r.other));
+    li.appendChild(r.drawn ? nodeLink(nav, r.other_node, r.other) : el("span", null, r.other));
     li.appendChild(el("span", null, " " + mark(r.status)));
     li.appendChild(el("span", "meta", " · " + r.scope + " · " + projectText(r)));
     if (!r.drawn) li.appendChild(el("span", "same", " (same node)"));
@@ -311,11 +316,10 @@
     li.appendChild(ids);
     return li;
   }
-  function memoryItem(m) {
+  function memoryItem(nav, m) {
     var li = el("li");
     li.appendChild(el("span", null, mark(m.status) + " "));
-    if (cy.getElementById("mem:" + m.id).nonempty()) li.appendChild(nodeLink("mem:" + m.id, m.text));
-    else li.appendChild(el("span", null, m.text));
+    li.appendChild(nodeLink(nav, "mem:" + m.id, m.text));
     li.appendChild(el("span", "meta", " · " + projectText(m)));
     return li;
   }
@@ -326,7 +330,7 @@
     return ul;
   }
 
-  function entityPanel(body, n) {
+  function entityPanel(body, n, nav) {
     body.appendChild(el("h2", null, n.label));
     var counts = n.members.length + (n.members.length === 1 ? " record" : " records") +
       " · " + n.n_relations + " relations · " + n.n_memories + " memories";
@@ -343,14 +347,14 @@
                         ["entity id", copyId(m.entity_id)]]));
       if (n.members.length > 1 && m.aliases && m.aliases.length) s.appendChild(el("div", "meta", "aliases: " + m.aliases.join(", ")));
       s.appendChild(el("h4", null, "relations"));
-      s.appendChild(list(m.relations, relationItem, "none"));
+      s.appendChild(list(m.relations, function (r) { return relationItem(nav, r); }, "none"));
       s.appendChild(el("h4", null, "memories"));
-      s.appendChild(list(m.memories, memoryItem, "none"));
+      s.appendChild(list(m.memories, function (x) { return memoryItem(nav, x); }, "none"));
       body.appendChild(s);
     });
   }
 
-  function memoryPanel(body, n) {
+  function memoryPanel(body, n, nav) {
     body.appendChild(el("h2", null, "memory"));
     body.appendChild(el("div", "fulltext", n.text));
     body.appendChild(kv([["status", mark(n.status) + " " + n.status], ["provenance", n.provenance],
@@ -364,20 +368,20 @@
     }
     body.appendChild(el("h4", null, "linked entities"));
     body.appendChild(list(n.entity_nodes, function (nid) {
-      var target = info.get(nid);
+      var target = nav.info(nid);
       var li = el("li");
-      li.appendChild(nodeLink(nid, target ? target.label : nid.replace(/^ent:/, "")));
+      li.appendChild(nodeLink(nav, nid, target ? target.label : nid.replace(/^ent:/, "")));
       return li;
     }, "none"));
   }
 
-  function relationPanel(body, e) {
-    var src = info.get(e.source), dst = info.get(e.target);
+  function relationPanel(body, e, nav) {
+    var src = nav.info(e.source), dst = nav.info(e.target);
     body.appendChild(el("h2", null, e.rel_type));
     var line = el("div");
-    line.appendChild(nodeLink(e.source, src ? src.label : e.source));
+    line.appendChild(nodeLink(nav, e.source, src ? src.label : e.source));
     line.appendChild(el("span", null, " → " + e.rel_type + " → "));
-    line.appendChild(nodeLink(e.target, dst ? dst.label : e.target));
+    line.appendChild(nodeLink(nav, e.target, dst ? dst.label : e.target));
     body.appendChild(line);
     if (e.sentence) body.appendChild(el("div", "fulltext", e.sentence));
     body.appendChild(kv([["status", mark(e.status) + " " + e.status], ["provenance", e.provenance],
@@ -386,25 +390,29 @@
                          ["relation id", copyId(e.id.replace(/^rel:/, ""))]]));
   }
 
-  function mentionPanel(body, e) {
-    var src = info.get(e.source), dst = info.get(e.target);
+  function mentionPanel(body, e, nav) {
+    var src = nav.info(e.source), dst = nav.info(e.target);
     body.appendChild(el("h2", null, "mention"));
     var line = el("div");
-    line.appendChild(nodeLink(e.source, src ? src.label : e.source));
+    line.appendChild(nodeLink(nav, e.source, src ? src.label : e.source));
     line.appendChild(el("span", null, " mentions "));
-    line.appendChild(nodeLink(e.target, dst ? dst.label : e.target));
+    line.appendChild(nodeLink(nav, e.target, dst ? dst.label : e.target));
     body.appendChild(line);
   }
 
+  // Fills `body` with the panel for one node or edge of a view (the Graph's or the Sphere's).
+  function buildPanel(body, x, nav) {
+    if (x.kind === "entity") entityPanel(body, x, nav);
+    else if (x.kind === "memory") memoryPanel(body, x, nav);
+    else if (x.kind === "relation") relationPanel(body, x, nav);
+    else mentionPanel(body, x, nav);
+  }
   function showPanel(id) {
     var x = info.get(id);
     if (!x) { closePanel(); return; }
     var body = $("panel-body");
     clear(body);
-    if (x.kind === "entity") entityPanel(body, x);
-    else if (x.kind === "memory") memoryPanel(body, x);
-    else if (x.kind === "relation") relationPanel(body, x);
-    else mentionPanel(body, x);
+    buildPanel(body, x, cyNav);
     $("panel").hidden = false;
     $("panel").scrollTop = 0;
   }
@@ -427,7 +435,7 @@
     setProjects(payload.projects, payload.filters.project);
     applyFilters(payload.filters);
     setSnapshotTime(payload.generated_at);
-    render(payload.view);
+    if (tab === "graph") render(payload.view); else graphStale = true;   // a hidden graph renders when it shows
   }
   // A refresh replaces the snapshot in Python. If a filter changed while it ran, the filter's view may come
   // from the old snapshot, so the latest refresh always updates the project list and time, then re-renders
@@ -439,6 +447,15 @@
     api.refresh(readFilters()).then(function (payload) {
       if (myRefresh !== refreshSeq) return;
       setStatus("");
+      if (tab !== "graph") {
+        // the Sphere asks for its own data from the new snapshot; the graph catches up when it shows
+        setProjects(payload.projects, $("project").value);
+        setSnapshotTime(payload.generated_at);
+        graphStale = true;
+        if (tab === "sphere" && views.sphere) views.sphere.refreshed(); else sphereStale = true;
+        return;
+      }
+      sphereStale = true;
       if (mine === seq) { load(payload); return; }
       setProjects(payload.projects, $("project").value);  // a project that vanished falls back to "all"
       setSnapshotTime(payload.generated_at);
@@ -448,23 +465,50 @@
 
 
   // ---------- tabs ----------
-  var tab = "graph";
-  var graphStale = false;   // the project changed while the graph was hidden
+  // The window opens on the Sphere. Graph and Sphere share the project, scope and search controls; a change
+  // made on one marks the other stale, and it catches up when it next shows.
+  var tab = "sphere";
+  var ready = false;        // the initial payload (projects, default filters) has been applied
+  var views = {};           // other views, registered by their own scripts: { sphere: {show, hide, ...} }
+  var graphStale = false;   // the filters or snapshot changed while the graph was hidden
+  var sphereStale = false;  // the same, for the Sphere
   var extStale = true;      // the run list needs (re)loading when the Extraction tab shows
   function switchTab(name) {
-    if (name !== "graph" && name !== "extraction") return;
+    if (name !== "graph" && name !== "sphere" && name !== "extraction") return;
+    var prev = tab;
     tab = name;
     document.body.dataset.tab = name;
     document.querySelectorAll("button.tab").forEach(function (b) {
       b.setAttribute("aria-selected", b.dataset.tab === name ? "true" : "false");
     });
     setStatus("");
+    if (prev === "sphere" && name !== "sphere" && views.sphere) views.sphere.hide();
     if (name === "graph") {
       cy.resize();
-      if (graphStale) { graphStale = false; update(); }
+      if (graphStale) { graphStale = false; update(); } else applySearch();
+    } else if (name === "sphere") {
+      showSphere();
     } else if (extStale) {
       loadRuns();
     }
+  }
+  function showSphere() {
+    var v = views.sphere;
+    if (!v || !ready) return;
+    v.search($("search").value);
+    var stale = sphereStale;
+    sphereStale = false;
+    v.show();
+    if (stale && tab === "sphere") v.filtersChanged();
+  }
+  function registerView(name, v) {
+    views[name] = v;
+    if (name === "sphere" && tab === "sphere") showSphere();
+  }
+  // The project or a scope changed: the visible view updates now, the other one when it shows.
+  function filtersChanged() {
+    if (tab === "graph") { update(); sphereStale = true; }
+    else if (tab === "sphere") { if (views.sphere) views.sphere.filtersChanged(); graphStale = true; }
   }
 
   // ---------- extraction runs ----------
@@ -708,18 +752,22 @@
 
   function wire() {
     $("project").addEventListener("change", function () {
-      if (tab === "graph") { update(); extStale = true; } else { loadRuns(); graphStale = true; }
+      if (tab === "extraction") { loadRuns(); graphStale = true; sphereStale = true; }
+      else { filtersChanged(); extStale = true; }
     });
-    document.querySelectorAll("input.scope").forEach(function (c) { c.addEventListener("change", update); });
-    $("show-memories").addEventListener("change", update);
-    $("search").addEventListener("input", function () { applySearch(); });
+    document.querySelectorAll("input.scope").forEach(function (c) { c.addEventListener("change", filtersChanged); });
+    $("show-memories").addEventListener("change", update);   // Graph only: the Sphere always shows memories
+    $("search").addEventListener("input", function () {
+      if (tab === "sphere") { if (views.sphere) views.sphere.search($("search").value); } else applySearch();
+    });
     $("search").addEventListener("keydown", function (e) {
       if (e.key !== "Enter") return;
+      if (tab === "sphere") { if (views.sphere) views.sphere.searchEnter(); return; }
       var hits = applySearch();
       if (hits && hits.nonempty()) cy.animate({ center: { eles: hits[0] }, duration: 200 });
     });
     $("refresh").addEventListener("click", function () {
-      if (tab === "graph") { refresh(); extStale = true; } else { loadRuns(); if (selectedRun !== null) selectRun(selectedRun); }
+      if (tab !== "extraction") { refresh(); extStale = true; } else { loadRuns(); if (selectedRun !== null) selectRun(selectedRun); }
     });
     document.querySelectorAll("button.tab").forEach(function (b) {
       b.addEventListener("click", function () { switchTab(b.dataset.tab); });
@@ -729,7 +777,10 @@
     $("load-more").addEventListener("click", function () { if (nextBefore !== null) loadRuns(nextBefore); });
     $("panel-close").addEventListener("click", function () { cy.elements().unselect(); closePanel(); });
     document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") { cy.elements().unselect(); closePanel(); }
+      if (e.key !== "Escape") return;
+      if (tab === "sphere") { if (views.sphere) views.sphere.escape(); return; }
+      cy.elements().unselect();
+      closePanel();
     });
   }
 
@@ -737,12 +788,30 @@
     if (started || !window.pywebview || !window.pywebview.api) return;
     started = true;
     api = window.pywebview.api;
-    document.body.dataset.tab = "graph";
+    document.body.dataset.tab = tab;
     makeCy();
     wire();
     setStatus("loading…");
-    api.initial().then(function (payload) { setStatus(""); load(payload); }, fail);
+    api.initial().then(function (payload) {
+      setStatus("");
+      load(payload);
+      ready = true;
+      switchTab(tab);
+    }, fail);
   }
+
+  // For sphere.js (an ES module that runs after this script): the shared API, filters, status and panel builders.
+  window.remGraph = {
+    api: function () { return api; },
+    buildPanel: buildPanel,
+    readFilters: readFilters,
+    setStatus: setStatus,
+    fail: fail,
+    showRun: function (id) { showRun(id); },
+    switchTab: function (name) { switchTab(name); },
+    registerView: registerView,
+    view: function (name) { return views[name]; }
+  };
 
   window.addEventListener("pywebviewready", start);
   if (window.pywebview && window.pywebview.api) start();
