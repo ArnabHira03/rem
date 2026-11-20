@@ -4,6 +4,8 @@ Lazy imports only: importing this module never imports webview, qtpy or PySide6 
 The `Api` only reads (`RemClient.graph`, `jobs`, `job`) and builds views; nothing here writes to rem.
 """
 
+import base64
+import json
 import os
 import re
 import socket
@@ -14,6 +16,7 @@ from typing import Any
 from rem.graph.view import ALL_SCOPES, build_view, default_filters
 
 TITLE = "rem — graph"
+BACKGROUND = "#111111"  # the dark top bar's colour, so the window never flashes white while it loads
 _FILTER_KEYS = {"project", "scopes", "show_memories"}
 _JOB_FILTER_KEYS = {"project", "status", "flagged", "before"}
 _JOB_STATUSES = ("all", "done", "failed", "pending")
@@ -26,29 +29,66 @@ def _static_text(*parts: str) -> str:
     return node.read_text(encoding="utf-8")
 
 
-def _script(source: str, name: str) -> str:
+def _script(source: str, name: str, *, module: bool = False) -> str:
     # An inlined script must not close its own <script> element early.
     if "</script" in source.lower():
         raise ValueError(f"{name} contains '</script' and cannot be inlined")
-    return f"<script>\n{source}\n</script>"
+    attrs = ' type="module"' if module else ""
+    return f"<script{attrs}>\n{source}\n</script>"
+
+
+def _style(source: str, name: str) -> str:
+    if "</style" in source.lower():
+        raise ValueError(f"{name} contains '</style' and cannot be inlined")
+    return f"<style>\n{source}\n</style>"
+
+
+THREE_CORE_IMPORT = "'./three.core.js'"
+
+
+def _data_url(source: str) -> str:
+    return "data:text/javascript;base64," + base64.b64encode(source.encode("utf-8")).decode("ascii")
+
+
+def three_module_source(module: str) -> str:
+    """three.module.js with its two `./three.core.js` imports pointed at the import-map name `three/core`.
+    Anything other than exactly two occurrences means a different three.js build: refuse it."""
+    n = module.count(THREE_CORE_IMPORT)
+    if n != 2:
+        raise ValueError(f"three.module.js must import {THREE_CORE_IMPORT} exactly twice, found {n}")
+    return module.replace(THREE_CORE_IMPORT, "'three/core'")
+
+
+def importmap() -> str:
+    """The import map that serves the vendored three.js from data: URLs, so the page never loads a file."""
+    module = three_module_source(_static_text("vendor", "three", "three.module.js"))
+    core = _static_text("vendor", "three", "three.core.js")
+    imports = {"three": _data_url(module), "three/core": _data_url(core)}
+    # base64 data: URLs can't contain '<', so the JSON can't close the <script> element
+    return f'<script type="importmap">{json.dumps({"imports": imports})}</script>'
+
+
+MARKERS = ("<!-- @importmap -->", "<!-- @style -->", "<!-- @scripts -->")
 
 
 def render_html() -> str:
-    """graph.html with graph.css, the vendored cytoscape and graph.js inlined: no network, no external files."""
+    """graph.html with its styles, the vendored cytoscape, the three.js import map, graph.js and sphere.js inlined:
+    no network, no external files."""
     html = _static_text("graph.html")
-    css = _static_text("graph.css")
-    if "</style" in css.lower():
-        raise ValueError("graph.css contains '</style' and cannot be inlined")
+    styles = "\n".join([_style(_static_text("graph.css"), "graph.css"), _style(_static_text("sphere.css"), "sphere.css")])
     scripts = "\n".join([
         _script(_static_text("vendor", "cytoscape.min.js"), "cytoscape.min.js"),
         _script(_static_text("graph.js"), "graph.js"),
+        _script(_static_text("sphere.js"), "sphere.js", module=True),
     ])
-    for marker in ("<!-- @style -->", "<!-- @scripts -->"):
+    for marker in MARKERS:
         if html.count(marker) != 1:
             raise ValueError(f"graph.html must contain {marker} exactly once")
-    # Replace the scripts marker last, so nothing inside the inlined code is ever treated as a marker.
+    # The scripts marker is split off first and filled last; the import map (base64 and JSON, which can't hold a
+    # marker) goes in before the styles. So nothing inside the inlined code is ever treated as a marker.
     head, tail = html.split("<!-- @scripts -->")
-    head = head.replace("<!-- @style -->", f"<style>\n{css}\n</style>")
+    head = head.replace("<!-- @importmap -->", importmap())
+    head = head.replace("<!-- @style -->", styles)
     return head + scripts + tail
 
 
@@ -137,6 +177,17 @@ class Api:
             f["project"] = "all"
         return self._payload(snap, f)
 
+    def sphere(self, filters: dict) -> dict:
+        """The Sphere tab's data: the full view (all projects and scopes, memories on), which decides positions and
+        sizes, and the filtered view (memories always on), which decides what shows. Both come from one snapshot."""
+        f = _filters(filters)
+        snap = self._snap if self._snap is not None else self._fetch()
+        return {
+            "generated_at": snap.get("generated_at"),
+            "full": build_view(snap, project="all", scopes=ALL_SCOPES, show_memories=True),
+            "filtered": build_view(snap, **{**f, "show_memories": True}),
+        }
+
     def jobs(self, filters: dict) -> dict:
         """One page of extraction runs (the `/jobs` body)."""
         return self._client.jobs(**_job_filters(filters))
@@ -208,5 +259,5 @@ def run_window(client, cwd: Path | None) -> None:
         raise RuntimeError(problem)
     webview = import_webview()
     webview.create_window(TITLE, html=render_html(), js_api=Api(client, cwd),
-                          width=1200, height=800, background_color="#FFFFFF")
+                          width=1200, height=800, background_color=BACKGROUND)
     webview.start(gui="qt")

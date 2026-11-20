@@ -1,0 +1,88 @@
+/* rem graph window — the Sphere tab. All of the Sphere's colour lives here and in sphere.js. */
+#sphere-stage {
+  position: relative; flex: 1; min-height: 0; overflow: hidden;
+  background: #05070e; color: #cfd7ea;
+}
+#sphere-canvas { position: absolute; inset: 0; }
+#sphere-canvas canvas { display: block; touch-action: none; }
+#sphere-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.sphere-label {
+  position: absolute; left: 0; top: 0; white-space: nowrap; pointer-events: none;
+  font: 11px/16px system-ui, -apple-system, "Segoe UI", sans-serif; color: #b8c3dc;
+  text-shadow: 0 0 3px #05070e, 0 0 6px #05070e;
+}
+.sphere-label[hidden] { display: none; }
+.sphere-label.strong { color: #eef2fb; font-weight: 600; }
+.sphere-label.rel { color: #9fb2e6; font-style: italic; font-size: 10px; }
+
+#sphere-tip {
+  position: absolute; z-index: 5; pointer-events: none; max-width: 340px;
+  padding: 5px 9px; background: rgba(14, 19, 33, 0.94); color: #e3e9f6;
+  border: 1px solid #2a3350; border-radius: 6px; font-size: 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+#sphere-tip .sub { color: #8592b0; }
+#sphere-tip[hidden], #sphere-panel[hidden], #sphere-nogl[hidden] { display: none; }
+
+#sphere-legend {
+  position: absolute; left: 12px; bottom: 12px; z-index: 3;
+  padding: 8px 10px; background: rgba(10, 14, 25, 0.78);
+  border: 1px solid #1d2438; border-radius: 6px; font-size: 11px; color: #9aa6c2;
+}
+#sphere-legend .legend-title { font-weight: 600; margin: 6px 0 3px; color: #cfd7ea; }
+#sphere-legend .legend-title:first-child { margin-top: 0; }
+#sphere-legend .legend-row { display: flex; align-items: center; gap: 7px; line-height: 17px; }
+#sphere-legend .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+#sphere-legend .dot.person { background: #e3a27c; }
+#sphere-legend .dot.tool { background: #6fb2dc; }
+#sphere-legend .dot.project { background: #a698e2; }
+#sphere-legend .dot.language { background: #84c98c; }
+#sphere-legend .dot.org { background: #d9bd68; }
+#sphere-legend .dot.place { background: #df8a8f; }
+#sphere-legend .dot.concept { background: #68c6ba; }
+#sphere-legend .dot.other { background: #8790a6; }
+#sphere-legend .dot.verified { background: #cfd7ea; box-shadow: 0 0 6px #cfd7ea; }
+#sphere-legend .dot.unverified { background: transparent; border: 1.5px solid #cfd7ea; }
+#sphere-legend .dot.mem { width: 5px; height: 5px; margin: 0 2px; background: #c7d2ee; }
+#sphere-legend .dot.mem.dim { background: #56607c; }
+#sphere-legend .bar { width: 16px; height: 0; border-top: 1.5px solid #b9c7ee; flex: none; margin: 0 -3px 0 -3px; }
+#sphere-legend .bar.faint { border-top-color: #4a5470; }
+
+#sphere-panel {
+  position: absolute; top: 0; right: 0; bottom: 0; z-index: 4; width: 380px; max-width: 100%;
+  overflow-y: auto; padding: 12px 14px 20px; background: rgba(10, 14, 25, 0.95); color: #dbe2f1;
+  border-left: 1px solid #1f2740;
+}
+#sphere-panel-close {
+  position: absolute; top: 8px; right: 8px; font: inherit; font-size: 14px; cursor: pointer;
+  background: transparent; color: #aeb9d3; border: 1px solid #2c3653; border-radius: 4px;
+}
+#sphere-panel-close:hover { background: #18203a; }
+#sphere-panel h2 { font-size: 16px; margin: 0 30px 2px 0; word-break: break-word; color: #f1f4fb; }
+#sphere-panel h3 { font-size: 13px; margin: 12px 0 4px; color: #e3e9f6; }
+#sphere-panel h4 { font-size: 12px; margin: 8px 0 2px; color: #93a0bf; text-transform: lowercase; }
+#sphere-panel section { border-top: 1px solid #1f2740; margin-top: 10px; padding-top: 6px; }
+#sphere-panel ul { list-style: none; margin: 0; padding: 0; }
+#sphere-panel li { margin: 3px 0; word-break: break-word; }
+#sphere-panel .meta { color: #7f8bab; font-size: 12px; }
+#sphere-panel .fulltext { white-space: pre-wrap; word-break: break-word; margin: 6px 0; }
+#sphere-panel .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; font-size: 12px; }
+#sphere-panel .kv dt { color: #7f8bab; }
+#sphere-panel .kv dd { margin: 0; word-break: break-word; }
+#sphere-panel .id {
+  font: 11px/1.3 ui-monospace, "SFMono-Regular", Menlo, monospace; color: #aab6d2;
+  user-select: all; cursor: copy; word-break: break-all;
+}
+#sphere-panel .id.copied { background: #1d2744; }
+#sphere-panel .ids { color: #7f8bab; font-size: 11px; margin: 0 0 2px 12px; }
+#sphere-panel .link {
+  font: inherit; color: #9cc0ff; background: none; border: none; padding: 0;
+  text-decoration: underline; text-decoration-color: #3b5288; cursor: pointer; text-align: left;
+}
+#sphere-panel .link:hover { color: #c4d8ff; }
+#sphere-panel .same { color: #7f8bab; font-style: italic; }
+
+#sphere-nogl {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #93a0bf; font-size: 15px;
+}

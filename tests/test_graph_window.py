@@ -156,7 +156,7 @@ def test_api_exposes_only_read_methods():
 
     api = Api(FakeClient([snapshot()]), cwd=None)
     public = {n for n in dir(api) if not n.startswith("_")}
-    assert public == {"initial", "view", "refresh", "jobs", "job"}
+    assert public == {"initial", "view", "refresh", "sphere", "jobs", "job"}
 
 
 class FakeJobsClient:
