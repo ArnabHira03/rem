@@ -55,14 +55,115 @@ def test_render_html_is_self_contained():
     assert (STATIC / "vendor" / "cytoscape.min.js").read_text(encoding="utf-8") in html
     assert (STATIC / "graph.js").read_text(encoding="utf-8") in html
     assert (STATIC / "graph.css").read_text(encoding="utf-8") in html
-    for bad in ('src="http', 'href="http', "<script src="):
+    assert (STATIC / "sphere.css").read_text(encoding="utf-8") in html
+    assert '<script type="module">\n' + (STATIC / "sphere.js").read_text(encoding="utf-8") in html
+    for bad in ('src="http', 'href="http', "<script src=", "<link ", 'from "http', "from 'http", 'import("http'):
         assert bad not in html
+    # the import map comes before the module that uses it, and no marker is left behind
+    assert html.index('<script type="importmap">') < html.index('<script type="module">')
+    for marker in ("<!-- @importmap -->", "<!-- @style -->", "<!-- @scripts -->"):
+        assert marker not in html
 
 
-def test_page_never_uses_innerhtml():
-    assert "innerHTML" not in (STATIC / "graph.js").read_text(encoding="utf-8")
-    assert "outerHTML" not in (STATIC / "graph.js").read_text(encoding="utf-8")
-    assert "insertAdjacentHTML" not in (STATIC / "graph.js").read_text(encoding="utf-8")
+def _importmap(html):
+    import json
+
+    m = re.search(r'<script type="importmap">(.*?)</script>', html, re.S)
+    assert m, "no import map"
+    return json.loads(m.group(1))["imports"]
+
+
+def _decode(url):
+    import base64
+
+    prefix = "data:text/javascript;base64,"
+    assert url.startswith(prefix)
+    return base64.b64decode(url[len(prefix):]).decode("utf-8")
+
+
+def test_import_map_embeds_three_with_the_core_import_rewritten():
+    from rem.graph.window import render_html
+
+    imports = _importmap(render_html())
+    assert set(imports) == {"three", "three/core"}
+    module = (STATIC / "vendor" / "three" / "three.module.js").read_text(encoding="utf-8")
+    core = (STATIC / "vendor" / "three" / "three.core.js").read_text(encoding="utf-8")
+    assert _decode(imports["three/core"]) == core
+    embedded = _decode(imports["three"])
+    assert "'./three.core.js'" not in embedded
+    assert embedded.count("'three/core'") == 2
+    assert embedded == module.replace("'./three.core.js'", "'three/core'")
+
+
+@pytest.mark.parametrize("n", [0, 1, 3])
+def test_three_module_with_other_than_two_core_imports_is_refused(n):
+    from rem.graph.window import three_module_source
+
+    with pytest.raises(ValueError, match="exactly twice"):
+        three_module_source("import { a } from './three.core.js';\n" * n)
+
+
+def test_render_html_refuses_a_modified_three_build(monkeypatch):
+    from rem.graph import window
+
+    real = window._static_text
+
+    def fake(*parts):
+        text = real(*parts)
+        if parts[-1] == "three.module.js":
+            text += "\nexport * from './three.core.js';\n"
+        return text
+
+    monkeypatch.setattr(window, "_static_text", fake)
+    with pytest.raises(ValueError, match="exactly twice"):
+        window.render_html()
+
+
+def test_graph_html_has_each_marker_exactly_once():
+    html = (STATIC / "graph.html").read_text(encoding="utf-8")
+    for marker in ("<!-- @importmap -->", "<!-- @style -->", "<!-- @scripts -->"):
+        assert html.count(marker) == 1, marker
+    assert html.index("<!-- @importmap -->") < html.index("</head>")
+
+
+@pytest.mark.parametrize("name, closer", [("sphere.js", "</script>"), ("sphere.css", "</style>")])
+def test_render_html_refuses_sphere_files_that_close_their_element(monkeypatch, name, closer):
+    from rem.graph import window
+
+    real = window._static_text
+    monkeypatch.setattr(window, "_static_text", lambda *parts: real(*parts) + (closer if parts[-1] == name else ""))
+    with pytest.raises(ValueError, match=name):
+        window.render_html()
+
+
+def _vendored_hashes():
+    readme = (STATIC / "vendor" / "README.md").read_text(encoding="utf-8")
+    return re.findall(r"^([0-9a-f]{64})  (\S+)$", readme, re.M)
+
+
+def test_vendored_files_match_the_recorded_sha256():
+    import hashlib
+
+    recorded = _vendored_hashes()
+    names = {name for _, name in recorded}
+    assert {"cytoscape.min.js", "three/three.module.js", "three/three.core.js", "three/LICENSE"} <= names
+    for digest, name in recorded:
+        data = (STATIC / "vendor" / name).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == digest, name
+
+
+@pytest.mark.parametrize("name", ["graph.js", "sphere.js"])
+def test_page_never_uses_innerhtml(name):
+    text = (STATIC / name).read_text(encoding="utf-8")
+    for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert bad not in text
+
+
+def test_sphere_layout_is_deterministic_and_read_only():
+    text = (STATIC / "sphere.js").read_text(encoding="utf-8")
+    assert "Math.random" not in text
+    # the only Api method the Sphere calls is the read-only sphere()
+    assert re.findall(r"api\(\)\.(\w+)", text) == ["sphere"]
 
 
 def test_page_is_black_and_white():
@@ -338,3 +439,111 @@ def test_qt_platform_override_skips_the_check(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("DISPLAY", ":99")
     assert window._display_problem() is None
+
+
+def sphere_snapshot(generated_at="2026-11-17T10:00:00+00:00"):
+    snap = snapshot()
+    snap["generated_at"] = generated_at
+    snap["memories"] = [mem("m1", entity_ids=["e1"]), mem("m2", scope="project", project_id=1, entity_ids=["e2"]),
+                        mem("m3")]
+    snap["relations"] = [{"id": "r1", "source_entity_id": "e1", "target_entity_id": "e3", "type": "used_with",
+                          "scope": "project", "project_id": 3, "status": "verified", "provenance": "user_asserted",
+                          "sentence": None, "memory_ids": []}]
+    return snap
+
+
+SPHERE_FILTERS = {"project": 3, "scopes": ["global", "project"], "show_memories": False}
+
+
+def _ids(view):
+    return {n["id"] for n in view["nodes"]}, {e["id"] for e in view["edges"]}
+
+
+def test_api_sphere_returns_both_views_from_one_snapshot():
+    from rem.graph.window import Api
+
+    client = FakeClient([sphere_snapshot("first"), sphere_snapshot("second")])
+    api = Api(client, cwd=None)
+    out = api.sphere(SPHERE_FILTERS)
+    assert set(out) == {"generated_at", "full", "filtered"}
+    assert out["generated_at"] == "first"
+    assert len(client.calls) == 1
+    api.sphere(SPHERE_FILTERS)
+    assert len(client.calls) == 1  # cached, like Api.view
+    api.refresh(SPHERE_FILTERS)
+    again = api.sphere(SPHERE_FILTERS)
+    assert again["generated_at"] == "second" and len(client.calls) == 2
+
+
+def test_api_sphere_full_view_ignores_the_filters():
+    from rem.graph.view import ALL_SCOPES, build_view
+    from rem.graph.window import Api
+
+    snap = sphere_snapshot()
+    api = Api(FakeClient([snap]), cwd=None)
+    full = build_view(snap, project="all", scopes=ALL_SCOPES, show_memories=True)
+    for filters in (SPHERE_FILTERS, {"project": "1", "scopes": [], "show_memories": True}):
+        assert api.sphere(filters)["full"] == full
+    assert {"ent:qdrant", "ent:pytest", "mem:m2", "mem:m3"} <= _ids(full)[0]
+
+
+def test_api_sphere_filtered_view_is_a_subset_with_memories_on():
+    from rem.graph.view import build_view
+    from rem.graph.window import Api
+
+    snap = sphere_snapshot()
+    out = Api(FakeClient([snap]), cwd=None).sphere(SPHERE_FILTERS)
+    assert out["filtered"] == build_view(snap, project=3, scopes=["global", "project"], show_memories=True)
+    f_nodes, f_edges = _ids(out["filtered"])
+    full_nodes, full_edges = _ids(out["full"])
+    assert f_nodes <= full_nodes and f_edges <= full_edges
+    assert "mem:m1" in f_nodes and "mem:m3" in f_nodes  # show_memories forced on
+    assert "ent:qdrant" not in f_nodes and "mem:m2" not in f_nodes  # project 1 is filtered out
+
+
+@pytest.mark.parametrize("bad", [
+    {"project": "x", "scopes": [], "show_memories": False},
+    {"project": "all", "scopes": ["nope"], "show_memories": False},
+    {"project": "all", "scopes": [], "show_memories": "yes"},
+    {"project": "all", "scopes": []},
+    None,
+])
+def test_api_sphere_rejects_invalid_filters_like_view(bad):
+    from rem.graph.window import Api
+
+    api = Api(FakeClient([sphere_snapshot()]), cwd=None)
+    with pytest.raises(ValueError):
+        api.view(bad)
+    with pytest.raises(ValueError):
+        api.sphere(bad)
+
+
+def test_run_window_loads_the_page_from_a_private_temporary_file(monkeypatch):
+    """Qt's setHtml (pywebview's html=) can't show a page over 2 MB; this one is bigger, so it loads from a file."""
+    from pathlib import Path
+    from urllib.parse import urlparse
+
+    from rem.graph import window
+
+    seen = {}
+
+    class FakeWebview:
+        def create_window(self, title, **kw):
+            seen.update(kw)
+
+        def start(self, gui=None):
+            path = Path(urlparse(seen["url"]).path)
+            seen["page"] = path
+            seen["text"] = path.read_text(encoding="utf-8")
+            seen["mode"] = path.parent.stat().st_mode & 0o777
+
+    monkeypatch.setattr(window, "_display_problem", lambda: None)
+    monkeypatch.setattr(window, "import_webview", FakeWebview)
+    window.run_window(object(), None)
+    assert "html" not in seen
+    assert seen["url"].startswith("file://")
+    assert seen["text"] == window.render_html()
+    assert len(seen["text"].encode("utf-8")) > 2 * 1024 * 1024  # why html= can't be used
+    assert seen["mode"] == 0o700
+    assert not seen["page"].exists()  # removed when the window closes
+    assert seen["background_color"] == window.BACKGROUND

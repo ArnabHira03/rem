@@ -1,6 +1,6 @@
 /* rem graph window — the Sphere tab (an ES module; three.js comes from the page's import map).
  * Read-only: it only calls api.sphere. Every piece of text from data enters the page through textContent.
- * Deterministic: ids are hashed for every seed and offset; nothing here uses Math.random.
+ * Deterministic: ids are hashed for every seed and offset; nothing here draws random numbers.
  *
  * Entities sit on the unit sphere (a force layout over the whole unfiltered graph), memories inside it at the
  * mean of the entities they link, and memories with no visible entity link on a ring at 1.5 radii. The full
