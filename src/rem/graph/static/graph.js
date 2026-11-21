@@ -361,9 +361,9 @@
                          ["scope", n.scope], ["project", projectText(n)], ["id", copyId(n.id.replace(/^mem:/, ""))]]));
     var job = /^job:(\d+)$/.exec(n.job_id || "");
     if (job) {
-      var go = el("button", "link", "show the run that extracted this");
+      var go = el("button", "link", "See the conversation this came from");
       go.type = "button";
-      go.addEventListener("click", function () { showRun(Number(job[1])); });
+      go.addEventListener("click", function () { showRun(Number(job[1]), n.id.replace(/^mem:/, "")); });
       body.appendChild(go);
     }
     body.appendChild(el("h4", null, "linked entities"));
@@ -511,243 +511,466 @@
     else if (tab === "sphere") { if (views.sphere) views.sphere.filtersChanged(); graphStale = true; }
   }
 
-  // ---------- extraction runs ----------
-  var REASONS = {
-    duplicate: "duplicate of an earlier fact in this run",
-    no_project: "project fact in a session with no project",
-    existing_or_skipped: "matched an existing memory or skipped"
+  // ---------- extraction ----------
+  // Each Claude Code stop makes one job that reads only the newest messages, so on screen a job is never called a
+  // "run" or a "conversation": it is described by when it happened and what rem did. All colour is in
+  // extraction.css; this code only sets class names.
+  var KNOWN_TYPES = ["person", "tool", "project", "language", "org", "place", "concept"];   // models.ENTITY_TYPES
+  var TRUST_WHY = {
+    user_asserted: "you said it", user_confirmed: "you confirmed it",
+    tool_observed: "seen in tool output", assistant_generated: "the assistant's words, not yours"
+  };
+  var FLAG_TEXT = {
+    downgraded: "The model thought you said this, but none of your messages do.",
+    narration: "Reads like a note of what the assistant did, not a lasting fact.",
+    noise: "Contains a link or a commit id, so it's probably not a lasting fact.",
+    "scope-hint": "Filed as true everywhere (or for this computer), but it names this project.",
+    "relation-not-written": "The model linked things together here, but the links weren't saved."
   };
   var nextBefore = null;
   var selectedRun = null;
   var runsSeq = 0, runSeq = 0;
+  var lastDay = null;          // the day heading the run list ends on, so "Load older" appends under it
+  var messagesOpen = false;    // "Show the messages" stays open or closed as you move between entries
 
-  function when(iso) {
-    var d = iso ? new Date(iso) : null;
-    return d && !isNaN(d) ? d.toLocaleString() : String(iso || "—");
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function date(iso) { var d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d : null; }
+  function when(iso) { var d = date(iso); return d ? d.toLocaleString() : String(iso || "—"); }
+  function timeText(iso) {
+    var d = date(iso);
+    return d ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
   }
-  function badge(rule, reason) {
-    var b = el("span", "badge", rule);
-    if (reason) b.title = reason;
-    return b;
+  function dayKey(d) { return d ? d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate() : "?"; }
+  function dayText(iso) {
+    var d = date(iso);
+    if (!d) return "Unknown day";
+    var today = new Date(), yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    if (dayKey(d) === dayKey(today)) return "Today";
+    if (dayKey(d) === dayKey(yesterday)) return "Yesterday";
+    var opts = { weekday: "short", day: "numeric", month: "short" };
+    if (d.getFullYear() !== today.getFullYear()) opts.year = "numeric";
+    return d.toLocaleDateString(undefined, opts);
   }
-  function badges(flags) {
-    var wrap = el("div", "flags");
-    flags.forEach(function (f) { wrap.appendChild(badge(f.rule, f.reason)); });
-    return wrap;
+  function projectName(o) {
+    if (o.project_name) return o.project_name;
+    if (o.project_id !== null && o.project_id !== undefined) return "project #" + o.project_id;
+    return null;
   }
+  function sourceText(s) { return /^claude[-_]code$/.test(s || "") ? "Claude Code" : s; }
   function readJobFilters(before) {
     return { project: $("project").value, status: $("run-status").value,
              flagged: $("flagged-only").checked, before: before === undefined ? null : before };
   }
 
+  // ----- the list on the left -----
+  function listSummary(r) {
+    if (r.status === "failed") return "couldn't read";
+    if (r.status === "pending") return "waiting";
+    if (r.status === "processing") return "being read";
+    var parts = [];
+    if (r.n_added) parts.push(r.n_added + " saved");
+    if (r.n_corroborated) parts.push(r.n_corroborated + " confirmed");
+    return parts.length ? parts.join(" · ") : "nothing new";
+  }
+  function icon(kind, glyph, label) {
+    var s = el("span", "icon " + kind, glyph);
+    s.title = label;
+    s.setAttribute("aria-label", label);
+    return s;
+  }
+  function listIcon(r) {
+    if (r.status === "failed") return icon("bad", "✕", "couldn't read");
+    if (r.status === "pending" || r.status === "processing") return icon("wait", "⏳", "waiting");
+    var flags = (r.flags || []).filter(function (f) { return f !== "failed"; });
+    return flags.length ? icon("warn", "⚠", "worth a look") : null;
+  }
   function runItem(r) {
-    var li = el("li");
+    var li = el("li", "run");
     li.dataset.id = String(r.id);
-    if (r.id === selectedRun) li.className = "selected";
-    li.appendChild(el("span", "when", when(r.created_at)));
-    var counts = el("span", "counts", r.n_proposed + " → " + r.n_added);
-    counts.title = r.n_proposed + " proposed, " + r.n_added + " added";
-    if (r.flags && r.flags.length) {
-      var b = badge(String(r.flags.length), r.flags.join(", "));
-      counts.insertBefore(b, counts.firstChild);
-    }
-    li.appendChild(counts);
-    li.appendChild(el("span", "sub muted", projectText(r) + " · " + r.status + " · run #" + r.id));
+    if (r.id === selectedRun) li.classList.add("selected");
+    var top = el("div", "top");
+    top.appendChild(el("span", "time", timeText(r.created_at)));
+    var name = projectName(r);
+    top.appendChild(el("span", name ? "proj" : "proj none", name || "no project"));
+    li.appendChild(top);
+    li.appendChild(el("div", "summary", listSummary(r)));
+    var ic = listIcon(r);
+    if (ic) li.appendChild(ic);
+    li.title = when(r.created_at);
     li.addEventListener("click", function () { selectRun(r.id); });
     return li;
   }
   function markSelected() {
-    document.querySelectorAll("#run-list li").forEach(function (li) {
+    document.querySelectorAll("#run-list li.run").forEach(function (li) {
       li.classList.toggle("selected", li.dataset.id === String(selectedRun));
     });
   }
 
-  // Without `before`, replaces the list; with it, appends the next page.
+  // Without `before`, replaces the list; with it, appends the next (older) page.
   function loadRuns(before) {
     var append = before !== undefined && before !== null;
     var mine = ++runsSeq;
     extStale = false;
     if (!append) {
-      // a new filter: drop the old cursor now, so "load more" can't append a page of the old filters
+      // a new filter: drop the old cursor now, so "Load older" can't append a page of the old filters
       nextBefore = null;
       $("load-more").hidden = true;
     }
     var filters = readJobFilters(append ? before : null);
-    setStatus("loading runs…");
+    setStatus("loading…");
     api.jobs(filters).then(function (page) {
       if (mine !== runsSeq) return;
       setStatus("");
       var ul = $("run-list");
-      if (!append) clear(ul);
-      page.runs.forEach(function (r) { ul.appendChild(runItem(r)); });
+      if (!append) { clear(ul); lastDay = null; }
+      page.runs.forEach(function (r) {
+        var key = dayKey(date(r.created_at));
+        if (key !== lastDay) { ul.appendChild(el("li", "day", dayText(r.created_at))); lastDay = key; }
+        ul.appendChild(runItem(r));
+      });
       nextBefore = page.next_before === undefined ? null : page.next_before;
       $("load-more").hidden = nextBefore === null;
+      var first = ul.querySelector("li.run");
       var empty = $("runs-empty");
-      empty.hidden = ul.childNodes.length > 0;
-      empty.textContent = !filters.flagged ? "no extraction runs"
-        : nextBefore !== null ? "no flagged runs in the jobs scanned so far" : "no flagged runs";
+      empty.hidden = first !== null;
+      var filtered = filters.project !== "all" || filters.status !== "all" || filters.flagged;
+      empty.textContent = filters.flagged && nextBefore !== null
+        ? "Nothing worth a look so far. Load older to look further back."
+        : filtered ? "Nothing matches these filters."
+        : "rem hasn't read any conversations yet. They'll show up here after your next message in Claude Code.";
+      // never a blank right side: open the newest entry when nothing is picked yet; keep a picked one
+      if (!append && selectedRun === null && first) selectRun(Number(first.dataset.id));
+      $("run-empty").hidden = selectedRun !== null || first === null;
     }, fail);
   }
 
-  function selectRun(id) {
+  function selectRun(id, memoryId) {
     var mine = ++runSeq;
     selectedRun = id;
     markSelected();
     api.job(id).then(function (body) {
-      if (mine === runSeq) renderRun(body);
+      if (mine === runSeq) renderRun(body, memoryId);
     }, fail);
   }
 
-  // From the graph: works even when the run isn't in the loaded list.
-  function showRun(id) {
+  // From the Graph or Sphere: works even when the entry isn't in the loaded list. `memoryId` (optional) is the
+  // memory whose fact to scroll to and highlight.
+  function showRun(id, memoryId) {
     switchTab("extraction");
-    selectRun(id);
+    selectRun(id, memoryId);
   }
 
+  // ----- the right side -----
+  function runHead(run) {
+    var h = el("header", "run-head");
+    h.appendChild(el("h2", null, dayText(run.created_at) + ", " + timeText(run.created_at) + " · " +
+                                 (projectName(run) || "no project")));
+    if (run.source) h.appendChild(el("span", "via", "via " + sourceText(run.source)));
+    return h;
+  }
+  function errorDetails(error) {
+    var d = el("details");
+    d.appendChild(el("summary", null, "Show error"));
+    d.appendChild(el("pre", null, error));
+    return d;
+  }
+  function banner(kind, glyph, parts, error) {
+    var b = el("div", "banner " + kind);
+    b.appendChild(el("span", "icon " + kind, glyph));
+    parts.forEach(function (p) { b.appendChild(typeof p === "string" ? document.createTextNode(p) : p); });
+    if (error) b.appendChild(errorDetails(error));
+    return b;
+  }
+  function appliedConfirmations(body) {
+    var applied = {};
+    (body.other_memory_writes || []).forEach(function (w) { if (w.event === "CONFIRM") applied[w.target_id] = true; });
+    return applied;
+  }
+  function runSummary(run, body, facts) {
+    if (run.status === "failed") {
+      return banner("bad", "✕", ["rem couldn't read these messages. It won't try again by itself. " +
+                                 "After fixing the model settings, run ", el("code", null, "rem retry-failed"), "."],
+                    run.error);
+    }
+    if (run.status === "pending" && run.error) {
+      return banner("warn", "⚠", ["rem hit a problem and will try again shortly."], run.error);
+    }
+    if (run.status === "pending") return banner("wait", "⏳", ["Waiting to be read."]);
+    if (run.status === "processing") return banner("wait", "⏳", ["Being read now."]);
+
+    var box = el("div", "summary-text");
+    var msgs = plural(run.n_turns, "new message", "new messages");
+    var added = run.n_added, corr = run.n_corroborated, proposed = run.n_proposed;
+    var line;
+    if (!proposed) {
+      line = "rem read " + msgs + " and found nothing new to remember.";
+    } else if (!added && !corr) {
+      line = "From " + msgs + ", rem found " + plural(proposed, "fact", "facts") + " but didn't save any.";
+    } else {
+      var did = [];
+      if (added) did.push("saved " + plural(added, "new memory", "new memories"));
+      if (corr) did.push("confirmed " + corr + " it already had");
+      line = "From " + msgs + ", rem " + did.join(" and ") + ".";
+      var rest = proposed - added - corr;
+      if (rest > 0) line += " " + (rest === 1 ? "1 other fact wasn't saved." : rest + " other facts weren't saved.");
+    }
+    box.appendChild(el("p", null, line));
+    var flagged = facts.filter(function (f) { return f.flags && f.flags.length; }).length;
+    if (flagged) box.appendChild(el("p", "warn-text", "⚠ " + flagged + (flagged === 1 ? " is" : " are") + " worth a look."));
+    var nConfirmed = Object.keys(appliedConfirmations(body)).length;
+    if (nConfirmed) box.appendChild(el("p", null, "You confirmed " + plural(nConfirmed, "memory", "memories") + "."));
+    return box;
+  }
+
+  // The result of one fact: its group, card class, label and (only when it isn't obvious) an explanation.
+  function resultOf(f) {
+    var o = f.outcome || { kind: "none" };
+    var now = o.memory_now;
+    if (o.kind === "added" || o.kind === "corroborated") {
+      var saved = o.kind === "added";
+      var r = { group: saved ? "saved" : "confirmed", cls: saved ? "saved" : "confirmed",
+                label: saved ? "✚ Saved" : "✓ Confirmed",
+                note: saved ? null : "rem had this as a guess; you've now said it, so it's trusted." };
+      if (!now) { r.label += " · deleted since"; r.cls += " gone"; }
+      else if (String(now.text).trim() !== String(f.text).trim()) { r.label += " · edited since"; r.nowReads = now.text; }
+      return r;
+    }
+    if (o.reason === "existing_or_skipped") return { group: "none", cls: "none", label: "= Already known",
+                                                     note: "rem already had this, so nothing changed." };
+    if (o.reason === "duplicate") return { group: "none", cls: "none", label: "= Repeat",
+                                           note: "Said twice in these messages; kept once." };
+    if (o.reason === "no_project") return { group: "none", cls: "none", label: "– Not saved",
+                                            note: "About a project, but these messages weren't in one." };
+    return { group: "none", cls: "none", label: "– Not saved", note: null };
+  }
+  function trustChip(now) {
+    var verified = now.status === "verified";
+    var why = TRUST_WHY[now.provenance] || now.provenance;
+    return el("span", verified ? "trust verified" : "trust",
+              (verified ? "✓ verified" : "◌ unverified") + " · " + why);
+  }
+  function flagLines(f) {
+    var lines = [], typed = false;
+    (f.flags || []).forEach(function (flag) {
+      if (flag.rule !== "invalid-type") { lines.push(FLAG_TEXT[flag.rule] || flag.reason); return; }
+      if (typed) return;   // one flag per odd entity; they're all listed from the entities at once
+      typed = true;
+      (f.entities || []).forEach(function (e) {
+        if (KNOWN_TYPES.indexOf(e.type) < 0) {
+          lines.push("Mentions “" + e.name + "” as an unknown kind of thing (“" + e.type + "”).");
+        }
+      });
+    });
+    return lines;
+  }
+  function originText(o) {
+    return o === "user" ? "You" : o === "assistant" ? "The assistant" : o === "tool" ? "A tool" : String(o);
+  }
+  function scopeText(scope, run) {
+    if (scope === "global") return "You, in any project";
+    if (scope === "system") return "This computer";
+    if (scope === "project") return "This project" + (projectName(run) ? " (" + projectName(run) + ")" : "");
+    return String(scope);
+  }
+  function factDetails(f, run) {
+    var o = f.outcome || {};
+    var said = originText(f.origin_effective);
+    if (f.origin_proposed !== f.origin_effective) {
+      said += f.origin_proposed === "user" ? " (the model thought you said it)"
+        : " (the model said: " + originText(f.origin_proposed).toLowerCase() + ")";
+    }
+    var rows = [["Said by", said], ["Applies to", scopeText(f.scope, run)]];
+    if (f.entities && f.entities.length) {
+      var chips = el("span");
+      f.entities.forEach(function (e) {
+        var known = KNOWN_TYPES.indexOf(e.type) >= 0;
+        var c = el("span", "chip" + (known ? " type-" + e.type : ""), e.name);
+        c.title = String(e.type);
+        chips.appendChild(c);
+      });
+      rows.push(["Mentions", chips]);
+    }
+    if (f.relations && f.relations.length) {
+      var links = el("span");
+      f.relations.forEach(function (r) { links.appendChild(el("span", "rel", r.source + " → " + r.type + " → " + r.target)); });
+      rows.push(["Links", links]);
+    }
+    if (f.restates) rows.push(["Restates", copyId(f.restates)]);
+    if (o.memory_id) rows.push(["Memory id", copyId(o.memory_id)]);
+    if (f.flags && f.flags.length) rows.push(["Rules", f.flags.map(function (x) { return x.rule; }).join(", ")]);
+    var d = el("details", "more");
+    d.appendChild(el("summary", null, "Details"));
+    d.appendChild(kv(rows));
+    return d;
+  }
+  function factCard(f, run) {
+    var o = f.outcome || { kind: "none" };
+    var now = o.memory_now;
+    var res = resultOf(f);
+    var card = el("article", "fact " + res.cls);
+    if (o.memory_id) card.dataset.memoryId = o.memory_id;
+    var top = el("div", "top");
+    top.appendChild(el("span", "result", res.label));
+    if (now) top.appendChild(trustChip(now));
+    card.appendChild(top);
+    card.appendChild(el("div", "text", f.text));
+    if (res.note) card.appendChild(el("div", "note", res.note));
+    if (res.nowReads) card.appendChild(el("div", "note", "Now reads: " + res.nowReads));
+    // no run's ADD or CORROBORATE makes a memory user_confirmed: only the user's later confirmation does
+    if (o.kind === "added" && now && now.provenance === "user_confirmed") card.appendChild(el("div", "note", "You confirmed it later."));
+    var lines = flagLines(f);
+    if (lines.length) {
+      var w = el("div", "flagged");
+      w.appendChild(el("span", "chip-warn", "⚠ Worth a look"));
+      lines.forEach(function (t) { w.appendChild(el("div", "reason", t)); });
+      card.appendChild(w);
+    }
+    card.appendChild(factDetails(f, run));
+    return card;
+  }
+  function factGroups(facts, run) {
+    var frag = document.createDocumentFragment();
+    [["saved", "Saved"], ["confirmed", "Confirmed"], ["none", "Not saved"]].forEach(function (g) {
+      var mine = facts.filter(function (f) { return resultOf(f).group === g[0]; });
+      if (!mine.length) return;
+      frag.appendChild(el("h3", "group-title", g[1] + " (" + mine.length + ")"));
+      mine.forEach(function (f) { frag.appendChild(factCard(f, run)); });
+    });
+    return frag;
+  }
+
+  function confirmationsGroup(body) {
+    var list = body.confirmations || [];
+    if (!list.length) return null;
+    var applied = appliedConfirmations(body), texts = {};
+    (body.other_memory_writes || []).forEach(function (w) { if (w.memory_now) texts[w.target_id] = w.memory_now.text; });
+    var frag = document.createDocumentFragment();
+    frag.appendChild(el("h3", "group-title", "You confirmed (" + list.length + ")"));
+    list.forEach(function (x) {
+      var id = x.memory_id || x.id || "?";
+      var ok = !!applied[id];
+      var card = el("article", "fact " + (ok ? "confirmed" : "none"));
+      if (x.memory_id) card.dataset.memoryId = x.memory_id;
+      var top = el("div", "top");
+      top.appendChild(el("span", "result", ok ? "✓ applied" : "– not applied"));
+      card.appendChild(top);
+      if (texts[id]) card.appendChild(el("div", "text", texts[id]));
+      else { var t = el("div", "text"); t.appendChild(copyId(id)); card.appendChild(t); }
+      if (x.quote) card.appendChild(el("div", "quote", "you said: “" + x.quote + "”"));
+      frag.appendChild(card);
+    });
+    return frag;
+  }
+
+  function isLong(text) {
+    var s = String(text || "");
+    return s.length > 900 || s.split("\n").length > 10;
+  }
   function turnEl(t) {
-    var d = el("div", "turn");
-    var head = el("div");
-    head.appendChild(el("span", "role", t.role));
-    if (t.ts) head.appendChild(el("span", "ts", when(t.ts)));
+    var you = t.role === "user";
+    var d = el("div", "turn " + (you ? "you" : "them"));
+    var head = el("div", "head");
+    head.appendChild(el("span", "who", you ? "You" : t.role === "assistant" ? "Assistant" : t.role));
+    if (t.ts) { var ts = el("span", "ts", timeText(t.ts)); ts.title = when(t.ts); head.appendChild(ts); }
     d.appendChild(head);
-    d.appendChild(el("div", "fulltext", t.content));
+    var text = el("div", "body", t.content);
+    d.appendChild(text);
+    if (isLong(t.content)) {
+      // decided from the text, not the rendered height, so it also works while the section is collapsed
+      text.classList.add("clamped");
+      var more = el("button", "link", "Show more");
+      more.type = "button";
+      more.addEventListener("click", function () {
+        var clamped = text.classList.toggle("clamped");
+        more.textContent = clamped ? "Show more" : "Show less";
+      });
+      d.appendChild(more);
+    }
+    return d;
+  }
+  function messagesSection(body, forceOpen) {
+    var turns = body.turns || [], context = body.context_turns || [];
+    var d = el("details", "messages");
+    d.open = forceOpen || messagesOpen;
+    d.appendChild(el("summary", null, "Show the messages (" + turns.length + ")"));
+    // a waiting entry forces it open without changing what you chose for the others
+    if (!forceOpen) d.addEventListener("toggle", function () { messagesOpen = d.open; });
+    if (context.length) {
+      var ctx = el("details", "context");
+      ctx.appendChild(el("summary", null, "Earlier messages (" + context.length +
+                                          "), shown for context. rem doesn't take facts from these."));
+      context.forEach(function (t) { ctx.appendChild(turnEl(t)); });
+      d.appendChild(ctx);
+    }
+    if (!turns.length) d.appendChild(el("div", "none-text", "No messages."));
+    turns.forEach(function (t) { d.appendChild(turnEl(t)); });
     return d;
   }
 
-  function proposedCell(f) {
-    var c = el("div", "cell fact");
-    c.appendChild(el("div", "text", (f.index + 1) + ". " + f.text));
-    var origin = f.origin_proposed === f.origin_effective ? f.origin_effective
-      : f.origin_proposed + " → " + f.origin_effective;
-    c.appendChild(el("div", "meta", f.scope + " · " + origin + (f.restates ? " · restates " + f.restates : "")));
-    if (f.entities && f.entities.length) {
-      c.appendChild(el("div", "meta", "entities: " + f.entities.map(function (e) {
-        return e.name + " · " + e.type;
-      }).join(", ")));
-    }
-    if (f.relations && f.relations.length) {
-      var ul = el("ul", "meta");
-      f.relations.forEach(function (r) { ul.appendChild(el("li", null, r.source + " → " + r.type + " → " + r.target)); });
-      c.appendChild(ul);
-    }
-    if (f.flags && f.flags.length) c.appendChild(badges(f.flags));
-    return c;
-  }
-
-  function storedCell(f) {
-    var c = el("div", "cell");
-    var o = f.outcome || { kind: "none" };
-    var now = o.memory_now;
-    var line;
-    if (o.kind === "none") {
-      line = el("div", "outcome", "none");
-      c.appendChild(line);
-      c.appendChild(el("div", "meta", REASONS[o.reason] || o.reason || ""));
-      return c;
-    }
-    var label = o.kind === "added" ? "added" : "corroborated";
-    line = el("div", "outcome", now ? label + " " + mark(now.status) + " " + now.status : label + ", deleted since");
-    if (o.memory_id) line.title = "memory " + o.memory_id;
-    c.appendChild(line);
-    // no run's ADD or CORROBORATE makes a memory user_confirmed: only the user's confirmation does
-    if (now && now.provenance === "user_confirmed") c.appendChild(el("div", "meta", "confirmed since"));
-    if (now && String(now.text).trim() !== String(f.text).trim()) c.appendChild(el("div", "meta", "now: " + now.text));
-    return c;
-  }
-
-  function writesCell(body) {
-    var c = el("div", "cell");
+  function techSection(run, body) {
+    var d = el("details", "tech");
+    d.appendChild(el("summary", null, "Technical details"));
+    d.appendChild(kv([["Run", "#" + run.id], ["Status", run.status], ["Model", run.model], ["Source", run.source],
+                      ["Created", when(run.created_at)], ["Updated", when(run.updated_at)],
+                      ["Messages read", run.n_turns]]));
     var other = body.other_memory_writes || [];
-    if (other.length) {
-      // memory writes no fact accounts for: confirmations, and adds or corroborations not credited
-      c.appendChild(el("h3", null, "other memory writes"));
+    // memory writes no fact accounts for: confirmations, and adds or corroborations not credited to a fact
+    d.appendChild(el("h4", null, "Other memory writes"));
+    if (!other.length) d.appendChild(el("div", "none-text", "none"));
+    else {
       var mul = el("ul");
       other.forEach(function (w) {
         var now = w.memory_now;
         var text = now ? now.text : (w.new_value || w.target_id);
-        var li = el("li", null, "memory " + w.event.toLowerCase() + " " + text + (now ? " " + mark(now.status) : ", deleted since"));
+        var li = el("li", null, "memory " + w.event.toLowerCase() + ": " + text + (now ? " " + mark(now.status) : " (deleted since)"));
         li.title = "memory " + w.target_id;
         mul.appendChild(li);
       });
-      c.appendChild(mul);
+      d.appendChild(mul);
     }
-    var confirmations = body.confirmations || [];
-    if (confirmations.length) {
-      var confirmed = {};
-      other.forEach(function (w) { if (w.event === "CONFIRM") confirmed[w.target_id] = true; });
-      c.appendChild(el("h3", null, "confirmations"));
-      var cul = el("ul");
-      confirmations.forEach(function (x) {
-        var id = x.memory_id || x.id || "?";
-        var li = el("li", null, "memory " + id + (confirmed[id] ? " · confirmed" : " · not applied"));
-        if (x.quote) li.appendChild(el("div", "meta fulltext", "user: \u201c" + x.quote + "\u201d"));
-        cul.appendChild(li);
-      });
-      c.appendChild(cul);
-    }
-    c.appendChild(el("h3", null, "entity and relation writes"));
+    d.appendChild(el("h4", null, "Entity and relation writes"));
     var rows = (body.writes || []).filter(function (w) { return w.target_kind === "entity" || w.target_kind === "relation"; });
-    if (!rows.length) { c.appendChild(el("div", "meta", "none")); return c; }
-    var ul = el("ul");
-    rows.forEach(function (w) {
-      var li = el("li", null, w.target_kind + " " + w.event.toLowerCase() + " " + (w.new_value || w.target_id));
-      li.title = w.target_kind + " " + w.target_id;
-      ul.appendChild(li);
-    });
-    c.appendChild(ul);
-    return c;
+    if (!rows.length) d.appendChild(el("div", "none-text", "none"));
+    else {
+      var ul = el("ul");
+      rows.forEach(function (w) {
+        var li = el("li", null, w.target_kind + " " + w.event.toLowerCase() + ": " + (w.new_value || w.target_id));
+        li.title = w.target_kind + " " + w.target_id;
+        ul.appendChild(li);
+      });
+      d.appendChild(ul);
+    }
+    return d;
   }
 
-  function place(node, row, col, span) {
-    node.style.gridColumn = String(col);
-    node.style.gridRow = span ? row + " / span " + span : String(row);
-    return node;
+  function flashFact(out, memoryId) {
+    var cards = out.querySelectorAll("article.fact");
+    for (var i = 0; i < cards.length; i++) {
+      // compared as data, never built into a selector
+      if (cards[i].dataset.memoryId !== memoryId) continue;
+      var card = cards[i];
+      card.scrollIntoView({ block: "center" });
+      card.classList.add("flash");
+      setTimeout(function () { card.classList.remove("flash"); }, 1600);
+      return;
+    }
   }
 
-  function renderRun(body) {
-    var run = body.run;
+  function renderRun(body, memoryId) {
+    var run = body.run, facts = body.facts || [];
     var out = $("run-body");
     clear(out);
     $("run-empty").hidden = true;
-    out.appendChild(el("h2", null, "run #" + run.id));
-    var meta = [run.status, projectText(run), when(run.created_at)];
-    if (run.source) meta.push(run.source);
-    if (run.model) meta.push(run.model);
-    meta.push(run.n_proposed + " proposed · " + run.n_added + " added · " + run.n_corroborated + " corroborated");
-    out.appendChild(el("div", "meta", meta.join(" · ")));
-    if (run.run_flags && run.run_flags.length) out.appendChild(badges(run.run_flags));
-    if (run.error) out.appendChild(el("div", "error fulltext", "error: " + run.error));
-    if (run.status === "pending" && !body.turns.length) {
-      out.appendChild(el("div", "meta", "not run yet"));
-      $("run").scrollTop = 0;
-      return;
-    }
-
-    var facts = body.facts || [];
-    var grid = el("div", "cols");
-    var conv = el("div", "conversation");
-    conv.appendChild(el("h3", null, "conversation"));
-    if (body.context_turns && body.context_turns.length) {
-      var ctx = el("details", "context");
-      ctx.appendChild(el("summary", null, "earlier context (" + body.context_turns.length + ")"));
-      body.context_turns.forEach(function (t) { ctx.appendChild(turnEl(t)); });
-      conv.appendChild(ctx);
-    }
-    if (!body.turns.length) conv.appendChild(el("div", "meta", "no turns"));
-    body.turns.forEach(function (t) { conv.appendChild(turnEl(t)); });
-    var writesRow = Math.max(facts.length, 1) + 2;
-    grid.appendChild(place(conv, 1, 1, writesRow));
-
-    grid.appendChild(place(el("h3", null, "model proposed"), 1, 2));
-    grid.appendChild(place(el("h3", null, "stored"), 1, 3));
-    if (!facts.length) grid.appendChild(place(el("div", "meta", "no facts proposed"), 2, 2));
-    facts.forEach(function (f, i) {
-      grid.appendChild(place(proposedCell(f), i + 2, 2));
-      grid.appendChild(place(storedCell(f), i + 2, 3));
-    });
-    grid.appendChild(place(writesCell(body), writesRow, 3));
-    out.appendChild(grid);
+    out.appendChild(runHead(run));
+    out.appendChild(runSummary(run, body, facts));
+    if (facts.length) out.appendChild(factGroups(facts, run));
+    var confirmed = confirmationsGroup(body);
+    if (confirmed) out.appendChild(confirmed);
+    out.appendChild(messagesSection(body, run.status === "pending" || run.status === "processing"));
+    out.appendChild(techSection(run, body));
     $("run").scrollTop = 0;
+    if (memoryId) flashFact(out, memoryId);
   }
 
   function wire() {
@@ -807,7 +1030,7 @@
     readFilters: readFilters,
     setStatus: setStatus,
     fail: fail,
-    showRun: function (id) { showRun(id); },
+    showRun: function (id, memoryId) { showRun(id, memoryId); },
     switchTab: function (name) { switchTab(name); },
     registerView: registerView,
     view: function (name) { return views[name]; }

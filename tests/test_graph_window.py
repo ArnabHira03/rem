@@ -56,6 +56,7 @@ def test_render_html_is_self_contained():
     assert (STATIC / "graph.js").read_text(encoding="utf-8") in html
     assert (STATIC / "graph.css").read_text(encoding="utf-8") in html
     assert (STATIC / "sphere.css").read_text(encoding="utf-8") in html
+    assert (STATIC / "extraction.css").read_text(encoding="utf-8") in html
     assert '<script type="module">\n' + (STATIC / "sphere.js").read_text(encoding="utf-8") in html
     for bad in ('src="http', 'href="http', "<script src=", "<link ", 'from "http', "from 'http", 'import("http'):
         assert bad not in html

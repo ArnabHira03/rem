@@ -28,15 +28,15 @@
   <label class="sphere-only switch"><input type="checkbox" id="sphere-autorotate" checked> auto-rotate</label>
   <button type="button" id="sphere-reset-view" class="sphere-only" title="Camera, rotation and ring back to the start">Reset view</button>
   <button type="button" id="sphere-reset-layout" class="sphere-only" title="Recompute the layout from scratch">Reset layout</button>
-  <label class="ext-only">status
+  <label class="ext-only">Show
     <select id="run-status">
-      <option value="all">all</option>
-      <option value="done">done</option>
-      <option value="failed">failed</option>
-      <option value="pending">pending</option>
+      <option value="all">All</option>
+      <option value="done">Finished</option>
+      <option value="failed">Failed</option>
+      <option value="pending">Waiting</option>
     </select>
   </label>
-  <label class="ext-only"><input type="checkbox" id="flagged-only"> flagged only</label>
+  <label class="ext-only switch"><input type="checkbox" id="flagged-only"> Worth a look only</label>
   <button type="button" id="refresh" title="Refresh from rem">⟳</button>
   <span id="snapshot" class="muted view-only"></span>
   <span id="status" class="muted"></span>
@@ -95,13 +95,13 @@
   <div id="sphere-nogl" hidden>3D view needs WebGL — showing the 2D graph</div>
 </main>
 <main id="ext" class="ext-only">
-  <nav id="runs" aria-label="extraction runs">
+  <nav id="runs" aria-label="what rem read">
     <ul id="run-list"></ul>
-    <div id="runs-empty" class="muted" hidden>no extraction runs</div>
-    <button type="button" id="load-more" hidden>Load more</button>
+    <div id="runs-empty" hidden></div>
+    <button type="button" id="load-more" hidden>Load older</button>
   </nav>
-  <section id="run" aria-label="selected run">
-    <div id="run-empty" class="muted">select a run</div>
+  <section id="run" aria-label="what rem made of it">
+    <div id="run-empty" hidden>Pick one on the left to see what rem made of it.</div>
     <div id="run-body"></div>
   </section>
 </main>
