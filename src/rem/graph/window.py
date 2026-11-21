@@ -76,7 +76,7 @@ def render_html() -> str:
     """graph.html with its styles, the vendored cytoscape, the three.js import map, graph.js and sphere.js inlined:
     no network, no external files."""
     html = _static_text("graph.html")
-    styles = "\n".join([_style(_static_text("graph.css"), "graph.css"), _style(_static_text("sphere.css"), "sphere.css")])
+    styles = "\n".join(_style(_static_text(name), name) for name in ("graph.css", "sphere.css", "extraction.css"))
     scripts = "\n".join([
         _script(_static_text("vendor", "cytoscape.min.js"), "cytoscape.min.js"),
         _script(_static_text("graph.js"), "graph.js"),

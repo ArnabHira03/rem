@@ -23,7 +23,7 @@ Your conversations with an AI assistant are full of personal and work details. r
 - **Understands your projects.** Each memory is tied to a project, to your computer, or to you in general, so one project's details don't leak into another.
 - **Smart search.** Finds memories by meaning and by keyword, with the current project first.
 - **Knowledge map.** Links memories through the people, tools and projects they mention, and shows them in a desktop window you can explore, as a slowly turning 3D sphere or as a flat 2D graph.
-- **Extraction review.** Another tab in that window shows what rem picked up from each conversation and what it decided to keep.
+- **Extraction review.** Another tab in that window shows, in plain words, what rem saved from your recent messages, what it already knew, and anything worth a second look.
 - **Works with your assistant.** Plugs into Claude Code, and any assistant that supports MCP can search and add memories.
 - **Simple command line.** Add, search, list, confirm and delete memories from the terminal.
 
@@ -137,7 +137,11 @@ Run `uv run rem --help` to see every command.
     everything from scratch.
   - It needs a graphics card with WebGL. Without one, the window shows the Graph tab instead.
 - **Graph** shows the same things as a flat 2D graph.
-- **Extraction** shows each conversation rem read, what it picked up and what it kept.
+- **Extraction** lists each time rem read your new messages, grouped by day. Pick one to see what rem saved,
+  what it confirmed and what it left out, with a short reason for each. Facts marked **⚠ Worth a look** may be
+  wrong (for example, filed as something you said when you didn't). **Show** and **Worth a look only** at the top
+  filter the list, and **Details**, **Show the messages** and **Technical details** open the rest. In a memory's
+  panel on the Sphere or Graph, **See the conversation this came from** jumps to the fact that made it.
 
 The project, scope and search controls at the top apply to both Sphere and Graph.
 
