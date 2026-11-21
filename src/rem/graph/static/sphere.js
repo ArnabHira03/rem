@@ -39,6 +39,8 @@ const RESUME_MS = 1000;                 // after a pause ends, wait this long, t
 const EASE_IN_MS = 900;                 // spin and ring drift ease back up to speed over about this long
 const EASE_OUT_MS = 90;                 // and stop almost at once, so a hovered dot holds still
 const SEPARATION = 0.3;                 // two entities' centres stay at least this x (size a + size b) apart
+const CROWD_FILL = 0.3;                 // dots start shrinking once their clear discs cover this much of the sphere
+const CROWD_STEP = 0.05, CROWD_MIN = 0.3;
 const FOCUS_MS = 600;
 const REPULSE_COS = Math.cos((40 * Math.PI) / 180);
 const REPULSE_CHORD = 2 * Math.sin((20 * Math.PI) / 180);
@@ -85,14 +87,29 @@ function buildGraph(full) {
   const keys = [...weights.keys()].sort();
   const pairs = keys.map((k) => weights.get(k));
   const nMem = new Map(full.nodes.filter((n) => n.kind === "entity").map((n) => [n.id, n.n_memories]));
-  const sizes = ents.map((id) => entitySize(nMem.get(id) || 0));
+  const raw = ents.map((id) => entitySize(nMem.get(id) || 0));
+  const scale = crowdScale(raw);
+  const sizes = raw.map((s) => s * scale);
   const print = fnv(ents.join("\n") + "\n#\n" + keys.map((k) => k + "|" + weights.get(k).w.toFixed(6)).join("\n"))
     .toString(16);
-  return { ents, index, pairs, print, sizes };
+  return { ents, index, pairs, print, sizes, scale };
 }
 
 // Dot size, from the number of linked memories in the full view.
 function entitySize(nMemories) { return Math.min(0.24, 0.075 + 0.03 * Math.sqrt(nMemories)); }
+
+// A crowded sphere shrinks every dot by one factor, so relative sizes still show memory counts. Each dot keeps
+// a disc of radius SEPARATION x size clear on the unit sphere; once those discs cover more than CROWD_FILL of the
+// surface, the factor brings the cover back to CROWD_FILL. It steps by CROWD_STEP so one new entity doesn't
+// resize every dot, and stops at CROWD_MIN so dots stay visible (past that, separate() does its best).
+function crowdScale(sizes) {
+  let cover = 0;
+  for (const s of sizes) cover += Math.PI * (SEPARATION * s) ** 2;
+  const fill = cover / (4 * Math.PI);
+  if (fill <= CROWD_FILL) return 1;
+  const k = Math.floor(Math.sqrt(CROWD_FILL / fill) / CROWD_STEP) * CROWD_STEP;
+  return Math.max(CROWD_MIN, k);
+}
 
 // Pushes apart any two entities closer than SEPARATION x (size a + size b), so no two dots ever sit on one
 // point. Deterministic, and it moves nothing when nothing overlaps, so an unchanged layout stays put.
@@ -442,7 +459,7 @@ function buildScene(res, g, pos, memPos) {
     const mat = new THREE.SpriteMaterial({ map: dotTexture(color, filled), transparent: true, depthWrite: false, fog: true });
     const sprite = new THREE.Sprite(mat);
     const p = new THREE.Vector3(...pos.get(id));
-    const size = entitySize(fn.n_memories);
+    const size = g.sizes[g.index.get(id)];
     sprite.position.copy(p);
     sprite.scale.setScalar(size);
     sprite.visible = !!vis;
@@ -488,7 +505,7 @@ function buildScene(res, g, pos, memPos) {
 
   const topByMem = [...ents.values()].filter((e) => e.visible).sort((x, y) => y.n - x.n || (x.id < y.id ? -1 : 1));
   world = { info, ents, sphereMems, ringMems, memPoints, ringPoints, segs, lines, arcs, arcLines, nbrs, topByMem,
-            objects, centre: largestCentre(g, pos),
+            objects, centre: largestCentre(g, pos), dotScale: g.scale,
             sphereIndex: new Map(sphereMems.map((m, i) => [m.id, i])), ringIndex: new Map(ringMems.map((m, i) => [m.id, i])) };
   if (selectedId && !info.has(selectedId)) { selectedId = null; closePanel(); }
   if (hoverId && !info.has(hoverId)) hoverId = null;
@@ -1097,7 +1114,7 @@ const view = {
   inspect(id) {
     const out = {
       shown, autoOn, reduced: reduced.matches, camDist, ringAngle, hoverId, selectedId, panelId,
-      rotation: root ? root.quaternion.toArray() : null, print: cache.print,
+      rotation: root ? root.quaternion.toArray() : null, print: cache.print, dotScale: world ? world.dotScale : 1,
       entities: world ? [...world.ents.values()].filter((e) => e.visible).length : 0,
       sphereMemories: world ? world.sphereMems.length : 0, ringMemories: world ? world.ringMems.length : 0,
       ringIds: world ? world.ringMems.map((m) => m.id) : [],
