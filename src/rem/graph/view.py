@@ -13,7 +13,7 @@ ALL_SCOPES = ["global", "system", "project"]
 
 def default_filters(snapshot: dict) -> dict:
     current = snapshot.get("current_project_id")
-    return {"project": "all" if current is None else current, "scopes": list(ALL_SCOPES), "show_memories": False}
+    return {"project": "all" if current is None else current, "scopes": list(ALL_SCOPES)}
 
 
 def _keep(record: dict, project: int | Literal["all"], scopes: set[str]) -> bool:
@@ -25,13 +25,7 @@ def _node_id(entity: dict) -> str:
     return f"ent:{entity['normalized']}"
 
 
-def build_view(
-    snapshot: dict,
-    *,
-    project: int | Literal["all"],
-    scopes: Collection[str],
-    show_memories: bool,
-) -> dict:
+def build_view(snapshot: dict, *, project: int | Literal["all"], scopes: Collection[str]) -> dict:
     scope_set = set(scopes)
     project_names = {p["id"]: p["name"] for p in snapshot.get("projects", [])}
 
@@ -125,20 +119,19 @@ def build_view(
             "members": members, "relations": node_rel_list, "memories": node_mem_list,
         })
 
-    if show_memories:
-        for mid, m in memories.items():
-            nodes.append({
-                "id": f"mem:{mid}", "kind": "memory", "label": m["text"][:80], "text": m["text"],
-                "verified": m["status"] == "verified", "status": m["status"], "provenance": m["provenance"],
-                "scope": m["scope"], "project_id": m.get("project_id"),
-                # prefer the memory's own stored project name
-                "project_name": m.get("project_name") or pname(m), "job_id": m.get("job_id"),
-                "entity_nodes": sorted(mem_nodes[mid]),
-            })
-        for mid, node_ids in mem_nodes.items():
-            for node_id in node_ids:
-                edges.append({"id": f"men:{mid}:{node_id.removeprefix('ent:')}", "kind": "mention",
-                              "source": f"mem:{mid}", "target": node_id})
+    for mid, m in memories.items():
+        nodes.append({
+            "id": f"mem:{mid}", "kind": "memory", "label": m["text"][:80], "text": m["text"],
+            "verified": m["status"] == "verified", "status": m["status"], "provenance": m["provenance"],
+            "scope": m["scope"], "project_id": m.get("project_id"),
+            # prefer the memory's own stored project name
+            "project_name": m.get("project_name") or pname(m), "job_id": m.get("job_id"),
+            "entity_nodes": sorted(mem_nodes[mid]),
+        })
+    for mid, node_ids in mem_nodes.items():
+        for node_id in node_ids:
+            edges.append({"id": f"men:{mid}:{node_id.removeprefix('ent:')}", "kind": "mention",
+                          "source": f"mem:{mid}", "target": node_id})
 
     nodes.sort(key=lambda n: n["id"])
     edges.sort(key=lambda e: e["id"])

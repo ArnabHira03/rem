@@ -38,8 +38,8 @@ def mem(id, text="some fact", *, scope="global", project_id=None, status="verifi
             "job_id": job_id, "created_at": "t", "updated_at": "t"}
 
 
-def view(s, project="all", scopes=ALL, show_memories=False):
-    return build_view(s, project=project, scopes=scopes, show_memories=show_memories)
+def view(s, project="all", scopes=ALL):
+    return build_view(s, project=project, scopes=scopes)
 
 
 def nodes_by_id(v):
@@ -108,7 +108,7 @@ def test_members_preserve_ids_scope_project():
 def test_build_view_does_not_mutate_snapshot():
     s = _rich_snapshot()
     before = copy.deepcopy(s)
-    v = view(s, show_memories=True)
+    v = view(s)
     assert s == before
     # the output holds no references into the input
     for m in all_members(v):
@@ -127,7 +127,7 @@ def test_filters_apply_before_grouping():
         memories=[mem("m1", scope="project", project_id=1, entity_ids=["a"]),
                   mem("m2", scope="project", project_id=2, entity_ids=["b"])],
     )
-    v = view(s, project=1, show_memories=True)
+    v = view(s, project=1)
     ns = nodes_by_id(v)
     assert [m["entity_id"] for m in ns["ent:uv"]["members"]] == ["a"]
     assert "ent:ruff" not in ns
@@ -154,7 +154,7 @@ def test_scope_checkboxes_hide_records():
         relations=[rel("rg", "g", "s"), rel("rp", "p", "q", scope="project", project_id=1)],
         memories=[mem("mg", entity_ids=["g"]), mem("mp", scope="project", project_id=1, entity_ids=["p"])],
     )
-    v = view(s, scopes=["project"], show_memories=True)
+    v = view(s, scopes=["project"])
     ns = nodes_by_id(v)
     assert [m["entity_id"] for m in ns["ent:uv"]["members"]] == ["p"]
     assert {r["id"] for r in ns["ent:uv"]["relations"]} == {"rp"}
@@ -197,7 +197,7 @@ def _anti_inference_snapshots():
 def test_every_edge_is_stored():
     for s in _anti_inference_snapshots():
         for project in ("all", 1, 2):
-            v = view(s, project=project, show_memories=True)
+            v = view(s, project=project)
             ns = nodes_by_id(v)
             rels = {r["id"]: r for r in s["relations"]}
             n_rel_edges = 0
@@ -235,7 +235,7 @@ def test_link_rule_either_side_one_edge_per_pair():
         entities=[ent("e1", "uv", memory_ids=["M"]), ent("e2", "uv", scope="project", project_id=1)],
         memories=[mem("M", entity_ids=["e2"]), mem("lone")],
     )
-    v = view(s, show_memories=True)
+    v = view(s)
     assert [e["id"] for e in v["edges"]] == ["men:M:uv"]
     ns = nodes_by_id(v)
     assert ns["mem:lone"]["entity_nodes"] == []
@@ -251,7 +251,7 @@ def test_dangling_ids_are_skipped():
         relations=[rel("r1", "e1", "missing")],
         memories=[mem("m1", entity_ids=["absent"])],
     )
-    v = view(s, show_memories=True)
+    v = view(s)
     assert v["edges"] == []
     node = nodes_by_id(v)["ent:uv"]
     assert node["relations"] == [] and node["memories"] == []
@@ -279,18 +279,6 @@ def test_mixed_types_and_members_keep_their_own():
     assert same["type"] == "tool"
 
 
-def test_show_memories_off_has_no_memory_nodes_but_counts():
-    s = _rich_snapshot()
-    off = view(s)
-    on = view(s, show_memories=True)
-    assert not any(n["kind"] == "memory" for n in off["nodes"])
-    assert not any(e["kind"] == "mention" for e in off["edges"])
-    assert any(e["kind"] == "mention" for e in on["edges"])
-    for nid, n in nodes_by_id(off).items():
-        assert n["n_memories"] == nodes_by_id(on)[nid]["n_memories"]
-    assert nodes_by_id(off)["ent:uv"]["n_memories"] == 2
-
-
 def test_label_and_member_order_and_sorting():
     s = snap(entities=[ent("z", "Uv", normalized="uv", scope="project", project_id=2),
                        ent("y", "UV", normalized="uv", scope="global"),
@@ -309,8 +297,7 @@ def test_label_and_member_order_and_sorting():
 
 
 def test_default_filters():
-    assert default_filters(snap(current=3)) == {"project": 3, "scopes": ["global", "system", "project"],
-                                                "show_memories": False}
+    assert default_filters(snap(current=3)) == {"project": 3, "scopes": ["global", "system", "project"]}
     assert default_filters(snap(current=None))["project"] == "all"
     assert default_filters(snap(current=0))["project"] == 0
 
@@ -337,7 +324,7 @@ def test_memory_project_name_falls_back_to_projects_lookup():
     m = mem("m1", scope="project", project_id=1, entity_ids=["e1"])
     m["project_name"] = None
     s = snap(entities=[ent("e1", "uv", scope="project", project_id=1)], memories=[m])
-    v = view(s, show_memories=True)
+    v = view(s)
     assert nodes_by_id(v)["mem:m1"]["project_name"] == "one"
     assert nodes_by_id(v)["ent:uv"]["memories"][0]["project_name"] == "one"
 
@@ -347,8 +334,7 @@ def test_relation_identity_scope_and_other_entity_id():
     v = view(s)
     rels = {r["id"]: r for r in s["relations"]}
     ents = {e["id"]: e for e in s["entities"]}
-    for edge in v["edges"]:
-        assert edge["kind"] == "relation"
+    for edge in (e for e in v["edges"] if e["kind"] == "relation"):
         assert edge["scope"] == rels[edge["id"].removeprefix("rel:")]["scope"]
     for m in all_members(v):
         for r in m["relations"]:
@@ -359,13 +345,13 @@ def test_relation_identity_scope_and_other_entity_id():
             assert r["scope"] == stored["scope"]
     m2 = next(m for m in all_members(v) if m["entity_id"] == "e2")
     assert m2["relations"][0]["other_entity_id"] == "e3"
-    assert {e["id"]: e["scope"] for e in v["edges"]} == {"rel:r1": "project", "rel:r2": "global"}
+    assert {e["id"]: e["scope"] for e in v["edges"] if e["kind"] == "relation"} == {"rel:r1": "project", "rel:r2": "global"}
 
 
 def test_memory_nodes_and_entries_carry_job_id():
     s = snap(entities=[ent("e1", "uv")],
              memories=[mem("m1", entity_ids=["e1"], job_id="job:7"), mem("m2", entity_ids=["e1"])])
-    v = view(s, show_memories=True)
+    v = view(s)
     n = nodes_by_id(v)
     assert n["mem:m1"]["job_id"] == "job:7"
     assert n["mem:m2"]["job_id"] is None

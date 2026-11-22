@@ -1,18 +1,9 @@
-/* rem graph window. Read-only: it only calls api.initial / api.view / api.refresh / api.jobs / api.job (and sphere.js, api.sphere).
+/* rem graph window. Read-only: it only calls api.initial / api.refresh / api.jobs / api.job (and sphere.js, api.sphere).
  * Every piece of text from data enters the page through textContent or createElement, never as markup. */
 (function () {
   "use strict";
 
-  var SHAPES = {
-    person: "ellipse", tool: "round-rectangle", project: "hexagon", language: "diamond",
-    org: "rectangle", place: "triangle", concept: "octagon"
-  };
-  var INK = "#000000", PAPER = "#ffffff", GREY = "#888888", MEM = "#666666", FAINT = "#bbbbbb";
-
   var api = null;
-  var cy = null;
-  var info = new Map();       // element id -> node or edge object from the view
-  var selectedId = null;
   var started = false;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -41,7 +32,7 @@
   function readFilters() {
     var scopes = [];
     document.querySelectorAll("input.scope").forEach(function (c) { if (c.checked) scopes.push(c.value); });
-    return { project: $("project").value, scopes: scopes, show_memories: $("show-memories").checked };
+    return { project: $("project").value, scopes: scopes };
   }
 
   function setProjects(projects, current) {
@@ -62,7 +53,6 @@
 
   function applyFilters(f) {
     document.querySelectorAll("input.scope").forEach(function (c) { c.checked = f.scopes.indexOf(c.value) >= 0; });
-    $("show-memories").checked = !!f.show_memories;
   }
 
   function setSnapshotTime(iso) {
@@ -70,199 +60,6 @@
     $("snapshot").textContent = d && !isNaN(d) ? "snapshot " + d.toLocaleString() : "";
   }
 
-  // ---------- cytoscape ----------
-  function style() {
-    return [
-      { selector: "node", style: {
-        "label": "", "width": "data(size)", "height": "data(size)",
-        "font-size": 11, "color": INK, "text-valign": "center", "text-halign": "right", "text-margin-x": 5,
-        "text-outline-color": PAPER, "text-outline-width": 2, "min-zoomed-font-size": 6,
-        "overlay-opacity": 0
-      } },
-      { selector: "node.entity", style: { "label": "data(label)", "shape": "data(shape)" } },
-      { selector: "node.entity.verified", style: {
-        "background-color": INK, "border-width": 0 } },
-      { selector: "node.entity.unverified", style: {
-        "background-color": PAPER, "border-width": 2, "border-style": "dashed", "border-color": INK } },
-      { selector: "node.memory", style: {
-        "shape": "ellipse", "width": 8, "height": 8, "border-width": 1, "border-color": MEM } },
-      { selector: "node.memory.verified", style: { "background-color": MEM } },
-      { selector: "node.memory.unverified", style: { "background-color": PAPER } },
-      { selector: "edge", style: { "curve-style": "bezier", "overlay-opacity": 0, "font-size": 10, "color": INK,
-        "text-background-color": PAPER, "text-background-opacity": 1, "text-background-padding": 2 } },
-      { selector: "edge.relation", style: {
-        "width": 1.5, "target-arrow-shape": "triangle", "arrow-scale": 0.9 } },
-      { selector: "edge.relation.verified", style: {
-        "line-color": INK, "target-arrow-color": INK, "line-style": "solid" } },
-      { selector: "edge.relation.unverified", style: {
-        "line-color": GREY, "target-arrow-color": GREY, "line-style": "dashed" } },
-      { selector: "edge.mention", style: { "width": 1, "line-color": FAINT, "line-style": "dotted" } },
-      { selector: "edge.relation:selected, edge.relation.hover", style: { "label": "data(rel_type)" } },
-      { selector: "node:selected", style: {
-        "outline-width": 4, "outline-color": INK, "outline-offset": 2, "outline-opacity": 1 } },
-      { selector: "edge:selected", style: { "width": 4 } },
-      { selector: "node.match", style: { "font-weight": "bold", "font-size": 13 } },
-      { selector: ".dim, .faded", style: { "opacity": 0.15 } }
-    ];
-  }
-
-  function makeCy() {
-    cy = cytoscape({
-      container: $("cy"), elements: [], style: style(),
-      minZoom: 0.1, maxZoom: 4, boxSelectionEnabled: false, selectionType: "single"
-    });
-    cy.on("select", "node, edge", function (e) { selectedId = e.target.id(); showPanel(e.target.id()); });
-    cy.on("tap", function (e) { if (e.target === cy) { cy.elements().unselect(); closePanel(); } });
-    cy.on("mouseover", "node", function (e) { hoverNode(e.target, e); });
-    cy.on("mouseout", "node", function () { unhover(); });
-    cy.on("mousemove", "node", function (e) { placeTooltip(e); });
-    cy.on("mouseover", "edge.relation", function (e) { e.target.addClass("hover"); });
-    cy.on("mouseout", "edge.relation", function (e) { e.target.removeClass("hover"); });
-    cy.on("pan zoom", function () { $("tooltip").hidden = true; });
-  }
-
-  function toElements(view) {
-    var degree = {};
-    view.edges.forEach(function (e) {
-      degree[e.source] = (degree[e.source] || 0) + 1;
-      degree[e.target] = (degree[e.target] || 0) + 1;
-    });
-    var out = [];
-    view.nodes.forEach(function (n) {
-      var trust = n.verified ? "verified" : "unverified";
-      var size = n.kind === "memory" ? 8 : Math.min(56, 18 + 6 * Math.sqrt(degree[n.id] || 0));
-      out.push({ group: "nodes", classes: n.kind + " " + trust, data: {
-        id: n.id, label: n.label, shape: SHAPES[n.type] || "ellipse", size: size } });
-    });
-    view.edges.forEach(function (e) {
-      var classes = e.kind === "relation" ? "relation " + (e.status === "verified" ? "verified" : "unverified") : "mention";
-      out.push({ group: "edges", classes: classes, data: {
-        id: e.id, source: e.source, target: e.target, rel_type: e.rel_type || "" } });
-    });
-    return out;
-  }
-
-  // Nodes that stay keep their place; a new node starts at the middle of its already-placed neighbours,
-  // so a filter change nudges the picture instead of reshuffling it. Only a first layout is random and fitted.
-  function placeNew(view, prev) {
-    var placed = 0;
-    view.nodes.forEach(function (n) { if (prev[n.id]) placed++; });
-    if (!placed) return false;
-    var neighbours = {};
-    view.edges.forEach(function (e) {
-      (neighbours[e.source] = neighbours[e.source] || []).push(e.target);
-      (neighbours[e.target] = neighbours[e.target] || []).push(e.source);
-    });
-    cy.nodes().forEach(function (node) {
-      var id = node.id();
-      if (prev[id]) { node.position(prev[id]); return; }
-      var near = (neighbours[id] || []).filter(function (o) { return prev[o]; });
-      if (!near.length) return;
-      var x = 0, y = 0;
-      near.forEach(function (o) { x += prev[o].x; y += prev[o].y; });
-      node.position({ x: x / near.length + (Math.random() - 0.5) * 30, y: y / near.length + (Math.random() - 0.5) * 30 });
-    });
-    return true;
-  }
-
-  function render(view) {
-    var prev = {};
-    cy.nodes().forEach(function (node) { var p = node.position(); prev[node.id()] = { x: p.x, y: p.y }; });
-    info = new Map();
-    view.nodes.forEach(function (n) { info.set(n.id, n); });
-    view.edges.forEach(function (e) { info.set(e.id, e); });
-    unhover();
-    var kept = false;
-    cy.batch(function () {
-      cy.elements().remove();
-      cy.add(toElements(view));
-      kept = placeNew(view, prev);
-    });
-    $("empty").hidden = view.nodes.some(function (n) { return n.kind === "entity"; });
-    if (view.nodes.length) {
-      cy.layout({ name: "cose", animate: false, randomize: !kept, fit: !kept,
-                  nodeDimensionsIncludeLabels: true, padding: 40 }).run();
-    }
-    applySearch();
-    var keep = selectedId && cy.getElementById(selectedId);
-    if (keep && keep.nonempty()) {
-      keep.select();
-      showPanel(selectedId);
-    } else {
-      closePanel();
-    }
-  }
-
-  // ---------- hover ----------
-  function hoverNode(node, e) {
-    var nh = node.closedNeighborhood();
-    cy.elements().not(nh).addClass("faded");
-    nh.edges(".relation").addClass("hover");
-    var n = info.get(node.id());
-    var tip = $("tooltip");
-    clear(tip);
-    if (n && n.kind === "entity") {
-      tip.appendChild(el("div", null, n.label + " · " + n.type));
-      tip.appendChild(el("div", "sub", n.n_relations + " relations · " + n.n_memories + " memories"));
-    } else if (n) {
-      tip.appendChild(el("div", null, n.label));
-    }
-    tip.hidden = false;
-    placeTooltip(e);
-  }
-  function placeTooltip(e) {
-    var tip = $("tooltip");
-    if (tip.hidden || !e.renderedPosition) return;
-    var stage = $("stage");
-    var x = e.renderedPosition.x + 14, y = e.renderedPosition.y + 14;
-    x = Math.min(x, stage.clientWidth - tip.offsetWidth - 6);
-    y = Math.min(y, stage.clientHeight - tip.offsetHeight - 6);
-    tip.style.left = Math.max(4, x) + "px";
-    tip.style.top = Math.max(4, y) + "px";
-  }
-  function unhover() {
-    if (!cy) return;
-    cy.elements().removeClass("faded");
-    cy.edges(".hover").removeClass("hover");
-    $("tooltip").hidden = true;
-  }
-
-  // ---------- search (JS only, over the current view): entity name or alias only ----------
-  function matches(n, q) {
-    if (n.kind !== "entity") return false;
-    if ((n.label || "").toLowerCase().indexOf(q) >= 0) return true;
-    return (n.members || []).some(function (m) {
-      if ((m.name || "").toLowerCase().indexOf(q) >= 0) return true;
-      return (m.aliases || []).some(function (a) { return String(a).toLowerCase().indexOf(q) >= 0; });
-    });
-  }
-  function applySearch() {
-    var q = $("search").value.trim().toLowerCase();
-    cy.elements().removeClass("match dim");
-    if (!q) return null;
-    var hits = cy.nodes().filter(function (node) {
-      var n = info.get(node.id());
-      return !!n && matches(n, q);
-    });
-    hits.addClass("match");
-    cy.elements().not(hits).addClass("dim");
-    return hits;
-  }
-
-  // ---------- selection & panel ----------
-  function selectId(id) {
-    var ele = cy.getElementById(id);
-    if (ele.empty()) return;
-    cy.elements().unselect();
-    ele.select();
-    cy.animate({ center: { eles: ele }, duration: 200 });
-  }
-  // The panel builders reach the view they serve only through `nav`: {exists(id), select(id), info(id)}.
-  var cyNav = {
-    exists: function (id) { return !!cy && cy.getElementById(id).nonempty(); },
-    select: function (id) { selectId(id); },
-    info: function (id) { return info.get(id); }
-  };
   function nodeLink(nav, nodeId, text) {
     if (!nav.exists(nodeId)) return el("span", null, text);
     var b = el("button", "link", text);
@@ -400,81 +197,45 @@
     body.appendChild(line);
   }
 
-  // Fills `body` with the panel for one node or edge of a view (the Graph's or the Sphere's).
+  // Fills `body` with the panel for one node or edge of the Sphere's view.
   function buildPanel(body, x, nav) {
     if (x.kind === "entity") entityPanel(body, x, nav);
     else if (x.kind === "memory") memoryPanel(body, x, nav);
     else if (x.kind === "relation") relationPanel(body, x, nav);
     else mentionPanel(body, x, nav);
   }
-  function showPanel(id) {
-    var x = info.get(id);
-    if (!x) { closePanel(); return; }
-    var body = $("panel-body");
-    clear(body);
-    buildPanel(body, x, cyNav);
-    $("panel").hidden = false;
-    $("panel").scrollTop = 0;
-  }
-  function closePanel() {
-    selectedId = null;
-    $("panel").hidden = true;
-    clear($("panel-body"));
-  }
-
   // ---------- api calls ----------
-  var seq = 0;
-  function update() {
-    var mine = ++seq;
-    setStatus("");
-    api.view(readFilters()).then(function (view) {
-      if (mine === seq) render(view);
-    }, fail);
-  }
   function load(payload) {
     setProjects(payload.projects, payload.filters.project);
     applyFilters(payload.filters);
     setSnapshotTime(payload.generated_at);
-    if (tab === "graph") render(payload.view); else graphStale = true;   // a hidden graph renders when it shows
   }
-  // A refresh replaces the snapshot in Python. If a filter changed while it ran, the filter's view may come
-  // from the old snapshot, so the latest refresh always updates the project list and time, then re-renders
-  // with whatever filters are on screen now.
+  // A refresh replaces the snapshot in Python. The project list and time always update; the Sphere asks for its
+  // own data from the new snapshot, now if it is on screen, otherwise when it shows.
   var refreshSeq = 0;
   function refresh() {
-    var mine = ++seq, myRefresh = ++refreshSeq;
+    var myRefresh = ++refreshSeq;
     setStatus("refreshing…");
     api.refresh(readFilters()).then(function (payload) {
       if (myRefresh !== refreshSeq) return;
       setStatus("");
-      if (tab !== "graph") {
-        // the Sphere asks for its own data from the new snapshot; the graph catches up when it shows
-        setProjects(payload.projects, $("project").value);
-        setSnapshotTime(payload.generated_at);
-        graphStale = true;
-        if (tab === "sphere" && views.sphere) views.sphere.refreshed(); else sphereStale = true;
-        return;
-      }
-      sphereStale = true;
-      if (mine === seq) { load(payload); return; }
       setProjects(payload.projects, $("project").value);  // a project that vanished falls back to "all"
       setSnapshotTime(payload.generated_at);
-      update();
+      if (tab === "sphere" && views.sphere) views.sphere.refreshed(); else sphereStale = true;
     }, fail);
   }
 
 
   // ---------- tabs ----------
-  // The window opens on the Sphere. Graph and Sphere share the project, scope and search controls; a change
-  // made on one marks the other stale, and it catches up when it next shows.
+  // The window opens on the Sphere. The Sphere and Extraction are separate; the Sphere's project and scope
+  // controls are the only shared filters, and a change made while the Sphere is hidden catches up when it shows.
   var tab = "sphere";
   var ready = false;        // the initial payload (projects, default filters) has been applied
   var views = {};           // other views, registered by their own scripts: { sphere: {show, hide, ...} }
-  var graphStale = false;   // the filters or snapshot changed while the graph was hidden
-  var sphereStale = false;  // the same, for the Sphere
+  var sphereStale = false;  // the filters or snapshot changed while the Sphere was hidden
   var extStale = true;      // the run list needs (re)loading when the Extraction tab shows
   function switchTab(name) {
-    if (name !== "graph" && name !== "sphere" && name !== "extraction") return;
+    if (name !== "sphere" && name !== "extraction") return;
     var prev = tab;
     tab = name;
     document.body.dataset.tab = name;
@@ -483,14 +244,8 @@
     });
     setStatus("");
     if (prev === "sphere" && name !== "sphere" && views.sphere) views.sphere.hide();
-    if (name === "graph") {
-      cy.resize();
-      if (graphStale) { graphStale = false; update(); } else applySearch();
-    } else if (name === "sphere") {
-      showSphere();
-    } else if (extStale) {
-      loadRuns();
-    }
+    if (name === "sphere") showSphere();
+    else if (extStale) loadRuns();
   }
   function showSphere() {
     var v = views.sphere;
@@ -505,10 +260,10 @@
     views[name] = v;
     if (name === "sphere" && tab === "sphere") showSphere();
   }
-  // The project or a scope changed: the visible view updates now, the other one when it shows.
+  // The project or a scope changed: the Sphere updates now, or when it shows.
   function filtersChanged() {
-    if (tab === "graph") { update(); sphereStale = true; }
-    else if (tab === "sphere") { if (views.sphere) views.sphere.filtersChanged(); graphStale = true; }
+    if (tab === "sphere") { if (views.sphere) views.sphere.filtersChanged(); }
+    else sphereStale = true;
   }
 
   // ---------- extraction ----------
@@ -975,19 +730,15 @@
 
   function wire() {
     $("project").addEventListener("change", function () {
-      if (tab === "extraction") { loadRuns(); graphStale = true; sphereStale = true; }
+      if (tab === "extraction") { loadRuns(); sphereStale = true; }
       else { filtersChanged(); extStale = true; }
     });
     document.querySelectorAll("input.scope").forEach(function (c) { c.addEventListener("change", filtersChanged); });
-    $("show-memories").addEventListener("change", update);   // Graph only: the Sphere always shows memories
     $("search").addEventListener("input", function () {
-      if (tab === "sphere") { if (views.sphere) views.sphere.search($("search").value); } else applySearch();
+      if (views.sphere) views.sphere.search($("search").value);
     });
     $("search").addEventListener("keydown", function (e) {
-      if (e.key !== "Enter") return;
-      if (tab === "sphere") { if (views.sphere) views.sphere.searchEnter(); return; }
-      var hits = applySearch();
-      if (hits && hits.nonempty()) cy.animate({ center: { eles: hits[0] }, duration: 200 });
+      if (e.key === "Enter" && views.sphere) views.sphere.searchEnter();
     });
     $("refresh").addEventListener("click", function () {
       if (tab !== "extraction") { refresh(); extStale = true; } else { loadRuns(); if (selectedRun !== null) selectRun(selectedRun); }
@@ -998,12 +749,8 @@
     $("run-status").addEventListener("change", function () { loadRuns(); });
     $("flagged-only").addEventListener("change", function () { loadRuns(); });
     $("load-more").addEventListener("click", function () { if (nextBefore !== null) loadRuns(nextBefore); });
-    $("panel-close").addEventListener("click", function () { cy.elements().unselect(); closePanel(); });
     document.addEventListener("keydown", function (e) {
-      if (e.key !== "Escape") return;
-      if (tab === "sphere") { if (views.sphere) views.sphere.escape(); return; }
-      cy.elements().unselect();
-      closePanel();
+      if (e.key === "Escape" && tab === "sphere" && views.sphere) views.sphere.escape();
     });
   }
 
@@ -1012,7 +759,6 @@
     started = true;
     api = window.pywebview.api;
     document.body.dataset.tab = tab;
-    makeCy();
     wire();
     setStatus("loading…");
     api.initial().then(function (payload) {
