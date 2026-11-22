@@ -1,26 +1,20 @@
-# Python-generated files
+# Python bytecode and tool caches
 __pycache__/
 *.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
 .pytest_cache/
 
-# Virtual environments
-.venv
+# Build output (`uv build`)
+build/
+dist/
+
+# Virtual environment
+.venv/
 
 # Secrets
 .env
-/plans/
 
-# Local agent workspaces
-.superpowers/
-
-# Local development notes (kept on disk, not published)
+# Local development notes and agent config (kept on disk, not published)
 CLAUDE.md
 .claude/
-docs/superpowers/
-docs/START_HERE.md
-docs/ans.md
-plans_completed/
+/plans/
+/plans_completed/
