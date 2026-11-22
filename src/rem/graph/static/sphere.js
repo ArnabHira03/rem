@@ -1085,8 +1085,7 @@ const view = {
   show() {
     if (!renderer && !initRenderer()) {
       $("sphere-nogl").hidden = false;
-      G.switchTab("graph");
-      G.setStatus("3D view needs WebGL — showing the 2D graph");
+      G.setStatus("3D view needs WebGL");
       return;
     }
     shown = true;

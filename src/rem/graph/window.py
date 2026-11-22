@@ -18,7 +18,7 @@ from rem.graph.view import ALL_SCOPES, build_view, default_filters
 
 TITLE = "rem — graph"
 BACKGROUND = "#111111"  # the dark top bar's colour, so the window never flashes white while it loads
-_FILTER_KEYS = {"project", "scopes", "show_memories"}
+_FILTER_KEYS = {"project", "scopes"}
 _JOB_FILTER_KEYS = {"project", "status", "flagged", "before"}
 _JOB_STATUSES = ("all", "done", "failed", "pending")
 
@@ -73,12 +73,10 @@ MARKERS = ("<!-- @importmap -->", "<!-- @style -->", "<!-- @scripts -->")
 
 
 def render_html() -> str:
-    """graph.html with its styles, the vendored cytoscape, the three.js import map, graph.js and sphere.js inlined:
-    no network, no external files."""
+    """graph.html with its styles, the three.js import map, graph.js and sphere.js inlined: no network, no external files."""
     html = _static_text("graph.html")
     styles = "\n".join(_style(_static_text(name), name) for name in ("graph.css", "sphere.css", "extraction.css"))
     scripts = "\n".join([
-        _script(_static_text("vendor", "cytoscape.min.js"), "cytoscape.min.js"),
         _script(_static_text("graph.js"), "graph.js"),
         _script(_static_text("sphere.js"), "sphere.js", module=True),
     ])
@@ -112,9 +110,7 @@ def _filters(raw: Any) -> dict:
     scopes = raw["scopes"]
     if not isinstance(scopes, list) or not all(isinstance(s, str) and s in ALL_SCOPES for s in scopes):
         raise ValueError(f"invalid scopes: {scopes!r}")
-    if not isinstance(raw["show_memories"], bool):
-        raise ValueError(f"invalid show_memories: {raw['show_memories']!r}")
-    return {"project": _project(raw["project"]), "scopes": list(scopes), "show_memories": raw["show_memories"]}
+    return {"project": _project(raw["project"]), "scopes": list(scopes)}
 
 
 def _job_id(value: Any) -> int:
@@ -159,17 +155,11 @@ class Api:
             "filters": filters,
             "projects": snap.get("projects", []),
             "generated_at": snap.get("generated_at"),
-            "view": build_view(snap, **filters),
         }
 
     def initial(self) -> dict:
         snap = self._snap if self._snap is not None else self._fetch()
         return self._payload(snap, default_filters(snap))
-
-    def view(self, filters: dict) -> dict:
-        f = _filters(filters)
-        snap = self._snap if self._snap is not None else self._fetch()
-        return build_view(snap, **f)
 
     def refresh(self, filters: dict) -> dict:
         f = _filters(filters)
@@ -185,8 +175,8 @@ class Api:
         snap = self._snap if self._snap is not None else self._fetch()
         return {
             "generated_at": snap.get("generated_at"),
-            "full": build_view(snap, project="all", scopes=ALL_SCOPES, show_memories=True),
-            "filtered": build_view(snap, **{**f, "show_memories": True}),
+            "full": build_view(snap, project="all", scopes=ALL_SCOPES),
+            "filtered": build_view(snap, **f),
         }
 
     def jobs(self, filters: dict) -> dict:

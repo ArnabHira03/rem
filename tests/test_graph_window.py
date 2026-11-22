@@ -52,7 +52,6 @@ def test_render_html_is_self_contained():
 
     html = render_html()
     assert "<style>" in html
-    assert (STATIC / "vendor" / "cytoscape.min.js").read_text(encoding="utf-8") in html
     assert (STATIC / "graph.js").read_text(encoding="utf-8") in html
     assert (STATIC / "graph.css").read_text(encoding="utf-8") in html
     assert (STATIC / "sphere.css").read_text(encoding="utf-8") in html
@@ -147,7 +146,7 @@ def test_vendored_files_match_the_recorded_sha256():
 
     recorded = _vendored_hashes()
     names = {name for _, name in recorded}
-    assert {"cytoscape.min.js", "three/three.module.js", "three/three.core.js", "three/LICENSE"} <= names
+    assert {"three/three.module.js", "three/three.core.js", "three/LICENSE"} <= names
     for digest, name in recorded:
         data = (STATIC / "vendor" / name).read_bytes()
         assert hashlib.sha256(data).hexdigest() == digest, name
@@ -196,7 +195,7 @@ def test_page_overrides_browser_blue_selection_focus_and_accent():
         assert rule and "accent-color:#000" in rule.group(1), sel
 
 
-def test_api_initial_view_and_refresh():
+def test_api_initial_and_refresh():
     from rem.graph.window import Api
 
     gone = snapshot(projects=[PROJECTS[0]])
@@ -204,30 +203,30 @@ def test_api_initial_view_and_refresh():
     api = Api(client, cwd="/r/three")
 
     first = api.initial()
-    assert set(first) == {"filters", "projects", "generated_at", "view"}
-    assert first["filters"]["project"] == 3
+    assert set(first) == {"filters", "projects", "generated_at"}
+    assert first["filters"] == {"project": 3, "scopes": ["global", "system", "project"]}
     assert first["projects"] == PROJECTS
     assert first["generated_at"] == "2026-11-17T10:00:00+00:00"
-    assert "ent:qdrant" not in node_ids(first["view"]) and "ent:pytest" in node_ids(first["view"])
     assert len(client.calls) == 1
 
     api.initial()
     assert len(client.calls) == 1  # cached
 
-    with_mems = api.view({**first["filters"], "show_memories": True})
-    assert "mem:m1" in node_ids(with_mems)
+    filtered = api.sphere(first["filters"])["filtered"]
+    assert "mem:m1" in node_ids(filtered)
+    assert "ent:qdrant" not in node_ids(filtered) and "ent:pytest" in node_ids(filtered)
     assert len(client.calls) == 1
 
     refreshed = api.refresh(first["filters"])
     assert len(client.calls) == 2
-    assert set(refreshed) == {"filters", "projects", "generated_at", "view"}
+    assert set(refreshed) == {"filters", "projects", "generated_at"}
     assert refreshed["filters"]["project"] == 3
 
     fallback = api.refresh(first["filters"])
     assert len(client.calls) == 3
     assert client.calls == ["/r/three"] * 3
     assert fallback["filters"]["project"] == "all"
-    assert "ent:qdrant" in node_ids(fallback["view"])
+    assert "ent:qdrant" in node_ids(api.sphere(fallback["filters"])["filtered"])
 
 
 def test_api_coerces_project_strings_from_the_page():
@@ -235,10 +234,10 @@ def test_api_coerces_project_strings_from_the_page():
 
     api = Api(FakeClient([snapshot()]), cwd=None)
     api.initial()
-    base = {"scopes": ["global", "system", "project"], "show_memories": False}
-    assert node_ids(api.view({**base, "project": "3"})) == node_ids(api.view({**base, "project": 3}))
-    assert "ent:qdrant" not in node_ids(api.view({**base, "project": "3"}))
-    assert "ent:qdrant" in node_ids(api.view({**base, "project": "all"}))
+    base = {"scopes": ["global", "system", "project"]}
+    assert node_ids(api.sphere({**base, "project": "3"})["filtered"]) == node_ids(api.sphere({**base, "project": 3})["filtered"])
+    assert "ent:qdrant" not in node_ids(api.sphere({**base, "project": "3"})["filtered"])
+    assert "ent:qdrant" in node_ids(api.sphere({**base, "project": "all"})["filtered"])
 
 
 def test_api_rejects_bad_filters():
@@ -246,11 +245,11 @@ def test_api_rejects_bad_filters():
 
     api = Api(FakeClient([snapshot()]), cwd=None)
     api.initial()
-    base = {"project": "all", "scopes": ["global"], "show_memories": False}
+    base = {"project": "all", "scopes": ["global"]}
     for bad in ({**base, "extra": 1}, {"project": "all"}, {**base, "scopes": ["bogus"]},
-                {**base, "project": "x"}, {**base, "show_memories": "yes"}, {**base, "project": True}):
+                {**base, "project": "x"}, {**base, "project": True}):
         with pytest.raises(ValueError):
-            api.view(bad)
+            api.refresh(bad)
 
 
 def test_api_exposes_only_read_methods():
@@ -258,7 +257,7 @@ def test_api_exposes_only_read_methods():
 
     api = Api(FakeClient([snapshot()]), cwd=None)
     public = {n for n in dir(api) if not n.startswith("_")}
-    assert public == {"initial", "view", "refresh", "sphere", "jobs", "job"}
+    assert public == {"initial", "refresh", "sphere", "jobs", "job"}
 
 
 class FakeJobsClient:
@@ -453,7 +452,7 @@ def sphere_snapshot(generated_at="2026-11-17T10:00:00+00:00"):
     return snap
 
 
-SPHERE_FILTERS = {"project": 3, "scopes": ["global", "project"], "show_memories": False}
+SPHERE_FILTERS = {"project": 3, "scopes": ["global", "project"]}
 
 
 def _ids(view):
@@ -470,7 +469,7 @@ def test_api_sphere_returns_both_views_from_one_snapshot():
     assert out["generated_at"] == "first"
     assert len(client.calls) == 1
     api.sphere(SPHERE_FILTERS)
-    assert len(client.calls) == 1  # cached, like Api.view
+    assert len(client.calls) == 1  # cached, like Api.initial
     api.refresh(SPHERE_FILTERS)
     again = api.sphere(SPHERE_FILTERS)
     assert again["generated_at"] == "second" and len(client.calls) == 2
@@ -482,8 +481,8 @@ def test_api_sphere_full_view_ignores_the_filters():
 
     snap = sphere_snapshot()
     api = Api(FakeClient([snap]), cwd=None)
-    full = build_view(snap, project="all", scopes=ALL_SCOPES, show_memories=True)
-    for filters in (SPHERE_FILTERS, {"project": "1", "scopes": [], "show_memories": True}):
+    full = build_view(snap, project="all", scopes=ALL_SCOPES)
+    for filters in (SPHERE_FILTERS, {"project": "1", "scopes": []}):
         assert api.sphere(filters)["full"] == full
     assert {"ent:qdrant", "ent:pytest", "mem:m2", "mem:m3"} <= _ids(full)[0]
 
@@ -494,27 +493,25 @@ def test_api_sphere_filtered_view_is_a_subset_with_memories_on():
 
     snap = sphere_snapshot()
     out = Api(FakeClient([snap]), cwd=None).sphere(SPHERE_FILTERS)
-    assert out["filtered"] == build_view(snap, project=3, scopes=["global", "project"], show_memories=True)
+    assert out["filtered"] == build_view(snap, project=3, scopes=["global", "project"])
     f_nodes, f_edges = _ids(out["filtered"])
     full_nodes, full_edges = _ids(out["full"])
     assert f_nodes <= full_nodes and f_edges <= full_edges
-    assert "mem:m1" in f_nodes and "mem:m3" in f_nodes  # show_memories forced on
+    assert "mem:m1" in f_nodes and "mem:m3" in f_nodes  # memories are always in the view
     assert "ent:qdrant" not in f_nodes and "mem:m2" not in f_nodes  # project 1 is filtered out
 
 
 @pytest.mark.parametrize("bad", [
-    {"project": "x", "scopes": [], "show_memories": False},
-    {"project": "all", "scopes": ["nope"], "show_memories": False},
-    {"project": "all", "scopes": [], "show_memories": "yes"},
-    {"project": "all", "scopes": []},
+    {"project": "x", "scopes": []},
+    {"project": "all", "scopes": ["nope"]},
+    {"project": "all", "scopes": [], "show_memories": False},
+    {"project": "all"},
     None,
 ])
-def test_api_sphere_rejects_invalid_filters_like_view(bad):
+def test_api_sphere_rejects_invalid_filters(bad):
     from rem.graph.window import Api
 
     api = Api(FakeClient([sphere_snapshot()]), cwd=None)
-    with pytest.raises(ValueError):
-        api.view(bad)
     with pytest.raises(ValueError):
         api.sphere(bad)
 
